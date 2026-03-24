@@ -18,8 +18,8 @@ impl RenderOnce for OpheliaLogo {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let size = self.size;
         let scale = size / 24.0;
-        let ring_color = Colors::primary();
-        let dot_color = Colors::primary_dim();
+        let ring_color = Colors::active();
+        let dot_color = Colors::active_dim();
 
         div().size(px(size)).child(
             canvas(

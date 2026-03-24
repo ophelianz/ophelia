@@ -7,8 +7,9 @@ pub enum IconName {
     ArrowDownToLine,
     CircleCheck,
     CirclePause,
-    HardDrive,
+    Database,
     Plus,
+    Settings
 }
 
 impl IconName {
@@ -18,8 +19,9 @@ impl IconName {
             Self::ArrowDownToLine => "arrow-down-to-line",
             Self::CircleCheck => "circle-check",
             Self::CirclePause => "circle-pause",
-            Self::HardDrive => "hard-drive",
+            Self::Database => "database",
             Self::Plus => "plus",
+            Self::Settings => "settings"
         };
         SharedString::from(format!("icons/{name}.svg"))
     }

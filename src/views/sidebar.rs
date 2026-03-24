@@ -62,7 +62,7 @@ impl RenderOnce for Sidebar {
                             .w_full()
                             .h(px(36.0))
                             .rounded(px(6.0))
-                            .bg(Colors::primary())
+                            .bg(Colors::active())
                             .text_color(Colors::background())
                             .text_sm()
                             .font_weight(gpui::FontWeight::BOLD)
@@ -154,8 +154,8 @@ fn storage_card() -> gpui::Div {
                         .items_center()
                         .gap(px(6.0))
                         .text_xs()
-                        .text_color(Colors::muted_foreground())
-                        .child(icon_sm(IconName::HardDrive, Colors::muted_foreground()))
+                        .text_color(Colors::finished())
+                        .child(icon_sm(IconName::Database, Colors::finished()))
                         .child("Storage"),
                 )
                 .child(
@@ -170,13 +170,13 @@ fn storage_card() -> gpui::Div {
             div()
                 .text_base()
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(Colors::foreground())
+                .text_color(Colors::muted_foreground())
                 .child("284 GB"),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(Colors::secondary())
+                .text_color(Colors::finished())
                 .child("available"),
         )
         // Progress bar
@@ -190,7 +190,7 @@ fn storage_card() -> gpui::Div {
                     div()
                         .h_full()
                         .rounded_full()
-                        .bg(Colors::secondary())
+                        .bg(Colors::finished())
                         .w(px(Spacing::SIDEBAR_WIDTH * used_fraction * 0.75)), // rough width
                 ),
         )

@@ -17,11 +17,12 @@ impl Colors {
     pub fn foreground() -> Rgba       { rgb(0xf5f5f5) }
     pub fn muted_foreground() -> Rgba { rgb(0x737373) }
 
-    // Semantic
-    pub fn primary() -> Rgba     { rgb(0x7ED37F) }
-    pub fn primary_dim() -> Rgba { rgba(0x7ED37F73) }
-    pub fn secondary() -> Rgba   { rgb(0x4A90D9) }
-    pub fn destructive() -> Rgba { rgb(0xE5634D) }
+    // State colors
+    pub fn active() -> Rgba    { rgb(0x7ED37F) }
+    pub fn active_dim() -> Rgba { rgba(0x7ED37F73) }
+    pub fn finished() -> Rgba  { rgb(0x4A90D9) }
+    pub fn queued() -> Rgba    { rgb(0xA78BFA) }
+    pub fn error() -> Rgba     { rgb(0xE5634D) }
 
     // Borders
     pub fn border() -> Rgba      { rgba(0xffffff12) }

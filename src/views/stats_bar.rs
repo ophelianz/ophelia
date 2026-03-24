@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px, App, Window};
+use gpui::{div, prelude::*, px, App, Hsla, Window};
 use crate::ui::prelude::*;
 
 /// 4-column stats grid: speed, active, finished, total
@@ -11,15 +11,17 @@ impl RenderOnce for StatsBar {
             .flex()
             .gap(px(Spacing::CARD_GAP))
             .mb(px(32.0))
-            .child(stat_card("Speed", "0 B/s"))
-            .child(stat_card("Active", "0"))
-            .child(stat_card("Finished", "0"))
-            .child(stat_card("Total", "0"))
+            .child(stat_card("Speed",    "0 B/s", Colors::foreground()))
+            .child(stat_card("Active",   "0",     Colors::active()))
+            .child(stat_card("Finished", "0",     Colors::finished()))
+            .child(stat_card("Total",    "0",     Colors::queued()))
+
     }
 }
 
 /// A single stat card: label + large value.
-fn stat_card(label: &str, value: &str) -> gpui::Div {
+/// The color tints the label to communicate state at a glance.
+fn stat_card(label: &str, value: &str, color: impl Into<Hsla>) -> gpui::Div {
     div()
         .flex_1()
         .flex()
@@ -34,7 +36,7 @@ fn stat_card(label: &str, value: &str) -> gpui::Div {
         .child(
             div()
                 .text_xs()
-                .text_color(Colors::muted_foreground())
+                .text_color(color)
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(label.to_string()),
         )
