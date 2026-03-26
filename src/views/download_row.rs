@@ -42,52 +42,47 @@ impl RenderOnce for DownloadRow {
         div()
             .flex()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(14.0))
             .px(px(Spacing::ROW_PADDING_X))
             .py(px(Spacing::ROW_PADDING_Y))
-            .rounded(px(8.0))
+            .rounded(px(10.0))
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
-            // State-colored file icon on the left
             .child(icon_sm(IconName::ArrowDownToLine, color))
-            // Middle: filename + url + progress bar
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_base()
+                            .font_weight(gpui::FontWeight::BOLD)
                             .child(self.filename),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(Colors::muted_foreground())
                             .child(self.url),
                     )
                     .child(progress_bar(self.progress, color)),
             )
-            // Speed
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(Colors::muted_foreground())
-                    .w(px(72.0))
-                    .child(self.speed),
-            )
-            // State icon
-            .child(icon_sm(self.state.icon(), color))
-            // Pause
-            .child(icon_sm(IconName::CirclePause, Colors::muted_foreground()))
-            // Cancel
             .child(
                 div()
                     .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::muted_foreground())
+                    .w(px(80.0))
+                    .child(self.speed),
+            )
+            .child(icon_sm(self.state.icon(), color))
+            .child(icon_sm(IconName::CirclePause, Colors::muted_foreground()))
+            .child(
+                div()
+                    .text_base()
                     .text_color(Colors::muted_foreground())
                     .child("×"),
             )
@@ -97,7 +92,7 @@ impl RenderOnce for DownloadRow {
 fn progress_bar(progress: f32, color: Hsla) -> gpui::Div {
     div()
         .w_full()
-        .h(px(3.0))
+        .h(px(4.0))
         .rounded_full()
         .bg(Colors::muted())
         .child(

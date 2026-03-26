@@ -37,11 +37,11 @@ impl Colors {
 pub struct Spacing;
 
 impl Spacing {
-    pub const SIDEBAR_WIDTH: f32 = 200.0;
-    pub const CONTENT_PADDING_X: f32 = 24.0;
-    pub const CONTENT_PADDING_Y: f32 = 20.0;
-    pub const CARD_GAP: f32 = 12.0;
-    pub const LIST_GAP: f32 = 6.0;
-    pub const ROW_PADDING_X: f32 = 16.0;
-    pub const ROW_PADDING_Y: f32 = 12.0;
+    pub const SIDEBAR_WIDTH: f32 = 232.0;
+    pub const CONTENT_PADDING_X: f32 = 32.0;
+    pub const CONTENT_PADDING_Y: f32 = 24.0;
+    pub const CARD_GAP: f32 = 14.0;
+    pub const LIST_GAP: f32 = 8.0;
+    pub const ROW_PADDING_X: f32 = 20.0;
+    pub const ROW_PADDING_Y: f32 = 14.0;
 }

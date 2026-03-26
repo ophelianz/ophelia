@@ -7,6 +7,8 @@ use crate::ui::prelude::*;
 pub struct Sidebar {
     pub active_item: usize,
     pub collapsed: bool,
+    pub storage_used_bytes: u64,
+    pub storage_total_bytes: u64,
 }
 
 impl Render for Sidebar {
@@ -18,7 +20,7 @@ impl Render for Sidebar {
             (IconName::CirclePause, "Paused"),
         ];
 
-        let width = if self.collapsed { 48.0 } else { Spacing::SIDEBAR_WIDTH };
+        let width = if self.collapsed { 56.0 } else { Spacing::SIDEBAR_WIDTH };
 
         div()
             .flex()
@@ -32,9 +34,9 @@ impl Render for Sidebar {
             // Logo row — expanded: horizontal with toggle on right
             .when(!self.collapsed, |el| el.child(
                 div()
-                    .px(px(12.0))
-                    .pt(px(12.0))
-                    .mb(px(20.0))
+                    .px(px(16.0))
+                    .pt(px(14.0))
+                    .mb(px(22.0))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -42,12 +44,12 @@ impl Render for Sidebar {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(10.0))
                             .child(OpheliaLogo::new(44.0))
                             .child(
                                 div()
                                     .text_xl()
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui::FontWeight::EXTRA_BOLD)
                                     .text_color(Colors::foreground())
                                     .child("ophelia")
                             )
@@ -67,12 +69,12 @@ impl Render for Sidebar {
             // Logo row — collapsed: vertical, toggle below logo
             .when(self.collapsed, |el| el.child(
                 div()
-                    .pt(px(12.0))
-                    .mb(px(20.0))
+                    .pt(px(14.0))
+                    .mb(px(22.0))
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(10.0))
                     .child(OpheliaLogo::new(44.0))
                     .child(
                         div()
@@ -90,19 +92,19 @@ impl Render for Sidebar {
             // Add Download button
             .when(!self.collapsed, |el| el.child(
                 div()
-                    .px(px(12.0))
-                    .mb(px(16.0))
+                    .px(px(16.0))
+                    .mb(px(18.0))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_center()
                             .w_full()
-                            .h(px(36.0))
-                            .rounded(px(6.0))
+                            .h(px(40.0))
+                            .rounded(px(8.0))
                             .bg(Colors::active())
                             .text_color(Colors::background())
-                            .text_sm()
+                            .text_base()
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("+ Add Download"),
                     ),
@@ -111,15 +113,15 @@ impl Render for Sidebar {
                 div()
                     .flex()
                     .justify_center()
-                    .mb(px(16.0))
+                    .mb(px(18.0))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .w(px(36.0))
-                            .h(px(36.0))
-                            .rounded(px(6.0))
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .rounded(px(8.0))
                             .bg(Colors::active())
                             .child(icon_sm(IconName::Plus, Colors::background())),
                     ),
@@ -127,18 +129,18 @@ impl Render for Sidebar {
             // Separator
             .child(
                 div()
-                    .mx(px(12.0))
-                    .mb(px(8.0))
+                    .mx(px(16.0))
+                    .mb(px(10.0))
                     .h(px(1.0))
                     .bg(Colors::border()),
             )
             // Navigation items
             .child(
                 div()
-                    .px(px(8.0))
+                    .px(px(10.0))
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(4.0))
                     .children(nav_items.into_iter().enumerate().map(|(i, (icon_name, label))| {
                         let is_active = i == self.active_item;
                         nav_item(icon_name, label, is_active, self.collapsed)
@@ -154,8 +156,8 @@ impl Render for Sidebar {
             // Storage card
             .when(!self.collapsed, |el| el.child(
                 div()
-                    .p(px(12.0))
-                    .child(storage_card()),
+                    .p(px(16.0))
+                    .child(storage_card(self.storage_used_bytes, self.storage_total_bytes)),
             ))
     }
 }
@@ -178,32 +180,41 @@ fn nav_item(icon_name: IconName, label: &str, active: bool, collapsed: bool) -> 
         .items_center()
         .when(collapsed, |el| el.justify_center())
         .gap(px(12.0))
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(6.0))
+        .px(px(14.0))
+        .py(px(10.0))
+        .rounded(px(8.0))
         .bg(bg)
         .text_color(text)
         .text_sm()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(icon(icon_name, px(18.0), text))
+        .font_weight(gpui::FontWeight::BOLD)
+        .child(icon(icon_name, px(20.0), text))
         .when(!collapsed, |el| el.child(SharedString::from(label.to_string())))
 }
 
-/// Storage info card at the bottom of the sidebar.
-fn storage_card() -> gpui::Div {
-    let used_fraction: f32 = 0.62; // placeholder
+fn format_storage(bytes: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const TB: u64 = 1_000_000_000_000;
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else {
+        format!("{} GB", bytes / GB)
+    }
+}
+
+fn storage_card(used: u64, total: u64) -> gpui::Div {
+    let fraction = if total > 0 { used as f32 / total as f32 } else { 0.0 };
+    let available = total.saturating_sub(used);
+    let pct = format!("{}%", (fraction * 100.0) as u32);
 
     div()
         .flex()
         .flex_col()
         .gap(px(8.0))
-        .p(px(12.0))
+        .p(px(14.0))
         .rounded(px(8.0))
         .border_1()
         .border_color(Colors::border())
         .bg(Colors::card())
-        // Header row: icon + "Storage" + percentage
-        // I know this is dumb but uhm it looks pretty
         .child(
             div()
                 .flex()
@@ -214,7 +225,8 @@ fn storage_card() -> gpui::Div {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_xs()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::finished())
                         .child(icon_sm(IconName::Database, Colors::finished()))
                         .child("Storage"),
@@ -223,24 +235,22 @@ fn storage_card() -> gpui::Div {
                     div()
                         .text_xs()
                         .text_color(Colors::muted_foreground())
-                        .child("62%"),
+                        .child(pct),
                 ),
         )
-        // Available space
         .child(
             div()
-                .text_base()
-                .font_weight(gpui::FontWeight::BOLD)
+                .text_lg()
+                .font_weight(gpui::FontWeight::EXTRA_BOLD)
                 .text_color(Colors::muted_foreground())
-                .child("284 GB"),
+                .child(format_storage(available)),
         )
         .child(
             div()
-                .text_xs()
+                .text_sm()
                 .text_color(Colors::finished())
                 .child("available"),
         )
-        // Progress bar
         .child(
             div()
                 .w_full()
@@ -252,7 +262,7 @@ fn storage_card() -> gpui::Div {
                         .h_full()
                         .rounded_full()
                         .bg(Colors::finished())
-                        .w(px(Spacing::SIDEBAR_WIDTH * used_fraction * 0.75)), // rough width
+                        .w(px(Spacing::SIDEBAR_WIDTH * fraction * 0.75)),
                 ),
         )
     }

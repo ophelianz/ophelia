@@ -19,7 +19,12 @@ pub struct MainWindow {
 impl MainWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            sidebar: cx.new(|_| Sidebar { active_item: 0, collapsed: false }),
+            sidebar: cx.new(|_| Sidebar {
+                    active_item: 0,
+                    collapsed: false,
+                    storage_used_bytes: 0,
+                    storage_total_bytes: 0,
+                }),
         }
     }
 }
@@ -41,7 +46,7 @@ impl Render for MainWindow {
                     .flex()
                     .items_center()
                     .justify_end()
-                    .px(px(16.0))
+                    .px(px(20.0))
                     .border_b_1()
                     .border_color(Colors::border())
                     .child(icon_sm(IconName::Settings, Colors::muted_foreground()))
@@ -68,8 +73,8 @@ impl Render for MainWindow {
                                     .overflow_y_scroll()
                                     .px(px(Spacing::CONTENT_PADDING_X))
                                     .py(px(Spacing::CONTENT_PADDING_Y))
-                                    .child(StatsBar)
-                                    .child(DownloadList),
+                                    .child(StatsBar::new())
+                                    .child(DownloadList::new()),
                             ),
                     )
             )
