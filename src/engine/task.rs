@@ -10,25 +10,41 @@ use crate::engine::chunk;
 use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
 const DEFAULT_CHUNKS: usize = 8;
+const WRITE_BUFFER_SIZE: usize = 64 * 1024;
 
 struct ProbeResult {
     content_length: Option<u64>,
     accepts_ranges: bool,
 }
 
-async fn probe(url: &str) -> Result<ProbeResult, reqwest::Error> {
-    let response = reqwest::Client::new().head(url).send().await?;
-    let content_length = response.content_length();
-    let accepts_ranges = response
-        .headers()
-        .get("accept-ranges")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "bytes")
-        .unwrap_or(false);
-    Ok(ProbeResult {
-        content_length,
-        accepts_ranges,
-    })
+async fn probe(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<ProbeResult, reqwest::Error> {
+    let response = client
+        .get(url)
+        .header("Range", "bytes=0-0")
+        .send()
+        .await?;
+
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let total = response
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split('/').last())
+            .and_then(|v| v.parse::<u64>().ok());
+        Ok(ProbeResult {
+            content_length: total,
+            accepts_ranges: true,
+        })
+    } else {
+        let content_length = response.content_length();
+        Ok(ProbeResult {
+            content_length,
+            accepts_ranges: false,
+        })
+    }
 }
 
 pub async fn download_task(
@@ -47,8 +63,13 @@ pub async fn download_task(
         });
     };
 
-    // 1. Probe: HEAD request for size and range support
-    let probe_result = match probe(&url).await {
+    // Single client shared across probe and all chunk tasks
+    // reqwest::Client pools connections internally,
+    // this enables HTTP/2 multiplexing
+    let client = Arc::new(reqwest::Client::new());
+
+    // 1. Probe: GET with Range to test server capabilities
+    let probe_result = match probe(&client, &url).await {
         Ok(p) => p,
         Err(_) => {
             send(DownloadStatus::Error, 0, None, 0);
@@ -59,8 +80,7 @@ pub async fn download_task(
     let total_bytes = match probe_result.content_length {
         Some(len) => len,
         None => {
-            // Unknown size, single stream fallback
-            single_download(id, url, destination, progress_tx).await;
+            single_download(id, client, url, destination, progress_tx).await;
             return;
         }
     };
@@ -93,18 +113,18 @@ pub async fn download_task(
 
     // 5. Spawn chunk download tasks
     send(DownloadStatus::Downloading, 0, Some(total_bytes), 0);
-    let started = Instant::now();
 
     let mut handles = Vec::with_capacity(chunks.len());
     for i in 0..chunks.len() {
         let url = url.clone();
+        let client = Arc::clone(&client);
         let file = Arc::clone(&file);
         let counters = Arc::clone(&chunk_downloaded);
         let start = chunks.starts[i];
         let end = chunks.ends[i];
 
         let handle = tokio::spawn(async move {
-            download_chunk(i, &url, start, end, &file, &counters).await
+            download_chunk(&client, &url, start, end, &file, &counters, i).await
         });
         handles.push(handle);
     }
@@ -113,6 +133,7 @@ pub async fn download_task(
     let progress_handle = {
         let counters = Arc::clone(&chunk_downloaded);
         let progress_tx = progress_tx.clone();
+        let started = Instant::now();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -150,6 +171,7 @@ pub async fn download_task(
     }
 
     progress_handle.abort();
+    drop(file);
 
     if all_ok {
         send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
@@ -168,25 +190,37 @@ pub async fn download_task(
 }
 
 async fn download_chunk(
-    index: usize,
+    client: &reqwest::Client,
     url: &str,
     start: u64,
     end: u64,
     file: &std::fs::File,
     counters: &[AtomicU64],
+    index: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
     let range = format!("bytes={}-{}", start, end - 1);
     let response = client.get(url).header("Range", range).send().await?;
 
     let mut stream = response.bytes_stream();
     let mut offset = start;
+    let mut buffer = Vec::with_capacity(WRITE_BUFFER_SIZE);
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk?;
-        write_at(file, &bytes, offset)?;
-        offset += bytes.len() as u64;
-        counters[index].fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        buffer.extend_from_slice(&bytes);
+
+        if buffer.len() >= WRITE_BUFFER_SIZE {
+            write_at(file, &buffer, offset)?;
+            offset += buffer.len() as u64;
+            counters[index].fetch_add(buffer.len() as u64, Ordering::Relaxed);
+            buffer.clear();
+        }
+    }
+
+    // Flush remaining bytes
+    if !buffer.is_empty() {
+        write_at(file, &buffer, offset)?;
+        counters[index].fetch_add(buffer.len() as u64, Ordering::Relaxed);
     }
 
     Ok(())
@@ -195,6 +229,7 @@ async fn download_chunk(
 /// Fallback for servers that don't report Content-Length
 async fn single_download(
     id: DownloadId,
+    client: Arc<reqwest::Client>,
     url: String,
     destination: PathBuf,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
@@ -209,7 +244,7 @@ async fn single_download(
         });
     };
 
-    let response = match reqwest::get(&url).await {
+    let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(_) => {
             send(DownloadStatus::Error, 0, None, 0);

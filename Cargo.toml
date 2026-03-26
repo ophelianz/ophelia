@@ -11,3 +11,6 @@ tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "fs", "sy
 
 [dev-dependencies]
 proptest = "1.11.0"
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+wiremock = "0.6.5"
