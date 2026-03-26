@@ -1,3 +1,17 @@
+# cargo artifacts
 /target
+
+# bundle artifacts
+**.AppImage
+**.dmg
+package/inno/Output/*.exe
+
+# ide bs
+.vscode/
+.zed/
+
+# misc
+**/.DS_Store
+.env
 *.html
 docs/
