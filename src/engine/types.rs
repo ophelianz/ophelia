@@ -1,4 +1,9 @@
+//! Protocol-agnostic types shared across the entire engine.
+//! Nothing in this file should be specific to HTTP, FTP, or any other protocol.
+
 use std::path::PathBuf;
+
+use crate::engine::http::HttpDownloadConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DownloadId(pub u64);
@@ -13,7 +18,7 @@ pub enum DownloadStatus {
 }
 
 pub enum EngineCommand {
-    Add { id: DownloadId, url: String, destination: PathBuf, config: DownloadConfig },
+    AddHttp { id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig },
     Pause { id: DownloadId },
     Resume { id: DownloadId },
     Cancel { id: DownloadId },
@@ -27,24 +32,4 @@ pub struct ProgressUpdate {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_sec: u64,
-}
-
-pub struct DownloadConfig {
-    pub max_connections: usize,
-    pub write_buffer_size: usize,
-    pub progress_interval_ms: u64,
-    pub stall_timeout_secs: u64,
-    pub max_retries_per_chunk: u32,
-}
-
-impl Default for DownloadConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: 8,
-            write_buffer_size: 64 * 1024,
-            progress_interval_ms: 30,
-            stall_timeout_secs: 100,
-            max_retries_per_chunk: 5,
-        }
-    }
 }

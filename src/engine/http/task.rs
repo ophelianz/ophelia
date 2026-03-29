@@ -1,3 +1,10 @@
+//! HTTP/HTTPS download pipeline.
+//!
+//! Probes server capabilities via GET+Range, then either drives parallel
+//! chunked range requests (206) or falls back to a single stream (200).
+//! Progress is tracked via per-chunk atomics; the timer starts after chunks
+//! are spawned to exclude probe and allocation time from speed calculations.
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,7 +14,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::engine::chunk;
-use crate::engine::types::{DownloadId, DownloadStatus, DownloadConfig, ProgressUpdate};
+use crate::engine::http::HttpDownloadConfig;
+use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
 struct ProbeResult {
     content_length: Option<u64>,
@@ -48,7 +56,7 @@ pub async fn download_task(
     id: DownloadId,
     url: String,
     destination: PathBuf,
-    config: DownloadConfig,
+    config: HttpDownloadConfig,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
 ) {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
@@ -61,9 +69,9 @@ pub async fn download_task(
         });
     };
 
-    // Single client shared across probe and all chunk tasks
-    // reqwest::Client pools connections internally,
-    // this enables HTTP/2 multiplexing
+    // Single client shared across probe and all chunk tasks.
+    // reqwest::Client pools connections internally; this enables HTTP/2 multiplexing
+    // so all range requests share one TCP+TLS connection where supported.
     let client = Arc::new(reqwest::Client::new());
 
     // 1. Probe: GET with Range to test server capabilities
@@ -129,7 +137,7 @@ pub async fn download_task(
         handles.push(handle);
     }
 
-    // 6. Progress reporting loop: poll atomics every 100ms
+    // 6. Progress reporting loop
     let progress_handle = {
         let counters = Arc::clone(&chunk_downloaded);
         let progress_tx = progress_tx.clone();
@@ -227,7 +235,8 @@ async fn download_chunk(
     Ok(())
 }
 
-/// Fallback for servers that don't report Content-Length
+/// Fallback for servers that don't report Content-Length.
+/// Uses tokio::fs for async sequential writes since there's only one writer.
 async fn single_download(
     id: DownloadId,
     client: Arc<reqwest::Client>,

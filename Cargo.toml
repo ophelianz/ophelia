@@ -3,6 +3,12 @@ name = "ophelia"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.bundle]
+name = "Ophelia"
+identifier = "com.ophelia.app"
+icon = ["assets/AppIcon.icns"]
+category = "public.app-category.utilities"
+
 [dependencies]
 futures = "0.3.32"
 gpui = { package = "gpui-ce", version = "0.3" }

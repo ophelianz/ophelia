@@ -1,3 +1,10 @@
+//! Byte-range chunking in struct-of-arrays (SoA) layout.
+//!
+//! `ChunkList` stores chunk boundaries and state as parallel vecs rather than
+//! a vec of structs - cache-friendly for scanning operations across all chunks.
+//! The `split` function and this layout are protocol-agnostic: any resumable
+//! download protocol that supports byte ranges can use them.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkStatus {
     Pending,

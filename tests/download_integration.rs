@@ -3,8 +3,8 @@ use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
-use ophelia::engine::task::download_task;
-use ophelia::engine::types::{DownloadConfig, DownloadId, DownloadStatus, ProgressUpdate};
+use ophelia::engine::http::{download_task, HttpDownloadConfig};
+use ophelia::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
 fn test_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
@@ -72,7 +72,7 @@ async fn parallel_download_with_range_support() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    download_task(DownloadId(0), url, dest.clone(), DownloadConfig::default(), tx).await;
+    download_task(DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx).await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -101,7 +101,7 @@ async fn single_stream_fallback_no_range_support() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    download_task(DownloadId(0), url, dest.clone(), DownloadConfig::default(), tx).await;
+    download_task(DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx).await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -129,7 +129,7 @@ async fn fallback_when_no_content_length() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    download_task(DownloadId(0), url, dest.clone(), DownloadConfig::default(), tx).await;
+    download_task(DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx).await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -148,7 +148,7 @@ async fn error_on_server_down() {
         DownloadId(0),
         "http://127.0.0.1:1".to_string(),
         dest,
-        DownloadConfig::default(),
+        HttpDownloadConfig::default(),
         tx,
     )
     .await;
@@ -174,7 +174,7 @@ async fn progress_reports_increasing_bytes() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    download_task(DownloadId(0), url, dest, DownloadConfig::default(), tx).await;
+    download_task(DownloadId(0), url, dest, HttpDownloadConfig::default(), tx).await;
 
     let updates = drain_progress(&mut rx).await;
 
