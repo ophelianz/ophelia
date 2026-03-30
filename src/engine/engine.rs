@@ -1,8 +1,8 @@
-//! The download engine actor.
+//! The download engine actor!
 //!
-//! Owns the tokio runtime and sits between the UI thread and download tasks.
-//! Commands arrive over an mpsc channel; progress updates flow back the other way.
-//! The task map and ID counter live inside the async run() loop so no mutexes needed.
+//! Owns the tokio runtime and sits between the UI thread and download tasks
+//! Commands arrive over an mpsc channel; progress updates flow back the other way
+//! The task map and ID counter live inside the async run() loop so no mutexes needed
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -96,6 +96,7 @@ impl EngineActor {
     }
 
     fn handle_add_http(&mut self, id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig) {
+        tracing::info!(id = id.0, %url, "download queued");
         let tx = self.progress_tx.clone();
         let handle = tokio::spawn(download_task(id, url, destination, config, tx));
         self.tasks.insert(id, handle);
@@ -103,11 +104,13 @@ impl EngineActor {
 
     fn handle_cancel(&mut self, id: DownloadId) {
         if let Some(handle) = self.tasks.remove(&id) {
+            tracing::info!(id = id.0, "download cancelled");
             handle.abort();
         }
     }
 
     fn handle_shutdown(&mut self) {
+        tracing::info!(count = self.tasks.len(), "engine shutting down, aborting active tasks");
         for (_, handle) in self.tasks.drain() {
             handle.abort();
         }

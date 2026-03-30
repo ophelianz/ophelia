@@ -5,6 +5,7 @@
 //! Progress is tracked via per-chunk atomics; the timer starts after chunks
 //! are spawned to exclude probe and allocation time from speed calculations.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use reqwest::StatusCode;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::engine::chunk;
 use crate::engine::http::HttpDownloadConfig;
@@ -88,6 +90,7 @@ async fn probe(
     }
 }
 
+#[tracing::instrument(name = "download", skip(config, progress_tx), fields(id = id.0, %url))]
 pub async fn download_task(
     id: DownloadId,
     url: String,
@@ -119,9 +122,16 @@ pub async fn download_task(
         }
     };
 
+    tracing::debug!(
+        accepts_ranges = probe_result.accepts_ranges,
+        content_length = probe_result.content_length,
+        "probe complete"
+    );
+
     let total_bytes = match probe_result.content_length {
         Some(len) => len,
         None => {
+            tracing::info!("no content-length, falling back to single stream");
             single_download(id, client, url, destination, config.stall_timeout_secs, progress_tx).await;
             return;
         }
@@ -143,6 +153,7 @@ pub async fn download_task(
 
     // 3. Split into chunks, extract config values before moving into spawns
     let num_chunks = if probe_result.accepts_ranges { config.max_connections } else { 1 };
+    tracing::info!(total_bytes, num_chunks, "starting chunked download");
     let write_buffer_size = config.write_buffer_size;
     let progress_interval_ms = config.progress_interval_ms;
     let stall_timeout = Duration::from_secs(config.stall_timeout_secs);
@@ -153,24 +164,28 @@ pub async fn download_task(
     let chunk_downloaded: Arc<Vec<AtomicU64>> =
         Arc::new((0..chunks.len()).map(|_| AtomicU64::new(0)).collect());
 
-    // 5. Spawn chunk tasks, each with its own retry loop
+    // 5. Slow-start: open 1 connection first, double the concurrency limit on each
+    //    successful chunk completion up to num_chunks. Avoids bursting all connections
+    //    at once, which often triggers 429s from CDNs that rate-limit by connection count.
     send(DownloadStatus::Downloading, 0, Some(total_bytes), 0);
 
-    let mut handles = Vec::with_capacity(chunks.len());
-    for i in 0..chunks.len() {
+    let mut pending: VecDeque<usize> = (0..chunks.len()).collect();
+    let mut join_set: JoinSet<Result<(), String>> = JoinSet::new();
+    let mut current_limit: usize = 1;
+    let mut all_ok = true;
+
+    // Builds the retry-loop future for chunk i. Clones Arc handles so the future is 'static.
+    let make_chunk_fut = |i: usize| {
         let url = url.clone();
         let client = Arc::clone(&client);
         let file = Arc::clone(&file);
         let counters = Arc::clone(&chunk_downloaded);
         let start = chunks.starts[i];
         let end = chunks.ends[i];
-
-        let handle = tokio::spawn(async move {
+        async move {
             let mut attempt = 0u32;
             loop {
-                // On retry, resume from where the last attempt left off
                 let resume_from = counters[i].load(Ordering::Relaxed);
-
                 match download_chunk(
                     &client, &url,
                     start, end, resume_from,
@@ -181,28 +196,28 @@ pub async fn download_task(
                     Err(ChunkError::Fatal(msg)) => break Err(msg),
                     Err(ChunkError::NonRetryable) => break Err("non-retryable server error".into()),
                     Err(ChunkError::Retryable { retry_after }) => {
-                        // Progress-based reset: if this attempt made progress, don't count it as a failure
                         if counters[i].load(Ordering::Relaxed) > resume_from {
                             attempt = 0;
                         } else {
                             attempt += 1;
                         }
-
                         if attempt >= max_retries {
+                            tracing::error!(chunk = i, attempt, "max retries exceeded");
                             break Err("max retries exceeded".into());
                         }
-
-                        // Exponential backoff: 2s, 4s, 8s... capped at 30s
-                        // Exponent is capped at 5 to prevent u64 overflow before the min
                         let delay = retry_after.unwrap_or_else(|| {
                             Duration::from_secs(2u64.pow(attempt.min(5)).min(30))
                         });
+                        tracing::warn!(chunk = i, attempt, delay_secs = delay.as_secs(), "retrying chunk");
                         tokio::time::sleep(delay).await;
                     }
                 }
             }
-        });
-        handles.push(handle);
+        }
+    };
+
+    if let Some(i) = pending.pop_front() {
+        join_set.spawn(make_chunk_fut(i));
     }
 
     // 6. Progress reporting loop
@@ -237,12 +252,22 @@ pub async fn download_task(
         })
     };
 
-    // 7. Wait for all chunks
-    let mut all_ok = true;
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            _ => all_ok = false,
+    // 7. Drain completed chunks; ramp up limit on success, fill to new limit from pending
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => {
+                current_limit = (current_limit * 2).min(num_chunks);
+            }
+            _ => {
+                all_ok = false;
+            }
+        }
+        while join_set.len() < current_limit {
+            if let Some(i) = pending.pop_front() {
+                join_set.spawn(make_chunk_fut(i));
+            } else {
+                break;
+            }
         }
     }
 
@@ -250,12 +275,14 @@ pub async fn download_task(
     drop(file);
 
     if all_ok {
+        tracing::info!(total_bytes, "download finished");
         send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
     } else {
         let total_downloaded: u64 = chunk_downloaded
             .iter()
             .map(|a| a.load(Ordering::Relaxed))
             .sum();
+        tracing::error!(total_downloaded, total_bytes, "download failed");
         send(DownloadStatus::Error, total_downloaded, Some(total_bytes), 0);
     }
 }

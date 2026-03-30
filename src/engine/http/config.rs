@@ -2,6 +2,7 @@
 //! Fields here are intentionally HTTP-specific: connection count, stall detection,
 //! and retry behavior are concepts that don't apply to all protocols.
 
+#[derive(Debug)]
 pub struct HttpDownloadConfig {
     pub max_connections: usize,
     pub write_buffer_size: usize,
