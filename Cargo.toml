@@ -14,6 +14,9 @@ futures = "0.3.32"
 gpui = { package = "gpui-ce", version = "0.3" }
 reqwest = { version = "0.13.2", features = ["stream"] }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
