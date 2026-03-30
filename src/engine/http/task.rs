@@ -8,14 +8,50 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use reqwest::StatusCode;
 use tokio::sync::mpsc;
 
 use crate::engine::chunk;
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
+
+/// Classification of chunk-level errors, used to decide whether to retry.
+enum ChunkError {
+    /// Transient failure. `retry_after` is populated from the Retry-After header on 429.
+    Retryable { retry_after: Option<Duration> },
+    /// Server refused definitively (403, 404, 410). Retrying won't help.
+    NonRetryable,
+    /// Local failure (disk full, permission denied). Stops the entire download.
+    Fatal(String),
+}
+
+fn classify_status(status: StatusCode, headers: &reqwest::header::HeaderMap) -> ChunkError {
+    match status.as_u16() {
+        403 | 404 | 410 => ChunkError::NonRetryable,
+        429 => {
+            let retry_after = headers
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            ChunkError::Retryable { retry_after }
+        }
+        500..=599 => ChunkError::Retryable { retry_after: None },
+        _ => ChunkError::NonRetryable,
+    }
+}
+
+fn classify_io_error(e: std::io::Error) -> ChunkError {
+    match e.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied => {
+            ChunkError::Fatal(e.to_string())
+        }
+        _ => ChunkError::Retryable { retry_after: None },
+    }
+}
 
 struct ProbeResult {
     content_length: Option<u64>,
@@ -32,7 +68,7 @@ async fn probe(
         .send()
         .await?;
 
-    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+    if response.status() == StatusCode::PARTIAL_CONTENT {
         let total = response
             .headers()
             .get("content-range")
@@ -86,7 +122,7 @@ pub async fn download_task(
     let total_bytes = match probe_result.content_length {
         Some(len) => len,
         None => {
-            single_download(id, client, url, destination, progress_tx).await;
+            single_download(id, client, url, destination, config.stall_timeout_secs, progress_tx).await;
             return;
         }
     };
@@ -105,21 +141,19 @@ pub async fn download_task(
     }
     let file = Arc::new(file);
 
-    // 3. Split into chunks
-    let num_chunks = if probe_result.accepts_ranges {
-        config.max_connections
-    } else {
-        1
-    };
+    // 3. Split into chunks, extract config values before moving into spawns
+    let num_chunks = if probe_result.accepts_ranges { config.max_connections } else { 1 };
     let write_buffer_size = config.write_buffer_size;
     let progress_interval_ms = config.progress_interval_ms;
+    let stall_timeout = Duration::from_secs(config.stall_timeout_secs);
+    let max_retries = config.max_retries_per_chunk;
     let chunks = chunk::split(total_bytes, num_chunks);
 
     // 4. Shared progress: one atomic counter per chunk
     let chunk_downloaded: Arc<Vec<AtomicU64>> =
         Arc::new((0..chunks.len()).map(|_| AtomicU64::new(0)).collect());
 
-    // 5. Spawn chunk download tasks
+    // 5. Spawn chunk tasks, each with its own retry loop
     send(DownloadStatus::Downloading, 0, Some(total_bytes), 0);
 
     let mut handles = Vec::with_capacity(chunks.len());
@@ -132,7 +166,41 @@ pub async fn download_task(
         let end = chunks.ends[i];
 
         let handle = tokio::spawn(async move {
-            download_chunk(&client, &url, start, end, &file, &counters, i, write_buffer_size).await
+            let mut attempt = 0u32;
+            loop {
+                // On retry, resume from where the last attempt left off
+                let resume_from = counters[i].load(Ordering::Relaxed);
+
+                match download_chunk(
+                    &client, &url,
+                    start, end, resume_from,
+                    &file, &counters, i,
+                    write_buffer_size, stall_timeout,
+                ).await {
+                    Ok(()) => break Ok(()),
+                    Err(ChunkError::Fatal(msg)) => break Err(msg),
+                    Err(ChunkError::NonRetryable) => break Err("non-retryable server error".into()),
+                    Err(ChunkError::Retryable { retry_after }) => {
+                        // Progress-based reset: if this attempt made progress, don't count it as a failure
+                        if counters[i].load(Ordering::Relaxed) > resume_from {
+                            attempt = 0;
+                        } else {
+                            attempt += 1;
+                        }
+
+                        if attempt >= max_retries {
+                            break Err("max retries exceeded".into());
+                        }
+
+                        // Exponential backoff: 2s, 4s, 8s... capped at 30s
+                        // Exponent is capped at 5 to prevent u64 overflow before the min
+                        let delay = retry_after.unwrap_or_else(|| {
+                            Duration::from_secs(2u64.pow(attempt.min(5)).min(30))
+                        });
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
         });
         handles.push(handle);
     }
@@ -144,7 +212,7 @@ pub async fn download_task(
         let started = Instant::now();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(progress_interval_ms)).await;
+                tokio::time::sleep(Duration::from_millis(progress_interval_ms)).await;
                 let total_downloaded: u64 = counters
                     .iter()
                     .map(|a| a.load(Ordering::Relaxed))
@@ -188,47 +256,60 @@ pub async fn download_task(
             .iter()
             .map(|a| a.load(Ordering::Relaxed))
             .sum();
-        send(
-            DownloadStatus::Error,
-            total_downloaded,
-            Some(total_bytes),
-            0,
-        );
+        send(DownloadStatus::Error, total_downloaded, Some(total_bytes), 0);
     }
 }
 
 async fn download_chunk(
     client: &reqwest::Client,
     url: &str,
-    start: u64,
-    end: u64,
+    chunk_start: u64,
+    chunk_end: u64,
+    resume_from: u64,
     file: &std::fs::File,
     counters: &[AtomicU64],
     index: usize,
     write_buffer_size: usize,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let range = format!("bytes={}-{}", start, end - 1);
-    let response = client.get(url).header("Range", range).send().await?;
+    stall_timeout: Duration,
+) -> Result<(), ChunkError> {
+    // Resume from where the last attempt left off
+    let byte_start = chunk_start + resume_from;
+    let range = format!("bytes={}-{}", byte_start, chunk_end - 1);
+
+    let response = client
+        .get(url)
+        .header("Range", range)
+        .send()
+        .await
+        .map_err(|_| ChunkError::Retryable { retry_after: None })?;
+
+    if !response.status().is_success() {
+        return Err(classify_status(response.status(), response.headers()));
+    }
 
     let mut stream = response.bytes_stream();
-    let mut offset = start;
+    let mut offset = byte_start;
     let mut buffer = Vec::with_capacity(write_buffer_size);
 
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        buffer.extend_from_slice(&bytes);
-
-        if buffer.len() >= write_buffer_size {
-            write_at(file, &buffer, offset)?;
-            offset += buffer.len() as u64;
-            counters[index].fetch_add(buffer.len() as u64, Ordering::Relaxed);
-            buffer.clear();
+    loop {
+        match tokio::time::timeout(stall_timeout, stream.next()).await {
+            Err(_elapsed) => return Err(ChunkError::Retryable { retry_after: None }),
+            Ok(None) => break,
+            Ok(Some(Err(_))) => return Err(ChunkError::Retryable { retry_after: None }),
+            Ok(Some(Ok(bytes))) => {
+                buffer.extend_from_slice(&bytes);
+                if buffer.len() >= write_buffer_size {
+                    write_at(file, &buffer, offset).map_err(classify_io_error)?;
+                    offset += buffer.len() as u64;
+                    counters[index].fetch_add(buffer.len() as u64, Ordering::Relaxed);
+                    buffer.clear();
+                }
+            }
         }
     }
 
-    // Flush remaining bytes
     if !buffer.is_empty() {
-        write_at(file, &buffer, offset)?;
+        write_at(file, &buffer, offset).map_err(classify_io_error)?;
         counters[index].fetch_add(buffer.len() as u64, Ordering::Relaxed);
     }
 
@@ -237,13 +318,17 @@ async fn download_chunk(
 
 /// Fallback for servers that don't report Content-Length.
 /// Uses tokio::fs for async sequential writes since there's only one writer.
+/// No retry — unknown-length streams can't be resumed to a byte offset.
 async fn single_download(
     id: DownloadId,
     client: Arc<reqwest::Client>,
     url: String,
     destination: PathBuf,
+    stall_timeout_secs: u64,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
 ) {
+    let stall_timeout = Duration::from_secs(stall_timeout_secs);
+
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
         let _ = progress_tx.send(ProgressUpdate {
             id,
@@ -256,18 +341,12 @@ async fn single_download(
 
     let response = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(_) => {
-            send(DownloadStatus::Error, 0, None, 0);
-            return;
-        }
+        Err(_) => { send(DownloadStatus::Error, 0, None, 0); return; }
     };
 
     let mut file = match tokio::fs::File::create(&destination).await {
         Ok(f) => f,
-        Err(_) => {
-            send(DownloadStatus::Error, 0, None, 0);
-            return;
-        }
+        Err(_) => { send(DownloadStatus::Error, 0, None, 0); return; }
     };
 
     let mut downloaded: u64 = 0;
@@ -276,32 +355,24 @@ async fn single_download(
 
     send(DownloadStatus::Downloading, 0, None, 0);
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(_) => {
+    loop {
+        match tokio::time::timeout(stall_timeout, stream.next()).await {
+            Err(_) | Ok(Some(Err(_))) => {
                 send(DownloadStatus::Error, downloaded, None, 0);
                 return;
             }
-        };
-
-        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-            .await
-            .is_err()
-        {
-            send(DownloadStatus::Error, downloaded, None, 0);
-            return;
+            Ok(None) => break,
+            Ok(Some(Ok(chunk))) => {
+                if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.is_err() {
+                    send(DownloadStatus::Error, downloaded, None, 0);
+                    return;
+                }
+                downloaded += chunk.len() as u64;
+                let elapsed = started.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.0 { (downloaded as f64 / elapsed) as u64 } else { 0 };
+                send(DownloadStatus::Downloading, downloaded, None, speed);
+            }
         }
-
-        downloaded += chunk.len() as u64;
-        let elapsed = started.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            (downloaded as f64 / elapsed) as u64
-        } else {
-            0
-        };
-
-        send(DownloadStatus::Downloading, downloaded, None, speed);
     }
 
     send(DownloadStatus::Finished, downloaded, None, 0);
