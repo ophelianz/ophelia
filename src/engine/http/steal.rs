@@ -1,4 +1,9 @@
-//! Work stealing - splits the largest active chunk when a worker goes idle.
+//! Work stealing and hedging - the two forms of work redistribution.
+//!
+//! `try_steal` splits the largest active chunk when a worker goes idle.
+//! `try_hedge` races a duplicate connection on the same remaining range when
+//! nothing is large enough to split. Write-at is idempotent so both workers
+//! writing the same bytes is safe; the first to finish snaps the original.
 //!
 //! When the pending queue empties and a worker finishes, `try_steal` finds the
 //! active slot with the most remaining bytes and atomically splits it. The back
@@ -75,4 +80,57 @@ pub fn try_steal(
         stolen_bytes = victim_end - midpoint,
         "work stolen"
     );
+}
+
+/// Races a duplicate connection against the most-behind active slot.
+///
+/// Called when `try_steal` found nothing large enough to split.
+/// Typically at the tail of a download when a fast connection goes idle but the last chunk
+/// is too small to bisect cleanly. The hedge writes the same bytes via write_at
+/// (idempotent). The caller snaps the original's counter when the hedge finishes
+/// and kills it; the original then exits immediately on its next attempt because
+/// `byte_start >= chunk_end`.
+///
+/// Returns `Some((hedge_slot, original_slot))` on success, `None` if no slot
+/// has enough remaining bytes or the slot budget is exhausted.
+pub fn try_hedge(
+    starts: &[AtomicU64],
+    ends: &[AtomicU64],
+    downloaded: &[AtomicU64],
+    active: &HashSet<usize>,
+    next_slot: &AtomicUsize,
+    pending: &mut VecDeque<usize>,
+    min_hedge_remaining: u64,
+) -> Option<(usize, usize)> {
+    let (original, remaining) = active
+        .iter()
+        .map(|&i| {
+            let remaining = ends[i].load(Ordering::Relaxed)
+                .saturating_sub(starts[i].load(Ordering::Relaxed) + downloaded[i].load(Ordering::Relaxed));
+            (i, remaining)
+        })
+        .max_by_key(|&(_, r)| r)?;
+
+    if remaining < min_hedge_remaining {
+        return None;
+    }
+
+    let slot = next_slot.fetch_add(1, Ordering::Relaxed);
+    if slot >= starts.len() {
+        next_slot.fetch_sub(1, Ordering::Relaxed);
+        return None;
+    }
+
+    let current_pos = starts[original].load(Ordering::Relaxed) + downloaded[original].load(Ordering::Relaxed);
+    starts[slot].store(current_pos, Ordering::Relaxed);
+    ends[slot].store(ends[original].load(Ordering::Relaxed), Ordering::Relaxed);
+    // downloaded[slot] starts at 0 (pre-initialised in the main array).
+
+    pending.push_back(slot);
+    tracing::debug!(
+        original, slot, current_pos,
+        remaining_bytes = remaining,
+        "hedging: racing duplicate connection on remaining range"
+    );
+    Some((slot, original))
 }

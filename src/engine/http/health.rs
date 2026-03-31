@@ -1,8 +1,8 @@
-//! Health monitor — kills connections that fall below 50% of mean speed.
+//! Health monitor - kills connections that fall below 50% of mean speed.
 //!
-//! Ticks every 1 second. Per-slot speed is EMA-smoothed (α=0.3) so a single
-//! slow tick doesn't trigger a kill — same approach as Surge's SpeedCalc and
-//! aria2's per-connection speed tracking.
+//! Ticks every 1 second. Per-slot speed is smoothed with EMA (α=0.3) so a single
+//! slow tick doesn't trigger a kill;
+//! similar approach as Surge's SpeedCalc and aria2's per-connection speed tracking.
 //!
 //! Grace period: 5 seconds after activation before a slot is eligible.
 //! Time-based (not bytes-based) so slow connections that haven't downloaded
@@ -79,7 +79,6 @@ pub fn spawn_health_monitor(
             let sum: f64 = eligible.iter().map(|(_, s)| s).sum();
             let mean = sum / eligible.len() as f64;
             if mean < 1.0 {
-                // Everyone is stalled — not a slow-worker problem.
                 continue;
             }
 

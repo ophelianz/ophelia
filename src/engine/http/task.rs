@@ -9,7 +9,7 @@
 //!   6. Background: progress reporter + health monitor
 //!   7. On finish: atomic rename; on pause: write snapshots to pause_sink
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ use super::health::{activation_now, spawn_health_monitor};
 use super::probe::probe;
 use super::progress::spawn_progress_reporter;
 use super::single::single_download;
-use super::steal::try_steal;
+use super::steal::{try_hedge, try_steal};
 use super::worker::download_chunk;
 
 /// Retry loop for a single chunk slot. Runs until the chunk finishes, the
@@ -354,40 +354,95 @@ pub async fn download_task(
     );
 
     // --- 7. Drain loop ---
+    //
+    // A 200ms interval drives proactive steal/hedge when workers are imbalanced —
+    // stealing only on completion would miss cases where one chunk is much larger
+    // than the others mid-download (Surge's balancer goroutine pattern).
+    //
+    // HedgeWork: when try_steal finds nothing to split, spawn a duplicate connection
+    // on the same remaining range. write_at is idempotent so both workers writing
+    // the same bytes is safe. The first to finish snaps the original's counter to
+    // the full chunk size, causing the original to exit on its next attempt when it
+    // sees byte_start >= chunk_end.
     let mut paused = false;
-    while let Some(result) = join_set.join_next().await {
-        let (finished_i, outcome) = match result {
-            Ok(pair) => pair,
-            Err(_panic) => { all_ok = false; continue; }
-        };
-        active.remove(&finished_i);
-        active_shared.lock().unwrap().remove(&finished_i);
+    let mut hedge_for: HashMap<usize, usize> = HashMap::new(); // hedge_slot → original_slot
+    let mut balancer = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_millis(200),
+        Duration::from_millis(200),
+    );
 
-        match outcome {
-            ChunkOutcome::Finished if !paused => {
-                current_limit = (current_limit * 2).min(total_slots);
-                if pending.is_empty() {
-                    try_steal(
-                        &chunk_starts_atomic, &chunk_ends_atomic, &chunk_downloaded,
-                        &active, &next_slot, &mut pending,
-                        write_buffer_size as u64, min_steal_bytes,
-                    );
+    loop {
+        if join_set.is_empty() { break; }
+
+        let mut chunk_done: Option<(usize, ChunkOutcome)> = None;
+        tokio::select! {
+            biased;
+            result = join_set.join_next() => {
+                match result {
+                    Some(Ok(pair)) => chunk_done = Some(pair),
+                    Some(Err(_panic)) => all_ok = false,
+                    None => break,
                 }
             }
-            ChunkOutcome::Paused => { paused = true; }
-            ChunkOutcome::Failed if !paused => { all_ok = false; }
-            _ => {}
+            _ = balancer.tick(), if !paused => {}
+        }
+
+        if let Some((finished_i, outcome)) = chunk_done {
+            active.remove(&finished_i);
+            active_shared.lock().unwrap().remove(&finished_i);
+
+            if let Some(&original) = hedge_for.get(&finished_i) {
+                // Hedge finished first: snap original's counter to the full chunk
+                // range so its next attempt sees byte_start >= chunk_end and exits.
+                let range = chunk_ends_atomic[original].load(Ordering::Relaxed)
+                    .saturating_sub(chunk_starts_atomic[original].load(Ordering::Relaxed));
+                chunk_downloaded[original].store(range, Ordering::Relaxed);
+                kill_tokens[original].lock().unwrap().cancel();
+                hedge_for.remove(&finished_i);
+            } else {
+                // Original finished: cancel its hedge if one is running.
+                let h = hedge_for.iter().find(|&(_, &o)| o == finished_i).map(|(&h, _)| h);
+                if let Some(h) = h {
+                    kill_tokens[h].lock().unwrap().cancel();
+                    hedge_for.remove(&h);
+                }
+
+                if !paused {
+                    match outcome {
+                        ChunkOutcome::Finished => {
+                            current_limit = (current_limit * 2).min(total_slots);
+                        }
+                        ChunkOutcome::Paused => paused = true,
+                        ChunkOutcome::Failed => all_ok = false,
+                    }
+                } else if matches!(outcome, ChunkOutcome::Paused) {
+                    paused = true;
+                }
+            }
         }
 
         if !paused {
-            while join_set.len() < current_limit {
-                if let Some(i) = pending.pop_front() {
-                    active.insert(i);
-                    active_shared.lock().unwrap().insert(i);
-                    join_set.spawn(make_chunk_fut(i));
-                } else {
-                    break;
+            // Steal first; if nothing to steal and there is spare capacity, hedge.
+            if pending.is_empty() && join_set.len() < current_limit {
+                try_steal(
+                    &chunk_starts_atomic, &chunk_ends_atomic, &chunk_downloaded,
+                    &active, &next_slot, &mut pending,
+                    write_buffer_size as u64, min_steal_bytes,
+                );
+                if pending.is_empty() && !active.is_empty() {
+                    if let Some((h, orig)) = try_hedge(
+                        &chunk_starts_atomic, &chunk_ends_atomic, &chunk_downloaded,
+                        &active, &next_slot, &mut pending, min_steal_bytes,
+                    ) {
+                        hedge_for.insert(h, orig);
+                    }
                 }
+            }
+            while join_set.len() < current_limit {
+                let Some(i) = pending.pop_front() else { break };
+                active.insert(i);
+                active_shared.lock().unwrap().insert(i);
+                join_set.spawn(make_chunk_fut(i));
             }
         }
     }
