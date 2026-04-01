@@ -6,6 +6,7 @@
 //! download protocol that supports byte ranges can use them.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ChunkStatus {
     Pending,
     Downloading,
@@ -25,6 +26,7 @@ impl ChunkList {
         self.starts.len()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.starts.is_empty()
     }

@@ -17,6 +17,7 @@ pub enum DownloadStatus {
     Error,
 }
 
+#[allow(dead_code)]
 pub enum EngineCommand {
     AddHttp { id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig },
     Pause { id: DownloadId },

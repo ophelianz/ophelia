@@ -55,6 +55,7 @@ struct PausedTask {
 // --- public engine handle ------------------------------------------------
 
 pub struct DownloadEngine {
+    #[allow(dead_code)] // must be held to keep the tokio runtime alive
     runtime: Runtime,
     cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     progress_rx: mpsc::UnboundedReceiver<ProgressUpdate>,

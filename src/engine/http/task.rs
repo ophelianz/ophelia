@@ -464,7 +464,7 @@ pub async fn download_task(
 
     // --- 7. Drain loop ---
     //
-    // A 200ms interval drives proactive steal/hedge when workers are imbalanced —
+    // A 200ms interval drives proactive steal/hedge when workers are imbalanced,
     // stealing only on completion would miss cases where one chunk is much larger
     // than the others mid-download (Surge's balancer goroutine pattern).
     //
