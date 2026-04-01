@@ -32,6 +32,200 @@ use super::single::single_download;
 use super::steal::{try_hedge, try_steal};
 use super::worker::download_chunk;
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Builds chunk boundaries + file handle. Two paths: resume from snapshots or
+/// fresh probe + allocate. Returns `None` on unrecoverable error (already reported
+/// via `send`).
+async fn resolve_chunks(
+    resume_from: Option<Vec<ChunkSnapshot>>,
+    probe_client: &reqwest::Client,
+    chunk_client: &Arc<reqwest::Client>,
+    url: &str,
+    part_path: &std::path::Path,
+    destination: &std::path::Path,
+    config: &HttpDownloadConfig,
+    id: DownloadId,
+    progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
+) -> Option<(u64, chunk::ChunkList, std::fs::File)> {
+    let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
+        let _ = progress_tx.send(ProgressUpdate {
+            id, status, downloaded_bytes: downloaded,
+            total_bytes: total, speed_bytes_per_sec: 0,
+        });
+    };
+
+    match resume_from {
+        Some(snapshots) => {
+            let total = snapshots.last().map(|s| s.end).unwrap_or(0);
+            let cl = chunk::ChunkList {
+                starts: snapshots.iter().map(|s| s.start).collect(),
+                ends: snapshots.iter().map(|s| s.end).collect(),
+                downloaded: snapshots.iter().map(|s| s.downloaded).collect(),
+                statuses: snapshots.iter().map(|s| {
+                    if s.downloaded >= s.end - s.start {
+                        chunk::ChunkStatus::Finished
+                    } else {
+                        chunk::ChunkStatus::Pending
+                    }
+                }).collect(),
+            };
+            let file = match std::fs::OpenOptions::new().write(true).open(part_path) {
+                Ok(f) => f,
+                Err(_) => { send(DownloadStatus::Error, 0, Some(total)); return None; }
+            };
+            tracing::info!(total_bytes = total, chunks = cl.len(), "resuming chunked download");
+            Some((total, cl, file))
+        }
+        None => {
+            let probe_result = match probe(probe_client, url).await {
+                Ok(p) => p,
+                Err(_) => { send(DownloadStatus::Error, 0, None); return None; }
+            };
+            tracing::debug!(
+                accepts_ranges = probe_result.accepts_ranges,
+                content_length = probe_result.content_length,
+                "probe complete"
+            );
+
+            let total_bytes = match probe_result.content_length {
+                Some(len) => len,
+                None => {
+                    tracing::info!("no content-length, falling back to single stream");
+                    single_download(
+                        id, Arc::clone(chunk_client), url.to_owned(),
+                        part_path.to_owned(), destination.to_owned(),
+                        config.stall_timeout_secs, progress_tx.clone(),
+                    ).await;
+                    return None;
+                }
+            };
+
+            let file = match std::fs::OpenOptions::new()
+                .write(true).create_new(true).open(part_path)
+            {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    tracing::warn!("part file already exists, another download may be active");
+                    send(DownloadStatus::Error, 0, Some(total_bytes));
+                    return None;
+                }
+                Err(_) => { send(DownloadStatus::Error, 0, Some(total_bytes)); return None; }
+            };
+
+            if preallocate(&file, total_bytes).is_err() {
+                send(DownloadStatus::Error, 0, Some(total_bytes));
+                return None;
+            }
+
+            let num_chunks = if probe_result.accepts_ranges {
+                let mb = total_bytes as f64 / (1024.0 * 1024.0);
+                let sqrt_conns = mb.sqrt().round() as usize;
+                sqrt_conns.clamp(config.min_connections, config.max_connections)
+            } else {
+                1
+            };
+
+            tracing::info!(total_bytes, num_chunks, "starting chunked download");
+            let chunks = chunk::split(total_bytes, num_chunks);
+            Some((total_bytes, chunks, file))
+        }
+    }
+}
+
+/// Shared atomic arrays that back every slot (initial + steal/hedge budget).
+struct SlotArrays {
+    starts: Arc<Vec<AtomicU64>>,
+    ends: Arc<Vec<AtomicU64>>,
+    downloaded: Arc<Vec<AtomicU64>>,
+    kill_tokens: Arc<Vec<Mutex<CancellationToken>>>,
+    activation: Arc<Vec<AtomicU64>>,
+    next_slot: Arc<AtomicUsize>,
+    total_slots: usize,
+}
+
+fn allocate_slot_arrays(chunks: &chunk::ChunkList) -> SlotArrays {
+    let n = chunks.len();
+    let steal_budget = n;
+    let total_slots = n + steal_budget;
+
+    let starts = Arc::new(
+        chunks.starts.iter().map(|&s| AtomicU64::new(s))
+            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
+            .collect::<Vec<_>>(),
+    );
+    let ends = Arc::new(
+        chunks.ends.iter().map(|&e| AtomicU64::new(e))
+            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
+            .collect::<Vec<_>>(),
+    );
+    let downloaded = Arc::new(
+        chunks.downloaded.iter().map(|&d| AtomicU64::new(d))
+            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
+            .collect::<Vec<_>>(),
+    );
+    let kill_tokens = Arc::new(
+        (0..total_slots).map(|_| Mutex::new(CancellationToken::new())).collect::<Vec<_>>(),
+    );
+    let activation = Arc::new(
+        (0..total_slots).map(|_| AtomicU64::new(u64::MAX)).collect::<Vec<_>>(),
+    );
+    let next_slot = Arc::new(AtomicUsize::new(n));
+
+    SlotArrays { starts, ends, downloaded, kill_tokens, activation, next_slot, total_slots }
+}
+
+/// Reports final status after the drain loop exits.
+fn finalize_download(
+    paused: bool,
+    all_ok: bool,
+    slots: &SlotArrays,
+    part_path: &std::path::Path,
+    destination: &std::path::Path,
+    total_bytes: u64,
+    pause_sink: &Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
+    send: &dyn Fn(DownloadStatus, u64, Option<u64>, u64),
+) {
+    let populated = slots.next_slot.load(Ordering::Relaxed);
+
+    if paused {
+        let snapshots: Vec<ChunkSnapshot> = (0..populated)
+            .map(|i| ChunkSnapshot {
+                start: slots.starts[i].load(Ordering::Relaxed),
+                end: slots.ends[i].load(Ordering::Relaxed),
+                downloaded: slots.downloaded[i].load(Ordering::Relaxed),
+            })
+            .collect();
+        *pause_sink.lock().unwrap() = Some(snapshots);
+        let total_downloaded: u64 = slots.downloaded[..populated]
+            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        tracing::info!(total_downloaded, total_bytes, "download paused");
+        send(DownloadStatus::Paused, total_downloaded, Some(total_bytes), 0);
+    } else if all_ok {
+        match std::fs::rename(part_path, destination) {
+            Ok(()) => {
+                tracing::info!(total_bytes, "download finished");
+                send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
+            }
+            Err(e) => {
+                tracing::error!(err = %e, "rename failed after download");
+                send(DownloadStatus::Error, total_bytes, Some(total_bytes), 0);
+            }
+        }
+    } else {
+        let total_downloaded: u64 = slots.downloaded[..populated]
+            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        tracing::error!(total_downloaded, total_bytes, "download failed");
+        send(DownloadStatus::Error, total_downloaded, Some(total_bytes), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chunk retry loop
+// ---------------------------------------------------------------------------
+
 /// Retry loop for a single chunk slot. Runs until the chunk finishes, the
 /// download is paused, or retries are exhausted. Each attempt stamps a fresh
 /// kill token so the health monitor always cancels the current connection.
@@ -158,95 +352,12 @@ pub async fn download_task(
     };
 
     // --- 1. Resolve total size, chunk boundaries, and file handle ---
-    //
-    // Resume: restore from snapshot, open existing .ophelia_part (no truncation).
-    // Fresh:  probe server, allocate file with platform preallocation, split chunks.
-    let (total_bytes, chunks, file) = match resume_from {
-        Some(snapshots) => {
-            let total = snapshots.last().map(|s| s.end).unwrap_or(0);
-            let cl = chunk::ChunkList {
-                starts: snapshots.iter().map(|s| s.start).collect(),
-                ends: snapshots.iter().map(|s| s.end).collect(),
-                downloaded: snapshots.iter().map(|s| s.downloaded).collect(),
-                statuses: snapshots
-                    .iter()
-                    .map(|s| {
-                        if s.downloaded >= s.end - s.start {
-                            chunk::ChunkStatus::Finished
-                        } else {
-                            chunk::ChunkStatus::Pending
-                        }
-                    })
-                    .collect(),
-            };
-            let file = match std::fs::OpenOptions::new().write(true).open(&part_path) {
-                Ok(f) => f,
-                Err(_) => { send(DownloadStatus::Error, 0, Some(total), 0); return; }
-            };
-            tracing::info!(total_bytes = total, chunks = cl.len(), "resuming chunked download");
-            (total, cl, file)
-        }
-        None => {
-            let probe_result = match probe(&probe_client, &url).await {
-                Ok(p) => p,
-                Err(_) => { send(DownloadStatus::Error, 0, None, 0); return; }
-            };
-            tracing::debug!(
-                accepts_ranges = probe_result.accepts_ranges,
-                content_length = probe_result.content_length,
-                "probe complete"
-            );
-
-            let total_bytes = match probe_result.content_length {
-                Some(len) => len,
-                None => {
-                    tracing::info!("no content-length, falling back to single stream");
-                    single_download(
-                        id, Arc::clone(&chunk_client), url,
-                        part_path, destination, config.stall_timeout_secs, progress_tx,
-                    ).await;
-                    return;
-                }
-            };
-
-            // O_CREAT | O_EXCL: fail if the part file already exists.
-            // Two concurrent downloads targeting the same destination would otherwise
-            // silently corrupt each other. The engine actor should prevent this at a
-            // higher level, but defense-in-depth here.
-            let file = match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&part_path)
-            {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    tracing::warn!("part file already exists, another download may be active");
-                    send(DownloadStatus::Error, 0, Some(total_bytes), 0);
-                    return;
-                }
-                Err(_) => { send(DownloadStatus::Error, 0, Some(total_bytes), 0); return; }
-            };
-
-            if preallocate(&file, total_bytes).is_err() {
-                send(DownloadStatus::Error, 0, Some(total_bytes), 0);
-                return;
-            }
-
-            // Square-root heuristic for connection count (Surge pattern):
-            //   workers = round(sqrt(file_size_mb)) clamped to [min, max]
-            // Avoids over-connecting on small files and under-connecting on large ones.
-            let num_chunks = if probe_result.accepts_ranges {
-                let mb = total_bytes as f64 / (1024.0 * 1024.0);
-                let sqrt_conns = mb.sqrt().round() as usize;
-                sqrt_conns.clamp(config.min_connections, config.max_connections)
-            } else {
-                1
-            };
-
-            tracing::info!(total_bytes, num_chunks, "starting chunked download");
-            let chunks = chunk::split(total_bytes, num_chunks);
-            (total_bytes, chunks, file)
-        }
+    let (total_bytes, chunks, file) = match resolve_chunks(
+        resume_from, &probe_client, &chunk_client, &url,
+        &part_path, &destination, &config, id, &progress_tx,
+    ).await {
+        Some(v) => v,
+        None => return,
     };
 
     let file = Arc::new(file);
@@ -259,46 +370,11 @@ pub async fn download_task(
     let min_steal_bytes = config.min_steal_bytes;
     let num_initial_chunks = chunks.len();
 
-    // --- 3. Per-slot atomic arrays, pre-allocated with headroom for stolen chunks ---
-    //
-    // Steal budget = num_initial_chunks: at most one steal per initial chunk, so
-    // pre-allocating num_initial_chunks extra slots is always sufficient.
-    let steal_budget = num_initial_chunks;
-    let total_slots = num_initial_chunks + steal_budget;
-
-    let chunk_starts_atomic: Arc<Vec<AtomicU64>> = Arc::new(
-        chunks.starts.iter().map(|&s| AtomicU64::new(s))
-            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
-            .collect(),
-    );
-    let chunk_ends_atomic: Arc<Vec<AtomicU64>> = Arc::new(
-        chunks.ends.iter().map(|&e| AtomicU64::new(e))
-            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
-            .collect(),
-    );
-    let chunk_downloaded: Arc<Vec<AtomicU64>> = Arc::new(
-        chunks.downloaded.iter().map(|&d| AtomicU64::new(d))
-            .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
-            .collect(),
-    );
-
-    // Kill tokens: Mutex so each attempt can swap in a fresh CancellationToken.
-    // CancellationToken is one-shot so once cancelled it can't be reset.
-    let kill_tokens: Arc<Vec<Mutex<CancellationToken>>> = Arc::new(
-        (0..total_slots).map(|_| Mutex::new(CancellationToken::new())).collect(),
-    );
-
-    // Slot activation timestamps (ms since UNIX epoch) Initialised to u64::MAX
-    // so slots that haven't started yet are never eligible for health-monitor killing;
-    // make_chunk_fut writes activation_now() at the top of every attempt.
-    let slot_activation: Arc<Vec<AtomicU64>> = Arc::new(
-        (0..total_slots).map(|_| AtomicU64::new(u64::MAX)).collect(),
-    );
-
-    let next_slot = Arc::new(AtomicUsize::new(num_initial_chunks));
+    // --- 3. Per-slot atomic arrays ---
+    let slots = allocate_slot_arrays(&chunks);
 
     // --- 4. Initial state ---
-    let already_done: u64 = chunk_downloaded[..num_initial_chunks]
+    let already_done: u64 = slots.downloaded[..num_initial_chunks]
         .iter()
         .map(|a| a.load(Ordering::Relaxed))
         .sum();
@@ -321,9 +397,9 @@ pub async fn download_task(
     let make_chunk_fut = |i: usize| {
         chunk_retry_loop(
             i, url.clone(), Arc::clone(&chunk_client), Arc::clone(&file),
-            Arc::clone(&chunk_downloaded), Arc::clone(&chunk_starts_atomic),
-            Arc::clone(&chunk_ends_atomic), Arc::clone(&kill_tokens),
-            Arc::clone(&slot_activation), pause_token.clone(),
+            Arc::clone(&slots.downloaded), Arc::clone(&slots.starts),
+            Arc::clone(&slots.ends), Arc::clone(&slots.kill_tokens),
+            Arc::clone(&slots.activation), pause_token.clone(),
             write_buffer_size, stall_timeout, max_retries,
         )
     };
@@ -337,8 +413,8 @@ pub async fn download_task(
     // --- 6. Background tasks ---
     let progress_handle = spawn_progress_reporter(
         id,
-        Arc::clone(&chunk_downloaded),
-        Arc::clone(&next_slot),
+        Arc::clone(&slots.downloaded),
+        Arc::clone(&slots.next_slot),
         total_bytes,
         already_done,
         progress_interval_ms,
@@ -346,10 +422,10 @@ pub async fn download_task(
     );
 
     let health_handle = spawn_health_monitor(
-        Arc::clone(&chunk_downloaded),
-        Arc::clone(&kill_tokens),
+        Arc::clone(&slots.downloaded),
+        Arc::clone(&slots.kill_tokens),
         Arc::clone(&active_shared),
-        Arc::clone(&slot_activation),
+        Arc::clone(&slots.activation),
         pause_token.clone(),
     );
 
@@ -394,23 +470,23 @@ pub async fn download_task(
             if let Some(&original) = hedge_for.get(&finished_i) {
                 // Hedge finished first: snap original's counter to the full chunk
                 // range so its next attempt sees byte_start >= chunk_end and exits.
-                let range = chunk_ends_atomic[original].load(Ordering::Relaxed)
-                    .saturating_sub(chunk_starts_atomic[original].load(Ordering::Relaxed));
-                chunk_downloaded[original].store(range, Ordering::Relaxed);
-                kill_tokens[original].lock().unwrap().cancel();
+                let range = slots.ends[original].load(Ordering::Relaxed)
+                    .saturating_sub(slots.starts[original].load(Ordering::Relaxed));
+                slots.downloaded[original].store(range, Ordering::Relaxed);
+                slots.kill_tokens[original].lock().unwrap().cancel();
                 hedge_for.remove(&finished_i);
             } else {
                 // Original finished: cancel its hedge if one is running.
                 let h = hedge_for.iter().find(|&(_, &o)| o == finished_i).map(|(&h, _)| h);
                 if let Some(h) = h {
-                    kill_tokens[h].lock().unwrap().cancel();
+                    slots.kill_tokens[h].lock().unwrap().cancel();
                     hedge_for.remove(&h);
                 }
 
                 if !paused {
                     match outcome {
                         ChunkOutcome::Finished => {
-                            current_limit = (current_limit * 2).min(total_slots);
+                            current_limit = (current_limit * 2).min(slots.total_slots);
                         }
                         ChunkOutcome::Paused => paused = true,
                         ChunkOutcome::Failed => all_ok = false,
@@ -425,14 +501,14 @@ pub async fn download_task(
             // Steal first; if nothing to steal and there is spare capacity, hedge.
             if pending.is_empty() && join_set.len() < current_limit {
                 try_steal(
-                    &chunk_starts_atomic, &chunk_ends_atomic, &chunk_downloaded,
-                    &active, &next_slot, &mut pending,
+                    &slots.starts, &slots.ends, &slots.downloaded,
+                    &active, &slots.next_slot, &mut pending,
                     write_buffer_size as u64, min_steal_bytes,
                 );
                 if pending.is_empty() && !active.is_empty() {
                     if let Some((h, orig)) = try_hedge(
-                        &chunk_starts_atomic, &chunk_ends_atomic, &chunk_downloaded,
-                        &active, &next_slot, &mut pending, min_steal_bytes,
+                        &slots.starts, &slots.ends, &slots.downloaded,
+                        &active, &slots.next_slot, &mut pending, min_steal_bytes,
                     ) {
                         hedge_for.insert(h, orig);
                     }
@@ -452,36 +528,5 @@ pub async fn download_task(
     drop(file); // close before rename on Windows
 
     // --- 8. Completion ---
-    if paused {
-        let populated = next_slot.load(Ordering::Relaxed);
-        let snapshots: Vec<ChunkSnapshot> = (0..populated)
-            .map(|i| ChunkSnapshot {
-                start: chunk_starts_atomic[i].load(Ordering::Relaxed),
-                end: chunk_ends_atomic[i].load(Ordering::Relaxed),
-                downloaded: chunk_downloaded[i].load(Ordering::Relaxed),
-            })
-            .collect();
-        *pause_sink.lock().unwrap() = Some(snapshots);
-        let total_downloaded: u64 = chunk_downloaded[..populated]
-            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
-        tracing::info!(total_downloaded, total_bytes, "download paused");
-        send(DownloadStatus::Paused, total_downloaded, Some(total_bytes), 0);
-    } else if all_ok {
-        match std::fs::rename(&part_path, &destination) {
-            Ok(()) => {
-                tracing::info!(total_bytes, "download finished");
-                send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
-            }
-            Err(e) => {
-                tracing::error!(err = %e, "rename failed after download");
-                send(DownloadStatus::Error, total_bytes, Some(total_bytes), 0);
-            }
-        }
-    } else {
-        let populated = next_slot.load(Ordering::Relaxed);
-        let total_downloaded: u64 = chunk_downloaded[..populated]
-            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
-        tracing::error!(total_downloaded, total_bytes, "download failed");
-        send(DownloadStatus::Error, total_downloaded, Some(total_bytes), 0);
-    }
+    finalize_download(paused, all_ok, &slots, &part_path, &destination, total_bytes, &pause_sink, &send);
 }

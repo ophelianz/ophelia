@@ -9,16 +9,16 @@ use std::time::Duration;
 use reqwest::StatusCode;
 
 pub enum ChunkError {
-    /// Transient failure — retry with backoff. `retry_after` is populated from
+    /// Transient failure -> retry with backoff. `retry_after` is populated from
     /// the Retry-After header on 429.
     Retryable { retry_after: Option<Duration> },
     /// Server refused definitively (403, 404, 410). Retrying won't help.
     NonRetryable,
     /// Local failure (disk full, permission denied). Stops the entire download.
     Fatal(String),
-    /// Soft pause requested via CancellationToken — exit cleanly, save state.
+    /// Soft pause requested via CancellationToken -> exit cleanly, save state.
     Paused,
-    /// Health monitor killed this connection (too slow) — retry immediately on
+    /// Health monitor killed this connection (too slow) -> retry immediately on
     /// a fresh connection without counting against the retry budget.
     Killed,
 }

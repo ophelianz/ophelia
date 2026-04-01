@@ -31,7 +31,7 @@ pub async fn download_chunk(
 ) -> Result<(), ChunkError> {
     let byte_start = chunk_start + resume_from;
     // After a work steal, the victim re-enters with byte_start past its new (shrunk)
-    // end. The bytes are already on disk from the previous request — return early.
+    // end. The bytes are already on disk from the previous request - return early.
     if byte_start >= chunk_end {
         return Ok(());
     }
@@ -96,7 +96,7 @@ pub async fn download_chunk(
     Ok(())
 }
 
-// `write_at` is pwrite — writes `buf` at `offset` without moving the file cursor.
+// `write_at` is pwrite - writes `buf` at `offset` without moving the file cursor.
 // This is what makes concurrent multi-chunk writes into the same file safe.
 
 #[cfg(unix)]
@@ -111,4 +111,3 @@ pub fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Resul
     file.seek_write(buf, offset)?;
     Ok(())
 }
-
