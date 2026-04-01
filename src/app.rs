@@ -59,6 +59,19 @@ impl Downloads {
                         while let Some(update) = model.engine.poll_progress() {
                             model.apply_progress(update, cx);
                         }
+                        while let Some(req) = model.engine.poll_ipc() {
+                            let dir = model.settings.download_dir();
+                            let name = req.filename
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| {
+                                    req.url.rsplit('/').next()
+                                        .and_then(|s| s.split('?').next())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or("download")
+                                        .to_string()
+                                });
+                            model.add(req.url, dir.join(name), HttpDownloadConfig::default(), cx);
+                        }
                         model.tick_speed();
                     })
                     .ok();

@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod engine;
+mod ipc;
 mod logging;
 mod platform;
 mod settings;

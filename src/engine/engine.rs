@@ -59,6 +59,7 @@ pub struct DownloadEngine {
     runtime: Runtime,
     cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     progress_rx: mpsc::UnboundedReceiver<ProgressUpdate>,
+    ipc_rx: mpsc::UnboundedReceiver<crate::ipc::DownloadRequest>,
     next_id: u64,
 }
 
@@ -67,10 +68,17 @@ impl DownloadEngine {
         let runtime = Runtime::new().expect("failed to create tokio runtime");
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
 
         runtime.spawn(EngineActor::new(progress_tx, settings).run(cmd_rx));
+        runtime.spawn(crate::ipc::serve(ipc_tx));
 
-        Self { runtime, cmd_tx, progress_rx, next_id: 0 }
+        Self { runtime, cmd_tx, progress_rx, ipc_rx, next_id: 0 }
+    }
+
+    /// Non-blocking drain of one pending IPC download request from the browser extension.
+    pub fn poll_ipc(&mut self) -> Option<crate::ipc::DownloadRequest> {
+        self.ipc_rx.try_recv().ok()
     }
 
     pub fn add(&mut self, url: String, destination: PathBuf, config: HttpDownloadConfig) -> DownloadId {
