@@ -89,10 +89,41 @@ impl Downloads {
         id
     }
 
-    pub fn cancel(&mut self, id: DownloadId) {
+    pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        self.engine.pause(id);
+        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
+            self.statuses[idx] = DownloadStatus::Paused;
+            cx.notify();
+        }
+    }
+
+    pub fn resume(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        self.engine.resume(id);
+        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
+            self.statuses[idx] = DownloadStatus::Downloading;
+            cx.notify();
+        }
+    }
+
+    pub fn cancel(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.cancel(id);
         if let Some(idx) = self.ids.iter().position(|&d| d == id) {
             self.statuses[idx] = DownloadStatus::Error;
+            cx.notify();
+        }
+    }
+
+    pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        self.engine.cancel(id);
+        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
+            self.ids.remove(idx);
+            self.filenames.remove(idx);
+            self.destinations.remove(idx);
+            self.statuses.remove(idx);
+            self.downloaded_bytes.remove(idx);
+            self.total_bytes.remove(idx);
+            self.speeds.remove(idx);
+            cx.notify();
         }
     }
 
