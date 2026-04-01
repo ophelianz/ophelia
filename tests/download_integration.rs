@@ -2,13 +2,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 use ophelia::engine::http::{download_task, HttpDownloadConfig};
 use ophelia::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
+
+fn unlimited_semaphore() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(Semaphore::MAX_PERMITS))
+}
 
 fn test_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
@@ -78,7 +82,7 @@ async fn parallel_download_with_range_support() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     download_task(
         DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -110,7 +114,7 @@ async fn single_stream_fallback_no_range_support() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     download_task(
         DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -141,7 +145,7 @@ async fn fallback_when_no_content_length() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     download_task(
         DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -166,6 +170,7 @@ async fn error_on_server_down() {
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         None,
+        unlimited_semaphore(),
     )
     .await;
 
@@ -192,7 +197,7 @@ async fn progress_reports_increasing_bytes() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     download_task(
         DownloadId(0), url, dest, HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -260,7 +265,7 @@ async fn work_stealing_produces_correct_output() {
     let config = HttpDownloadConfig { min_connections: 4, min_steal_bytes: 4 * 1024, ..HttpDownloadConfig::default() };
     download_task(
         DownloadId(0), url, dest.clone(), config, tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -302,7 +307,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
     };
     download_task(
         DownloadId(0), url, dest.clone(), config, tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
+        CancellationToken::new(), Arc::new(Mutex::new(None)), None, unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx).await;
@@ -347,7 +352,7 @@ async fn pause_and_resume_completes_correctly() {
         tokio::spawn(async move {
             download_task(
                 DownloadId(0), url, dest, HttpDownloadConfig::default(), tx1,
-                token, sink, None,
+                token, sink, None, unlimited_semaphore(),
             ).await;
         })
     };
@@ -369,7 +374,7 @@ async fn pause_and_resume_completes_correctly() {
     let (tx2, mut rx2) = mpsc::unbounded_channel();
     download_task(
         DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx2,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), Some(snapshots),
+        CancellationToken::new(), Arc::new(Mutex::new(None)), Some(snapshots), unlimited_semaphore(),
     ).await;
 
     let updates = drain_progress(&mut rx2).await;
