@@ -3,6 +3,7 @@ mod assets;
 mod engine;
 mod logging;
 mod platform;
+mod settings;
 mod theme;
 mod ui;
 mod views;

@@ -11,11 +11,13 @@ use gpui::{Context, SharedString};
 
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::{DownloadEngine, DownloadId, DownloadStatus, ProgressUpdate};
+use crate::settings::Settings;
 
 /// All live download state in SoA layout.
 /// One vec per field, all vecs share the same index space.
 pub struct Downloads {
     engine: DownloadEngine,
+    pub settings: Settings,
 
     pub ids: Vec<DownloadId>,
     pub filenames: Vec<SharedString>,
@@ -28,8 +30,10 @@ pub struct Downloads {
 
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let settings = Settings::load();
         let model = Self {
-            engine: DownloadEngine::new(),
+            engine: DownloadEngine::new(settings.clone()),
+            settings,
             ids: Vec::new(),
             filenames: Vec::new(),
             destinations: Vec::new(),
