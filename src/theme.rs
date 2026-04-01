@@ -11,6 +11,7 @@ impl Colors {
     pub fn background() -> Rgba { rgb(0x010202) }
     pub fn sidebar() -> Rgba    { rgb(0x010202) }
     pub fn card() -> Rgba       { rgb(0x0f0f0f) }
+    pub fn card_hover() -> Rgba { rgb(0x141414) }
     pub fn muted() -> Rgba      { rgb(0x1a1a1a) }
 
     // Text
