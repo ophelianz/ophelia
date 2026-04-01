@@ -8,6 +8,7 @@ pub enum IconName {
     CircleCheck,
     CirclePause,
     CirclePlay,
+    CircleX,
     Database,
     PanelLeftClose,
     PanelLeftOpen,
@@ -24,6 +25,7 @@ impl IconName {
             Self::CircleCheck => "circle-check",
             Self::CirclePause => "circle-pause",
             Self::CirclePlay => "circle-play",
+            Self::CircleX => "circle-x",
             Self::Database => "database",
             Self::Plus => "plus",
             Self::PanelLeftClose => "panel-left-close",
@@ -46,4 +48,8 @@ pub fn icon(name: IconName, size: Pixels, color: impl Into<Hsla>) -> Svg {
 /// Default 16px icon
 pub fn icon_sm(name: IconName, color: impl Into<Hsla>) -> Svg {
     icon(name, px(16.0), color)
+}
+
+pub fn icon_m(name: IconName, color: impl Into<Hsla>) -> Svg {
+    icon(name, px(20.0), color)
 }
