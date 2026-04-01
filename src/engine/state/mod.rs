@@ -1,5 +1,5 @@
 mod db;
-pub use db::Db;
+pub use db::{Db, HistoryReader};
 
 use crate::engine::types::DbEvent;
 

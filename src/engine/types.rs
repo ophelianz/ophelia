@@ -39,6 +39,39 @@ pub enum DbEvent {
     Removed  { id: DownloadId },
 }
 
+/// Filter for the history view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryFilter {
+    All,
+    Finished,
+    Error,
+    Paused,
+}
+
+/// A row returned by the history query, one entry per download ever recorded.
+#[derive(Debug, Clone)]
+pub struct HistoryRow {
+    pub id: DownloadId,
+    pub url: String,
+    pub destination: String,
+    pub status: DownloadStatus,
+    pub total_bytes: Option<u64>,
+    pub downloaded_bytes: u64,
+    /// Unix milliseconds when the download was added.
+    pub added_at: i64,
+    /// Unix milliseconds when the download finished (if it did).
+    pub finished_at: Option<i64>,
+}
+
+impl HistoryRow {
+    pub fn filename(&self) -> &str {
+        std::path::Path::new(&self.destination)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&self.destination)
+    }
+}
+
 /// A download loaded from SQLite on startup to restore paused/pending state.
 #[derive(Debug)]
 pub struct SavedDownload {

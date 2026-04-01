@@ -18,8 +18,8 @@ use std::time::Duration;
 use gpui::{Context, SharedString};
 
 use crate::engine::http::HttpDownloadConfig;
-use crate::engine::state::{self, Db};
-use crate::engine::{DbEvent, DownloadEngine, DownloadId, DownloadStatus, ProgressUpdate, SavedDownload};
+use crate::engine::state::{self, Db, HistoryReader};
+use crate::engine::{DbEvent, DownloadEngine, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, ProgressUpdate, SavedDownload};
 use crate::settings::Settings;
 
 /// All live download state in SoA layout.
@@ -41,6 +41,10 @@ pub struct Downloads {
     /// Rolling ~60-second download speed history (one sample per second).
     pub speed_history: VecDeque<u64>,
     poll_ticks: u8,
+
+    history_reader: HistoryReader,
+    pub history: Vec<HistoryRow>,
+    pub history_filter: HistoryFilter,
 }
 
 impl Downloads {
@@ -60,6 +64,7 @@ impl Downloads {
         state::spawn_worker(db, db_rx);
 
         let engine = DownloadEngine::new(settings.clone(), db_tx.clone(), max_id + 1);
+        let history_reader = HistoryReader::open().expect("failed to open history reader");
 
         let mut model = Self {
             engine,
@@ -74,6 +79,9 @@ impl Downloads {
             speeds: Vec::new(),
             speed_history: VecDeque::new(),
             poll_ticks: 0,
+            history_reader,
+            history: Vec::new(),
+            history_filter: HistoryFilter::All,
         };
 
         for saved_dl in &saved {
@@ -211,6 +219,23 @@ impl Downloads {
         self.ids.len()
     }
 
+    /// Re-query the history DB and notify the UI. Called when the history view
+    /// becomes visible and when a download reaches a terminal state.
+    pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        match self.history_reader.load(self.history_filter, "") {
+            Ok(rows) => {
+                self.history = rows;
+                cx.notify();
+            }
+            Err(e) => tracing::warn!("history query failed: {e}"),
+        }
+    }
+
+    pub fn set_history_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
+        self.history_filter = filter;
+        self.refresh_history(cx);
+    }
+
     /// Push a restored download into the SoA vecs without going through the engine.
     fn push_saved(&mut self, saved: &SavedDownload) {
         let filename: SharedString = saved.destination
@@ -259,6 +284,7 @@ impl Downloads {
                     crate::views::notification::NotificationKind::Error
                 };
                 crate::views::notification::show(cx, filename, kind);
+                self.refresh_history(cx);
             }
 
             cx.notify();

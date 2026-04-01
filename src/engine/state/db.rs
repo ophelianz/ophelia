@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, params};
 
-use crate::engine::types::{ChunkSnapshot, DbEvent, DownloadId, SavedDownload};
+use crate::engine::types::{ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, SavedDownload};
 
 pub struct Db {
     conn: Connection,
@@ -218,7 +218,7 @@ impl Db {
     }
 }
 
-fn db_path() -> PathBuf {
+pub fn db_path() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -226,6 +226,67 @@ fn db_path() -> PathBuf {
         .join("Application Support")
         .join("Ophelia")
         .join("downloads.db")
+}
+
+// --- read-only history queries -------------------------------------------
+
+/// A lightweight read-only connection used by the UI history view.
+/// WAL mode lets this coexist with the DbEventWorker's write connection.
+pub struct HistoryReader {
+    conn: Connection,
+}
+
+impl HistoryReader {
+    pub fn open() -> rusqlite::Result<Self> {
+        let conn = Connection::open(db_path())?;
+        // Best-effort read-only hint; doesn't error on older SQLite.
+        let _ = conn.execute_batch("PRAGMA query_only=ON;");
+        Ok(Self { conn })
+    }
+
+    pub fn load(&self, filter: HistoryFilter, search: &str) -> rusqlite::Result<Vec<HistoryRow>> {
+        let status_clause = match filter {
+            HistoryFilter::All      => "",
+            HistoryFilter::Finished => "AND status = 'finished'",
+            HistoryFilter::Error    => "AND status = 'error'",
+            HistoryFilter::Paused   => "AND status = 'paused'",
+        };
+        let sql = format!(
+            "SELECT id, url, destination, status, total_bytes, downloaded, added_at, finished_at
+             FROM downloads
+             WHERE 1=1 {status_clause}
+               AND (?1 = '' OR destination LIKE '%' || ?1 || '%' OR url LIKE '%' || ?1 || '%')
+             ORDER BY added_at DESC LIMIT 500"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![search], |row| {
+                let status_str: String = row.get(3)?;
+                Ok(HistoryRow {
+                    id: DownloadId(row.get::<_, i64>(0)? as u64),
+                    url: row.get(1)?,
+                    destination: row.get(2)?,
+                    status: status_from_str(&status_str),
+                    total_bytes: row.get::<_, Option<i64>>(4)?.map(|b| b as u64),
+                    downloaded_bytes: row.get::<_, i64>(5)? as u64,
+                    added_at: row.get(6)?,
+                    finished_at: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+}
+
+fn status_from_str(s: &str) -> DownloadStatus {
+    match s {
+        "finished"    => DownloadStatus::Finished,
+        "error"       => DownloadStatus::Error,
+        "paused"      => DownloadStatus::Paused,
+        "downloading" => DownloadStatus::Downloading,
+        _             => DownloadStatus::Pending,
+    }
 }
 
 fn unix_ms() -> i64 {

@@ -8,8 +8,11 @@ use crate::theme::Spacing;
 use crate::ui::prelude::*;
 use crate::views::download_list::DownloadList;
 use crate::views::download_modal::{DownloadCancelled, DownloadConfirmed, DownloadModal};
+use crate::views::history::HistoryView;
 use crate::views::sidebar::{AddDownloadClicked, Sidebar};
 use crate::views::stats_bar::StatsBar;
+
+const HISTORY_NAV_INDEX: usize = 4;
 
 /// Root view
 /// owns the full window layout and all live state.
@@ -17,6 +20,7 @@ pub struct MainWindow {
     sidebar: Entity<Sidebar>,
     downloads: Entity<Downloads>,
     download_list: Entity<DownloadList>,
+    history_view: Entity<HistoryView>,
     modal: Option<Entity<DownloadModal>>,
 }
 
@@ -30,6 +34,10 @@ impl MainWindow {
 
         let downloads = cx.new(|cx| Downloads::new(cx));
         let download_list = cx.new(|cx| DownloadList::new(downloads.clone(), cx));
+        let history_view = cx.new(|cx| HistoryView::new(downloads.clone(), cx));
+
+        // Re-render when sidebar nav changes (to switch content pane).
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
 
         // Open the modal when the sidebar Add button is clicked.
         cx.subscribe(&sidebar, |this: &mut Self, _, _: &AddDownloadClicked, cx| {
@@ -41,6 +49,7 @@ impl MainWindow {
             sidebar,
             downloads,
             download_list,
+            history_view,
             modal: None,
         }
     }
@@ -72,6 +81,8 @@ impl MainWindow {
 
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_nav = self.sidebar.read(cx).active_item;
+
         div()
             .flex()
             .flex_col()
@@ -116,10 +127,10 @@ impl Render for MainWindow {
                                     .overflow_y_scroll()
                                     .px(px(Spacing::CONTENT_PADDING_X))
                                     .py(px(Spacing::CONTENT_PADDING_Y))
-                                    .child({
+                                    .when(active_nav != HISTORY_NAV_INDEX, |el| {
                                         let d = self.downloads.read(cx);
                                         let (active, finished, queued) = d.status_counts();
-                                        StatsBar {
+                                        el.child(StatsBar {
                                             download_samples: d.speed_samples_mbs(),
                                             upload_samples: Vec::new(),
                                             download_speed: d.download_speed_bps() as f32 / 1_000_000.0,
@@ -127,9 +138,12 @@ impl Render for MainWindow {
                                             active_count: active,
                                             finished_count: finished,
                                             queued_count: queued,
-                                        }
+                                        })
+                                        .child(self.download_list.clone())
                                     })
-                                    .child(self.download_list.clone()),
+                                    .when(active_nav == HISTORY_NAV_INDEX, |el| {
+                                        el.child(self.history_view.clone())
+                                    }),
                             ),
                     ),
             )
