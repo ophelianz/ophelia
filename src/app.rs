@@ -3,6 +3,13 @@
 //! Downloads is a GPUI entity that owns the DownloadEngine and the live download
 //! data in SoA layout. A background task drains engine progress updates every 100ms
 //! and calls cx.notify() to trigger a re-render.
+//!
+//! Startup sequence:
+//!   1. Open SQLite DB, normalize stale rows, validate integrity.
+//!   2. Load paused/pending downloads from DB.
+//!   3. Spawn DbEventWorker thread (sole writer to DB from here on).
+//!   4. Create DownloadEngine with db_tx and initial_next_id > DB max.
+//!   5. Restore saved downloads into the engine's paused map and SoA vecs.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -11,7 +18,8 @@ use std::time::Duration;
 use gpui::{Context, SharedString};
 
 use crate::engine::http::HttpDownloadConfig;
-use crate::engine::{DownloadEngine, DownloadId, DownloadStatus, ProgressUpdate};
+use crate::engine::state::{self, Db};
+use crate::engine::{DbEvent, DownloadEngine, DownloadId, DownloadStatus, ProgressUpdate, SavedDownload};
 use crate::settings::Settings;
 
 /// All live download state in SoA layout.
@@ -20,6 +28,7 @@ pub struct Downloads {
     engine: DownloadEngine,
     #[allow(dead_code)] // future settings panel
     pub settings: Settings,
+    db_tx: std::sync::mpsc::Sender<DbEvent>,
 
     pub ids: Vec<DownloadId>,
     pub filenames: Vec<SharedString>,
@@ -37,9 +46,25 @@ pub struct Downloads {
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
-        let model = Self {
-            engine: DownloadEngine::new(settings.clone()),
+
+        let db = Db::open().expect("failed to open database");
+        if let Err(e) = db.normalize_stale() {
+            tracing::warn!("normalize stale: {e}");
+        }
+        if let Err(e) = db.validate_integrity() {
+            tracing::warn!("integrity check: {e}");
+        }
+        let (saved, max_id) = db.load_for_restore().expect("failed to load saved downloads");
+
+        let (db_tx, db_rx) = std::sync::mpsc::channel::<DbEvent>();
+        state::spawn_worker(db, db_rx);
+
+        let engine = DownloadEngine::new(settings.clone(), db_tx.clone(), max_id + 1);
+
+        let mut model = Self {
+            engine,
             settings,
+            db_tx,
             ids: Vec::new(),
             filenames: Vec::new(),
             destinations: Vec::new(),
@@ -50,6 +75,17 @@ impl Downloads {
             speed_history: VecDeque::new(),
             poll_ticks: 0,
         };
+
+        for saved_dl in &saved {
+            model.engine.restore(
+                saved_dl.id,
+                saved_dl.url.clone(),
+                saved_dl.destination.clone(),
+                HttpDownloadConfig::default(),
+                saved_dl.chunks.clone(),
+            );
+            model.push_saved(saved_dl);
+        }
 
         cx.spawn(async |this, cx: &mut gpui::AsyncApp| {
             loop {
@@ -175,12 +211,48 @@ impl Downloads {
         self.ids.len()
     }
 
+    /// Push a restored download into the SoA vecs without going through the engine.
+    fn push_saved(&mut self, saved: &SavedDownload) {
+        let filename: SharedString = saved.destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+            .into();
+        let dest_str: SharedString = saved.destination.to_string_lossy().to_string().into();
+
+        self.ids.push(saved.id);
+        self.filenames.push(filename);
+        self.destinations.push(dest_str);
+        self.statuses.push(DownloadStatus::Paused);
+        self.downloaded_bytes.push(saved.downloaded_bytes);
+        self.total_bytes.push(saved.total_bytes);
+        self.speeds.push(0);
+    }
+
     fn apply_progress(&mut self, update: ProgressUpdate, cx: &mut Context<Self>) {
         if let Some(idx) = self.ids.iter().position(|&id| id == update.id) {
+            let prev = self.statuses[idx];
             self.statuses[idx] = update.status;
             self.downloaded_bytes[idx] = update.downloaded_bytes;
             self.total_bytes[idx] = update.total_bytes;
             self.speeds[idx] = update.speed_bytes_per_sec;
+
+            // Emit Finished/Error to DB on the first transition into a terminal state.
+            let is_terminal = matches!(update.status, DownloadStatus::Finished | DownloadStatus::Error);
+            let was_terminal = matches!(prev, DownloadStatus::Finished | DownloadStatus::Error);
+            if is_terminal && !was_terminal {
+                let event = if update.status == DownloadStatus::Finished {
+                    DbEvent::Finished {
+                        id: update.id,
+                        total_bytes: update.total_bytes.unwrap_or(update.downloaded_bytes),
+                    }
+                } else {
+                    DbEvent::Error { id: update.id }
+                };
+                let _ = self.db_tx.send(event);
+            }
+
             cx.notify();
         }
     }

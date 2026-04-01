@@ -64,16 +64,33 @@ pub struct DownloadEngine {
 }
 
 impl DownloadEngine {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(
+        settings: Settings,
+        db_tx: std::sync::mpsc::Sender<DbEvent>,
+        initial_next_id: u64,
+    ) -> Self {
         let runtime = Runtime::new().expect("failed to create tokio runtime");
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
 
-        runtime.spawn(EngineActor::new(progress_tx, settings).run(cmd_rx));
+        runtime.spawn(EngineActor::new(progress_tx, settings, db_tx).run(cmd_rx));
         runtime.spawn(crate::ipc::serve(ipc_tx));
 
-        Self { runtime, cmd_tx, progress_rx, ipc_rx, next_id: 0 }
+        Self { runtime, cmd_tx, progress_rx, ipc_rx, next_id: initial_next_id }
+    }
+
+    /// Pre-populate the paused map with a download restored from SQLite.
+    /// Does not start a task, user must resume explicitly.
+    pub fn restore(
+        &self,
+        id: DownloadId,
+        url: String,
+        destination: PathBuf,
+        config: HttpDownloadConfig,
+        chunks: Vec<ChunkSnapshot>,
+    ) {
+        let _ = self.cmd_tx.send(EngineCommand::Restore { id, url, destination, config, chunks });
     }
 
     /// Non-blocking drain of one pending IPC download request from the browser extension.
@@ -118,16 +135,22 @@ struct EngineActor {
     /// One semaphore per hostname; permits = settings.max_connections_per_server.
     /// Shared across all downloads targeting the same host.
     server_semaphores: HashMap<String, Arc<Semaphore>>,
+    db_tx: std::sync::mpsc::Sender<DbEvent>,
 }
 
 impl EngineActor {
-    fn new(progress_tx: mpsc::UnboundedSender<ProgressUpdate>, settings: Settings) -> Self {
+    fn new(
+        progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+        settings: Settings,
+        db_tx: std::sync::mpsc::Sender<DbEvent>,
+    ) -> Self {
         Self {
             tasks: HashMap::new(),
             paused: HashMap::new(),
             progress_tx,
             settings,
             server_semaphores: HashMap::new(),
+            db_tx,
         }
     }
 
@@ -151,6 +174,10 @@ impl EngineActor {
                     self.handle_resume(id),
                 EngineCommand::Cancel { id } =>
                     self.handle_cancel(id),
+                EngineCommand::Restore { id, url, destination, config, chunks } => {
+                    tracing::info!(id = id.0, "restoring paused download from database");
+                    self.paused.insert(id, PausedTask { url, destination, config, snapshots: chunks });
+                }
                 EngineCommand::Shutdown => {
                     self.handle_shutdown();
                     break;
@@ -202,6 +229,11 @@ impl EngineActor {
         config: HttpDownloadConfig,
     ) {
         tracing::info!(id = id.0, %url, "download queued");
+        let _ = self.db_tx.send(DbEvent::Started {
+            id,
+            url: url.clone(),
+            destination: destination.clone(),
+        });
         self.spawn_task(id, url, destination, config, None);
     }
 
@@ -216,6 +248,12 @@ impl EngineActor {
             let _ = entry.handle.await;
             let snapshots = entry.pause_sink.lock().unwrap().take();
             if let Some(snaps) = snapshots {
+                let downloaded_bytes: u64 = snaps.iter().map(|c| c.downloaded).sum();
+                let _ = self.db_tx.send(DbEvent::Paused {
+                    id,
+                    downloaded_bytes,
+                    chunks: snaps.clone(),
+                });
                 self.paused.insert(id, PausedTask {
                     url: entry.url,
                     destination: entry.destination,
@@ -229,6 +267,7 @@ impl EngineActor {
     fn handle_resume(&mut self, id: DownloadId) {
         if let Some(pt) = self.paused.remove(&id) {
             tracing::info!(id = id.0, "resuming download");
+            let _ = self.db_tx.send(DbEvent::Resumed { id });
             self.spawn_task(id, pt.url, pt.destination, pt.config, Some(pt.snapshots));
         }
     }
@@ -239,6 +278,7 @@ impl EngineActor {
             entry.handle.abort();
         }
         self.paused.remove(&id);
+        let _ = self.db_tx.send(DbEvent::Removed { id });
     }
 
     fn handle_shutdown(&mut self) {

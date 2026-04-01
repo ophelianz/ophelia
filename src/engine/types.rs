@@ -23,7 +23,31 @@ pub enum EngineCommand {
     Pause { id: DownloadId },
     Resume { id: DownloadId },
     Cancel { id: DownloadId },
+    /// Pre-populate the paused map on startup without starting a task.
+    Restore { id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig, chunks: Vec<ChunkSnapshot> },
     Shutdown,
+}
+
+/// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
+/// The worker is the sole writer to SQLite and nothing else touches the DB.
+pub enum DbEvent {
+    Started  { id: DownloadId, url: String, destination: PathBuf },
+    Paused   { id: DownloadId, downloaded_bytes: u64, chunks: Vec<ChunkSnapshot> },
+    Resumed  { id: DownloadId },
+    Finished { id: DownloadId, total_bytes: u64 },
+    Error    { id: DownloadId },
+    Removed  { id: DownloadId },
+}
+
+/// A download loaded from SQLite on startup to restore paused/pending state.
+#[derive(Debug)]
+pub struct SavedDownload {
+    pub id: DownloadId,
+    pub url: String,
+    pub destination: PathBuf,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub chunks: Vec<ChunkSnapshot>,
 }
 
 /// Per-chunk resume state. `start` is the stable identity (aria2 / AB DM both key on

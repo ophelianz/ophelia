@@ -1,0 +1,6 @@
+en:
+    downloads:
+          empty_state: "No downloads yet"
+          speed: "%{speed}"
+    sidebar:
+        storage: "Storage"
