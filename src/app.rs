@@ -238,7 +238,7 @@ impl Downloads {
             self.total_bytes[idx] = update.total_bytes;
             self.speeds[idx] = update.speed_bytes_per_sec;
 
-            // Emit Finished/Error to DB on the first transition into a terminal state.
+            // Emit Finished/Error to DB and show notification on first terminal transition.
             let is_terminal = matches!(update.status, DownloadStatus::Finished | DownloadStatus::Error);
             let was_terminal = matches!(prev, DownloadStatus::Finished | DownloadStatus::Error);
             if is_terminal && !was_terminal {
@@ -251,6 +251,14 @@ impl Downloads {
                     DbEvent::Error { id: update.id }
                 };
                 let _ = self.db_tx.send(event);
+
+                let filename = self.filenames[idx].clone();
+                let kind = if update.status == DownloadStatus::Finished {
+                    crate::views::notification::NotificationKind::Success
+                } else {
+                    crate::views::notification::NotificationKind::Error
+                };
+                crate::views::notification::show(cx, filename, kind);
             }
 
             cx.notify();
