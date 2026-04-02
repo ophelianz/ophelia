@@ -35,6 +35,22 @@ pub enum Section {
     Network,
 }
 
+impl Section {
+    fn icon(self) -> IconName {
+        match self {
+            Section::General => IconName::GeneralSettings,
+            Section::Network => IconName::Network,
+        }
+    }
+
+    fn icon_color(self) -> gpui::Rgba {
+        match self {
+            Section::General => Colors::muted_foreground(),
+            Section::Network => Colors::active(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
@@ -127,6 +143,9 @@ impl Render for SettingsWindow {
                                     .px(px(12.0))
                                     .py(px(8.0))
                                     .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
                                     .text_sm()
                                     .font_weight(if is_active {
                                         FontWeight::SEMIBOLD
@@ -148,8 +167,7 @@ impl Render for SettingsWindow {
                                         this.active = section;
                                         cx.notify();
                                     }))
-                                    .text_color(Colors::finished())
-                                    .child(icon_m(IconName::Network, Colors::active()))
+                                    .child(icon_m(section.icon(), section.icon_color()))
                                     .child(SharedString::from(label))
                             }))
                             .child(div().flex_1())
