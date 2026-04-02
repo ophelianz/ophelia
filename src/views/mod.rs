@@ -4,5 +4,6 @@ pub mod download_row;
 pub mod history;
 pub mod main_window;
 pub mod notification;
+pub mod settings_modal;
 pub mod sidebar;
 pub mod stats_bar;

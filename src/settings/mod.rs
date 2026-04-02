@@ -3,6 +3,9 @@
 //! Stored as JSON at `~/Library/Application Support/Ophelia/settings.json`.
 //! Missing file or parse errors silently fall back to defaults so a fresh
 //! install or a corrupted file never blocks startup.
+//!
+//! Writes are atomic: content goes to `settings.json.tmp` first, then
+//! renamed over the real file so a crash mid-write can't corrupt it.
 
 use std::path::PathBuf;
 
@@ -39,8 +42,7 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    /// Persist to disk. Creates parent directories if needed.
-    #[allow(dead_code)] // future settings panel
+    /// Persist to disk atomically. Creates parent directories if needed.
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(dir) = path.parent() {
@@ -48,10 +50,12 @@ impl Settings {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(path, json)
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &path)
     }
 
-    /// Resolved destination directory: user preference, then ~/Downloads, then home.
+    /// Resolved destination directory: user preference, then ~/Downloads, then cwd.
     pub fn download_dir(&self) -> PathBuf {
         if let Some(ref dir) = self.default_download_dir {
             return dir.clone();

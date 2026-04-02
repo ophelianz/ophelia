@@ -9,6 +9,7 @@ use crate::ui::prelude::*;
 use crate::views::download_list::DownloadList;
 use crate::views::download_modal::{DownloadCancelled, DownloadConfirmed, DownloadModal};
 use crate::views::history::HistoryView;
+use crate::views::settings_modal::{SettingsClosed, SettingsModal};
 use crate::views::sidebar::{AddDownloadClicked, Sidebar};
 use crate::views::stats_bar::StatsBar;
 
@@ -22,6 +23,7 @@ pub struct MainWindow {
     download_list: Entity<DownloadList>,
     history_view: Entity<HistoryView>,
     modal: Option<Entity<DownloadModal>>,
+    settings_modal: Option<Entity<SettingsModal>>,
 }
 
 impl MainWindow {
@@ -51,6 +53,7 @@ impl MainWindow {
             download_list,
             history_view,
             modal: None,
+            settings_modal: None,
         }
     }
 
@@ -75,6 +78,22 @@ impl MainWindow {
         .detach();
 
         self.modal = Some(modal);
+        cx.notify();
+    }
+
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let modal = cx.new(|_| SettingsModal::new());
+
+        cx.subscribe(&modal, |this: &mut Self, _, event: &SettingsClosed, cx| {
+            // Propagate the updated settings to the Downloads entity so the
+            // rest of the UI reflects the new values immediately.
+            this.downloads.update(cx, |d, _| d.settings = event.settings.clone());
+            this.settings_modal = None;
+            cx.notify();
+        })
+        .detach();
+
+        self.settings_modal = Some(modal);
         cx.notify();
     }
 }
@@ -102,7 +121,19 @@ impl Render for MainWindow {
                     .pr(px(24.0))
                     .border_b_1()
                     .border_color(Colors::border())
-                    .child(icon_m(IconName::Settings, Colors::muted_foreground())),
+                    .child(
+                        div()
+                            .id("settings-btn")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+                            .child(icon_m(IconName::Settings, Colors::muted_foreground())),
+                    ),
             )
             // Sidebar + content below
             .child(
@@ -147,7 +178,8 @@ impl Render for MainWindow {
                             ),
                     ),
             )
-            // Modal overlay (rendered last so it sits on top)
+            // Modals rendered last so they sit on top.
             .when_some(self.modal.clone(), |el, modal| el.child(modal))
+            .when_some(self.settings_modal.clone(), |el, modal| el.child(modal))
     }
 }
