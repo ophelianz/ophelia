@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px, Context, Entity, Window};
+use gpui::{div, prelude::*, px, Bounds, Context, Entity, Window, WindowBounds, WindowHandle, WindowOptions, size};
 
 use crate::app::Downloads;
 use crate::engine::http::HttpDownloadConfig;
@@ -9,7 +9,7 @@ use crate::ui::prelude::*;
 use crate::views::download_list::DownloadList;
 use crate::views::download_modal::{DownloadCancelled, DownloadConfirmed, DownloadModal};
 use crate::views::history::HistoryView;
-use crate::views::settings_modal::{SettingsClosed, SettingsModal};
+use crate::views::settings::{SettingsClosed, SettingsWindow};
 use crate::views::sidebar::{AddDownloadClicked, Sidebar};
 use crate::views::stats_bar::StatsBar;
 
@@ -23,7 +23,7 @@ pub struct MainWindow {
     download_list: Entity<DownloadList>,
     history_view: Entity<HistoryView>,
     modal: Option<Entity<DownloadModal>>,
-    settings_modal: Option<Entity<SettingsModal>>,
+    settings_window: Option<WindowHandle<SettingsWindow>>,
 }
 
 impl MainWindow {
@@ -53,7 +53,7 @@ impl MainWindow {
             download_list,
             history_view,
             modal: None,
-            settings_modal: None,
+            settings_window: None,
         }
     }
 
@@ -82,18 +82,34 @@ impl MainWindow {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let modal = cx.new(|_| SettingsModal::new());
+        // Don't open a second window if one is already live.
+        if let Some(ref w) = self.settings_window {
+            if w.update(cx, |_, _, _| {}).is_ok() {
+                return;
+            }
+        }
 
-        cx.subscribe(&modal, |this: &mut Self, _, event: &SettingsClosed, cx| {
-            // Propagate the updated settings to the Downloads entity so the
-            // rest of the UI reflects the new values immediately.
-            this.downloads.update(cx, |d, _| d.settings = event.settings.clone());
-            this.settings_modal = None;
-            cx.notify();
-        })
-        .detach();
+        let bounds = Bounds::centered(None, size(px(960.), px(600.)), cx);
+        let Ok(window) = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: platform::titlebar_options(),
+                ..Default::default()
+            },
+            |_, cx| cx.new(|cx| SettingsWindow::new(cx)),
+        ) else {
+            return;
+        };
 
-        self.settings_modal = Some(modal);
+        if let Ok(entity) = window.entity(cx) {
+            cx.subscribe(&entity, |this: &mut Self, _, event: &SettingsClosed, cx| {
+                this.downloads.update(cx, |d, _| d.settings = event.settings.clone());
+                cx.notify();
+            })
+            .detach();
+        }
+
+        self.settings_window = Some(window);
         cx.notify();
     }
 }
@@ -178,8 +194,7 @@ impl Render for MainWindow {
                             ),
                     ),
             )
-            // Modals rendered last so they sit on top.
+            // Download modal rendered last so it sits on top.
             .when_some(self.modal.clone(), |el, modal| el.child(modal))
-            .when_some(self.settings_modal.clone(), |el, modal| el.child(modal))
     }
 }
