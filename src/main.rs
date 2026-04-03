@@ -1,6 +1,8 @@
 rust_i18n::i18n!("locales");
 
 mod app;
+mod app_actions;
+mod app_menu;
 mod assets;
 mod engine;
 mod ipc;
@@ -19,6 +21,9 @@ fn run() {
     Application::new()
         .with_assets(Assets::new())
         .run(|cx: &mut App| {
+            app_menu::init(cx);
+            ui::text_field::init(cx);
+
             cx.text_system()
                 .add_fonts(vec![std::borrow::Cow::Owned(
                     std::fs::read(concat!(
@@ -30,10 +35,16 @@ fn run() {
                 .unwrap();
 
             let bounds = Bounds::centered(None, size(px(1120.), px(700.)), cx);
-            cx.open_window(platform::window_options(bounds), |_, cx| {
-                cx.new(|cx| MainWindow::new(cx))
-            })
-            .unwrap();
+            let main_window = cx
+                .open_window(platform::window_options(bounds), |_, cx| {
+                    cx.new(|cx| MainWindow::new(cx))
+                })
+                .unwrap();
+
+            app_actions::init(main_window, cx);
+
+            cx.set_menus(app_menu::build_menus());
+
             cx.activate(true);
         });
 }

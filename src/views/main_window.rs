@@ -1,15 +1,14 @@
-use gpui::{Bounds, Context, Entity, Window, WindowHandle, div, prelude::*, px, size};
+use gpui::{Context, Entity, Window, div, prelude::*, px};
 
 use crate::app::Downloads;
+use crate::app_menu;
 use crate::engine::http::HttpDownloadConfig;
-use crate::platform;
 use crate::settings::Settings;
 use crate::theme::{APP_FONT_FAMILY, Spacing};
 use crate::ui::prelude::*;
 use crate::views::download_list::DownloadList;
 use crate::views::download_modal::{DownloadCancelled, DownloadConfirmed, DownloadModal};
 use crate::views::history::HistoryView;
-use crate::views::settings::{SettingsClosed, SettingsWindow};
 use crate::views::sidebar::{AddDownloadClicked, Sidebar};
 use crate::views::stats_bar::StatsBar;
 
@@ -18,16 +17,17 @@ const HISTORY_NAV_INDEX: usize = 4;
 /// Root view
 /// owns the full window layout and all live state.
 pub struct MainWindow {
+    menu_bar: Entity<AppMenuBar>,
     sidebar: Entity<Sidebar>,
     downloads: Entity<Downloads>,
     download_list: Entity<DownloadList>,
     history_view: Entity<HistoryView>,
     modal: Option<Entity<DownloadModal>>,
-    settings_window: Option<WindowHandle<SettingsWindow>>,
 }
 
 impl MainWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let menu_bar = cx.new(|cx| AppMenuBar::new(app_menu::build_owned_menus(), cx));
         let sidebar = cx.new(|_| Sidebar {
             active_item: 0,
             collapsed: false,
@@ -51,16 +51,16 @@ impl MainWindow {
         .detach();
 
         Self {
+            menu_bar,
             sidebar,
             downloads,
             download_list,
             history_view,
             modal: None,
-            settings_window: None,
         }
     }
 
-    fn open_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_modal(&mut self, cx: &mut Context<Self>) {
         let modal = cx.new(|cx| DownloadModal::new(cx));
 
         cx.subscribe(
@@ -87,31 +87,10 @@ impl MainWindow {
         cx.notify();
     }
 
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        // Don't open a second window if one is already live.
-        if let Some(ref w) = self.settings_window {
-            if w.update(cx, |_, _, _| {}).is_ok() {
-                return;
-            }
-        }
-
-        let bounds = Bounds::centered(None, size(px(960.), px(600.)), cx);
-        let Ok(window) = cx.open_window(platform::window_options(bounds), |_, cx| {
-            cx.new(|cx| SettingsWindow::new(cx))
-        }) else {
-            return;
-        };
-
-        if let Ok(entity) = window.entity(cx) {
-            cx.subscribe(&entity, |this: &mut Self, _, event: &SettingsClosed, cx| {
-                this.downloads
-                    .update(cx, |d, _| d.settings = event.settings.clone());
-                cx.notify();
-            })
-            .detach();
-        }
-
-        self.settings_window = Some(window);
+    pub(crate) fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        self.downloads.update(cx, |downloads, _| {
+            downloads.settings = settings;
+        });
         cx.notify();
     }
 }
@@ -155,20 +134,14 @@ impl Render for MainWindow {
 }
 
 impl MainWindow {
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        WindowHeader::empty().trailing(
-            div()
-                .id("settings-btn")
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(28.0))
-                .h(px(28.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
-                .child(icon_m(IconName::Settings, Colors::muted_foreground())),
-        )
+    fn render_header(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        if cfg!(target_os = "macos") {
+            WindowHeader::empty().into_any_element()
+        } else {
+            WindowHeader::empty()
+                .leading(self.menu_bar.clone())
+                .into_any_element()
+        }
     }
 
     fn render_content(&self, active_nav: usize, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1,13 +1,10 @@
 use gpui::{Context, PathPromptOptions, div, prelude::*, px};
 
-use crate::settings::Settings;
 use crate::ui::prelude::*;
 
 use super::SettingsWindow;
 
-pub(super) fn render(settings: &Settings, cx: &mut Context<SettingsWindow>) -> gpui::Div {
-    let dir: gpui::SharedString = settings.download_dir().to_string_lossy().to_string().into();
-
+pub(super) fn render(this: &SettingsWindow, cx: &mut Context<SettingsWindow>) -> gpui::Div {
     let folder_btn = div()
         .id("folder-picker")
         .w(px(28.0))
@@ -27,18 +24,19 @@ pub(super) fn render(settings: &Settings, cx: &mut Context<SettingsWindow>) -> g
                 prompt: None,
             });
             cx.spawn(async move |entity, cx: &mut gpui::AsyncApp| {
-                if let Ok(Ok(Some(paths))) = receiver.await {
-                    if let Some(path) = paths.into_iter().next() {
-                        cx.update(move |app| {
-                            entity
-                                .update(app, |this, cx| {
-                                    this.settings.default_download_dir = Some(path);
-                                    cx.notify();
-                                })
-                                .ok();
-                        })
-                        .ok();
-                    }
+                if let Ok(Ok(Some(paths))) = receiver.await
+                    && let Some(path) = paths.into_iter().next()
+                {
+                    cx.update(move |app| {
+                        entity
+                            .update(app, |this, cx| {
+                                this.download_dir_input.update(cx, |input, cx| {
+                                    input.set_text(path.to_string_lossy().to_string(), cx);
+                                });
+                            })
+                            .ok();
+                    })
+                    .ok();
                 }
             })
             .detach();
@@ -52,19 +50,7 @@ pub(super) fn render(settings: &Settings, cx: &mut Context<SettingsWindow>) -> g
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(7.0))
-                    .max_w(px(200.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(Colors::border())
-                    .text_sm()
-                    .text_color(Colors::muted_foreground())
-                    .overflow_hidden()
-                    .child(dir),
-            )
+            .child(super::setting_text_input(this.download_dir_input.clone()))
             .child(folder_btn),
     ))
 }

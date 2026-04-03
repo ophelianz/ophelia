@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Context, IntoElement, MouseButton, Render, RenderOnce, SharedString, Window,
-    WindowControlArea, div, prelude::*, px,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, MouseButton, Render,
+    RenderOnce, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
 
 use crate::platform;
@@ -9,26 +9,29 @@ use crate::ui::prelude::*;
 #[derive(IntoElement)]
 pub struct WindowHeader {
     title: Option<SharedString>,
-    trailing: Option<AnyElement>,
+    leading: Option<AnyElement>,
+    show_window_controls: bool,
 }
 
 impl WindowHeader {
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
             title: Some(title.into()),
-            trailing: None,
+            leading: None,
+            show_window_controls: !cfg!(target_os = "macos"),
         }
     }
 
     pub fn empty() -> Self {
         Self {
             title: None,
-            trailing: None,
+            leading: None,
+            show_window_controls: !cfg!(target_os = "macos"),
         }
     }
 
-    pub fn trailing(mut self, element: impl IntoElement) -> Self {
-        self.trailing = Some(element.into_any_element());
+    pub fn leading(mut self, element: impl IntoElement) -> Self {
+        self.leading = Some(element.into_any_element());
         self
     }
 }
@@ -58,27 +61,6 @@ impl RenderOnce for WindowHeader {
                 .border_b_1()
                 .border_color(Colors::border())
                 .bg(Colors::background())
-                .on_mouse_down_out(window.listener_for(&drag_state, |state, _, _, _| {
-                    state.should_move = false;
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    window.listener_for(&drag_state, |state, _, _, _| {
-                        state.should_move = true;
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    window.listener_for(&drag_state, |state, _, _, _| {
-                        state.should_move = false;
-                    }),
-                )
-                .on_mouse_move(window.listener_for(&drag_state, |state, _, window, _| {
-                    if state.should_move {
-                        state.should_move = false;
-                        window.start_window_move();
-                    }
-                }))
                 .child(
                     h_flex()
                         .h_full()
@@ -87,12 +69,40 @@ impl RenderOnce for WindowHeader {
                         .gap(px(12.0))
                         .pl(px(chrome.leading_padding))
                         .pr(px(chrome.horizontal_padding))
+                        .when_some(self.leading.take(), |this, leading| this.child(leading))
                         .child(
                             div()
                                 .flex_1()
                                 .h_full()
                                 .flex()
                                 .items_center()
+                                .on_mouse_down_out(window.listener_for(
+                                    &drag_state,
+                                    |state, _, _, _| {
+                                        state.should_move = false;
+                                    },
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    window.listener_for(&drag_state, |state, _, _, _| {
+                                        state.should_move = true;
+                                    }),
+                                )
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    window.listener_for(&drag_state, |state, _, _, _| {
+                                        state.should_move = false;
+                                    }),
+                                )
+                                .on_mouse_move(window.listener_for(
+                                    &drag_state,
+                                    |state, _, window, _| {
+                                        if state.should_move {
+                                            state.should_move = false;
+                                            window.start_window_move();
+                                        }
+                                    },
+                                ))
                                 .window_control_area(WindowControlArea::Drag)
                                 .when_some(title, |this, title| {
                                     this.child(
@@ -104,8 +114,53 @@ impl RenderOnce for WindowHeader {
                                     )
                                 }),
                         )
-                        .when_some(self.trailing.take(), |this, trailing| this.child(trailing)),
+                        .when(self.show_window_controls, |this| {
+                            this.child(window_controls())
+                        }),
                 ),
         )
     }
+}
+
+fn window_controls() -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap(px(4.0))
+        .child(window_control_button(0, "—", false, |window| {
+            window.minimize_window();
+        }))
+        .child(window_control_button(1, "□", false, |window| {
+            window.zoom_window();
+        }))
+        .child(window_control_button(2, "×", true, |window| {
+            window.remove_window();
+        }))
+}
+
+fn window_control_button(
+    id: usize,
+    label: &'static str,
+    destructive: bool,
+    on_click: impl Fn(&mut Window) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(("window-control", id))
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(38.0))
+        .h(px(28.0))
+        .rounded(px(6.0))
+        .text_sm()
+        .text_color(Colors::muted_foreground())
+        .cursor_pointer()
+        .hover(move |style| {
+            if destructive {
+                style.bg(Colors::error()).text_color(Colors::background())
+            } else {
+                style.bg(Colors::muted()).text_color(Colors::foreground())
+            }
+        })
+        .on_click(move |_, window, _| on_click(window))
+        .child(label)
 }

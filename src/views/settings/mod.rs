@@ -5,9 +5,7 @@
 //! `SettingsClosed` event is emitted so the main window can update its
 //! in-memory settings copy immediately.
 
-use gpui::{
-    App, ClickEvent, Context, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px,
-};
+use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use crate::settings::Settings;
 use crate::theme::APP_FONT_FAMILY;
@@ -57,19 +55,77 @@ impl Section {
 pub struct SettingsWindow {
     pub settings: Settings,
     active: Section,
+    pub(super) download_dir_input: Entity<TextField>,
+    pub(super) global_speed_limit_input: Entity<TextField>,
+    pub(super) concurrent_downloads_input: Entity<TextField>,
+    pub(super) connections_per_download_input: Entity<TextField>,
+    pub(super) connections_per_server_input: Entity<TextField>,
 }
 
 impl EventEmitter<SettingsClosed> for SettingsWindow {}
 
 impl SettingsWindow {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let settings = Settings::load();
+
         Self {
-            settings: Settings::load(),
+            download_dir_input: cx.new(|cx| {
+                TextField::new(
+                    settings.download_dir().to_string_lossy().to_string(),
+                    "Downloads folder",
+                    cx,
+                )
+            }),
+            global_speed_limit_input: cx.new(|cx| {
+                TextField::new(
+                    format!("{}", settings.global_speed_limit_bps / 1024),
+                    "0",
+                    cx,
+                )
+            }),
+            concurrent_downloads_input: cx.new(|cx| {
+                TextField::new(format!("{}", settings.max_concurrent_downloads), "3", cx)
+            }),
+            connections_per_download_input: cx.new(|cx| {
+                TextField::new(
+                    format!("{}", settings.max_connections_per_download),
+                    "8",
+                    cx,
+                )
+            }),
+            connections_per_server_input: cx.new(|cx| {
+                TextField::new(format!("{}", settings.max_connections_per_server), "4", cx)
+            }),
+            settings,
             active: Section::General,
         }
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
+        self.settings.default_download_dir =
+            parse_path_input(self.download_dir_input.read(cx).text());
+        self.settings.global_speed_limit_bps = parse_speed_limit_input(
+            self.global_speed_limit_input.read(cx).text(),
+            self.settings.global_speed_limit_bps,
+        );
+        self.settings.max_concurrent_downloads = parse_bounded_usize_input(
+            self.concurrent_downloads_input.read(cx).text(),
+            self.settings.max_concurrent_downloads,
+            1,
+            10,
+        );
+        self.settings.max_connections_per_download = parse_bounded_usize_input(
+            self.connections_per_download_input.read(cx).text(),
+            self.settings.max_connections_per_download,
+            1,
+            16,
+        );
+        self.settings.max_connections_per_server = parse_bounded_usize_input(
+            self.connections_per_server_input.read(cx).text(),
+            self.settings.max_connections_per_server,
+            1,
+            16,
+        );
         let _ = self.settings.save();
         cx.emit(SettingsClosed {
             settings: self.settings.clone(),
@@ -114,8 +170,8 @@ impl Render for SettingsWindow {
 impl SettingsWindow {
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.active {
-            Section::General => general::render(&self.settings, cx).into_any_element(),
-            Section::Network => network::render(&self.settings, cx).into_any_element(),
+            Section::General => general::render(self, cx).into_any_element(),
+            Section::Network => network::render(self).into_any_element(),
         }
     }
 
@@ -191,6 +247,35 @@ impl SettingsWindow {
     }
 }
 
+pub(super) fn setting_text_input(input: Entity<TextField>) -> gpui::Div {
+    div().w(px(220.0)).child(input)
+}
+
+fn parse_path_input(input: &str) -> Option<std::path::PathBuf> {
+    let trimmed = input.trim();
+    (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+}
+
+fn parse_speed_limit_input(input: &str, fallback_bps: u64) -> u64 {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return fallback_bps;
+    }
+
+    trimmed
+        .parse::<u64>()
+        .map(|kbps| kbps.saturating_mul(1024))
+        .unwrap_or(fallback_bps)
+}
+
+fn parse_bounded_usize_input(input: &str, fallback: usize, min: usize, max: usize) -> usize {
+    input
+        .trim()
+        .parse::<usize>()
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(fallback)
+}
+
 // ---------------------------------------------------------------------------
 // Shared UI helpers - accessible to general and network submodules via super::
 // ---------------------------------------------------------------------------
@@ -226,70 +311,4 @@ fn setting_row(
                 ),
         )
         .child(div().flex_shrink_0().child(control))
-}
-
-fn stepper<F1, F2>(
-    value: SharedString,
-    dec_id: &'static str,
-    inc_id: &'static str,
-    can_dec: bool,
-    can_inc: bool,
-    on_dec: F1,
-    on_inc: F2,
-) -> gpui::Div
-where
-    F1: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    F2: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    div()
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(Colors::border())
-        .overflow_hidden()
-        .child(stepper_btn(dec_id, "−", can_dec, on_dec))
-        .child(
-            div()
-                .px(px(10.0))
-                .py(px(7.0))
-                .min_w(px(72.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .border_l_1()
-                .border_r_1()
-                .border_color(Colors::border())
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(Colors::foreground())
-                .child(value),
-        )
-        .child(stepper_btn(inc_id, "+", can_inc, on_inc))
-}
-
-fn stepper_btn<F>(
-    id: &'static str,
-    symbol: &'static str,
-    enabled: bool,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    div()
-        .id(id)
-        .w(px(32.0))
-        .h(px(32.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_base()
-        .text_color(if enabled {
-            Colors::foreground()
-        } else {
-            Colors::muted_foreground()
-        })
-        .when(enabled, move |el| el.cursor_pointer().on_click(on_click))
-        .child(symbol)
 }

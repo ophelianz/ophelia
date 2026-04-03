@@ -16,7 +16,6 @@ pub enum IconName {
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
-    Settings,
     Trash2,
 }
 
@@ -36,7 +35,6 @@ impl IconName {
             Self::Plus => "plus",
             Self::PanelLeftClose => "panel-left-close",
             Self::PanelLeftOpen => "panel-left-open",
-            Self::Settings => "settings",
             Self::Trash2 => "trash",
         };
         SharedString::from(format!("icons/{name}.svg"))
