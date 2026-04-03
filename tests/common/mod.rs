@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 
 use ophelia::engine::http::TokenBucket;
 use ophelia::engine::types::{DownloadStatus, ProgressUpdate};
@@ -25,7 +25,9 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn drain_progress(rx: &mut mpsc::UnboundedReceiver<ProgressUpdate>) -> Vec<ProgressUpdate> {
+pub async fn drain_progress(
+    rx: &mut mpsc::UnboundedReceiver<ProgressUpdate>,
+) -> Vec<ProgressUpdate> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut updates = vec![];
     while let Ok(update) = rx.try_recv() {

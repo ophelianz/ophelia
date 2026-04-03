@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-use ophelia::engine::http::{download_task, HttpDownloadConfig};
+use ophelia::engine::http::{HttpDownloadConfig, download_task};
 use ophelia::engine::types::{DownloadId, DownloadStatus};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,10 +36,18 @@ async fn work_stealing_produces_correct_output() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0), url, dest.clone(), config, tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        config,
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -79,10 +87,18 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0), url, dest.clone(), config, tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        config,
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));

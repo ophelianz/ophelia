@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use ophelia::engine::http::{download_task, HttpDownloadConfig};
+use ophelia::engine::http::{HttpDownloadConfig, download_task};
 use ophelia::engine::types::{DownloadId, DownloadStatus};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -28,10 +28,18 @@ async fn parallel_download_with_range_support() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     download_task(
-        DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        HttpDownloadConfig::default(),
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -59,10 +67,18 @@ async fn single_stream_fallback_no_range_support() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     download_task(
-        DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        HttpDownloadConfig::default(),
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -89,10 +105,18 @@ async fn fallback_when_no_content_length() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     download_task(
-        DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        HttpDownloadConfig::default(),
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
@@ -118,7 +142,8 @@ async fn error_on_server_down() {
         None,
         unlimited_semaphore(),
         unlimited_throttle(),
-    ).await;
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
@@ -141,10 +166,18 @@ async fn progress_reports_increasing_bytes() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     download_task(
-        DownloadId(0), url, dest, HttpDownloadConfig::default(), tx,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), None,
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest,
+        HttpDownloadConfig::default(),
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx).await;
 

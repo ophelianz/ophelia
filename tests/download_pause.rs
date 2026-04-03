@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-use ophelia::engine::http::{download_task, HttpDownloadConfig};
+use ophelia::engine::http::{HttpDownloadConfig, download_task};
 use ophelia::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -44,9 +44,18 @@ async fn pause_and_resume_completes_correctly() {
         let token = pause_token.clone();
         tokio::spawn(async move {
             download_task(
-                DownloadId(0), url, dest, HttpDownloadConfig::default(), tx1,
-                token, sink, None, unlimited_semaphore(), unlimited_throttle(),
-            ).await;
+                DownloadId(0),
+                url,
+                dest,
+                HttpDownloadConfig::default(),
+                tx1,
+                token,
+                sink,
+                None,
+                unlimited_semaphore(),
+                unlimited_throttle(),
+            )
+            .await;
         })
     };
 
@@ -65,10 +74,18 @@ async fn pause_and_resume_completes_correctly() {
     // — Pass 2: resume from snapshots, run to completion —
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     download_task(
-        DownloadId(0), url, dest.clone(), HttpDownloadConfig::default(), tx2,
-        CancellationToken::new(), Arc::new(Mutex::new(None)), Some(snapshots),
-        unlimited_semaphore(), unlimited_throttle(),
-    ).await;
+        DownloadId(0),
+        url,
+        dest.clone(),
+        HttpDownloadConfig::default(),
+        tx2,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        Some(snapshots),
+        unlimited_semaphore(),
+        unlimited_throttle(),
+    )
+    .await;
 
     let updates = drain_progress(&mut rx2).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
