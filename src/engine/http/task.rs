@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -56,8 +56,11 @@ async fn resolve_chunks(
 ) -> Option<(u64, chunk::ChunkList, std::fs::File, PathBuf, PathBuf)> {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
         let _ = progress_tx.send(ProgressUpdate {
-            id, status, downloaded_bytes: downloaded,
-            total_bytes: total, speed_bytes_per_sec: 0,
+            id,
+            status,
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            speed_bytes_per_sec: 0,
         });
     };
 
@@ -68,26 +71,39 @@ async fn resolve_chunks(
                 starts: snapshots.iter().map(|s| s.start).collect(),
                 ends: snapshots.iter().map(|s| s.end).collect(),
                 downloaded: snapshots.iter().map(|s| s.downloaded).collect(),
-                statuses: snapshots.iter().map(|s| {
-                    if s.downloaded >= s.end - s.start {
-                        chunk::ChunkStatus::Finished
-                    } else {
-                        chunk::ChunkStatus::Pending
-                    }
-                }).collect(),
+                statuses: snapshots
+                    .iter()
+                    .map(|s| {
+                        if s.downloaded >= s.end - s.start {
+                            chunk::ChunkStatus::Finished
+                        } else {
+                            chunk::ChunkStatus::Pending
+                        }
+                    })
+                    .collect(),
             };
             let part_path = part_path_for(&destination);
             let file = match std::fs::OpenOptions::new().write(true).open(&part_path) {
                 Ok(f) => f,
-                Err(_) => { send(DownloadStatus::Error, 0, Some(total)); return None; }
+                Err(_) => {
+                    send(DownloadStatus::Error, 0, Some(total));
+                    return None;
+                }
             };
-            tracing::info!(total_bytes = total, chunks = cl.len(), "resuming chunked download");
+            tracing::info!(
+                total_bytes = total,
+                chunks = cl.len(),
+                "resuming chunked download"
+            );
             Some((total, cl, file, part_path, destination))
         }
         None => {
             let probe_result = match probe(probe_client, url).await {
                 Ok(p) => p,
-                Err(_) => { send(DownloadStatus::Error, 0, None); return None; }
+                Err(_) => {
+                    send(DownloadStatus::Error, 0, None);
+                    return None;
+                }
             };
             tracing::debug!(
                 accepts_ranges = probe_result.accepts_ranges,
@@ -112,17 +128,24 @@ async fn resolve_chunks(
                 None => {
                     tracing::info!("no content-length, falling back to single stream");
                     single_download(
-                        id, Arc::clone(chunk_client), url.to_owned(),
-                        part_path, destination,
-                        config.stall_timeout_secs, progress_tx.clone(),
+                        id,
+                        Arc::clone(chunk_client),
+                        url.to_owned(),
+                        part_path,
+                        destination,
+                        config.stall_timeout_secs,
+                        progress_tx.clone(),
                         throttle,
-                    ).await;
+                    )
+                    .await;
                     return None;
                 }
             };
 
             let file = match std::fs::OpenOptions::new()
-                .write(true).create_new(true).open(&part_path)
+                .write(true)
+                .create_new(true)
+                .open(&part_path)
             {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -130,7 +153,10 @@ async fn resolve_chunks(
                     send(DownloadStatus::Error, 0, Some(total_bytes));
                     return None;
                 }
-                Err(_) => { send(DownloadStatus::Error, 0, Some(total_bytes)); return None; }
+                Err(_) => {
+                    send(DownloadStatus::Error, 0, Some(total_bytes));
+                    return None;
+                }
             };
 
             if preallocate(&file, total_bytes).is_err() {
@@ -181,29 +207,50 @@ fn allocate_slot_arrays(chunks: &chunk::ChunkList) -> SlotArrays {
     let total_slots = n + steal_budget;
 
     let starts = Arc::new(
-        chunks.starts.iter().map(|&s| AtomicU64::new(s))
+        chunks
+            .starts
+            .iter()
+            .map(|&s| AtomicU64::new(s))
             .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
             .collect::<Vec<_>>(),
     );
     let ends = Arc::new(
-        chunks.ends.iter().map(|&e| AtomicU64::new(e))
+        chunks
+            .ends
+            .iter()
+            .map(|&e| AtomicU64::new(e))
             .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
             .collect::<Vec<_>>(),
     );
     let downloaded = Arc::new(
-        chunks.downloaded.iter().map(|&d| AtomicU64::new(d))
+        chunks
+            .downloaded
+            .iter()
+            .map(|&d| AtomicU64::new(d))
             .chain((0..steal_budget).map(|_| AtomicU64::new(0)))
             .collect::<Vec<_>>(),
     );
     let kill_tokens = Arc::new(
-        (0..total_slots).map(|_| Mutex::new(CancellationToken::new())).collect::<Vec<_>>(),
+        (0..total_slots)
+            .map(|_| Mutex::new(CancellationToken::new()))
+            .collect::<Vec<_>>(),
     );
     let activation = Arc::new(
-        (0..total_slots).map(|_| AtomicU64::new(u64::MAX)).collect::<Vec<_>>(),
+        (0..total_slots)
+            .map(|_| AtomicU64::new(u64::MAX))
+            .collect::<Vec<_>>(),
     );
     let next_slot = Arc::new(AtomicUsize::new(n));
 
-    SlotArrays { starts, ends, downloaded, kill_tokens, activation, next_slot, total_slots }
+    SlotArrays {
+        starts,
+        ends,
+        downloaded,
+        kill_tokens,
+        activation,
+        next_slot,
+        total_slots,
+    }
 }
 
 /// Reports final status after the drain loop exits.
@@ -229,9 +276,16 @@ fn finalize_download(
             .collect();
         *pause_sink.lock().unwrap() = Some(snapshots);
         let total_downloaded: u64 = slots.downloaded[..populated]
-            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum();
         tracing::info!(total_downloaded, total_bytes, "download paused");
-        send(DownloadStatus::Paused, total_downloaded, Some(total_bytes), 0);
+        send(
+            DownloadStatus::Paused,
+            total_downloaded,
+            Some(total_bytes),
+            0,
+        );
     } else if all_ok {
         match std::fs::rename(part_path, destination) {
             Ok(()) => {
@@ -245,9 +299,16 @@ fn finalize_download(
         }
     } else {
         let total_downloaded: u64 = slots.downloaded[..populated]
-            .iter().map(|a| a.load(Ordering::Relaxed)).sum();
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum();
         tracing::error!(total_downloaded, total_bytes, "download failed");
-        send(DownloadStatus::Error, total_downloaded, Some(total_bytes), 0);
+        send(
+            DownloadStatus::Error,
+            total_downloaded,
+            Some(total_bytes),
+            0,
+        );
     }
 }
 
@@ -298,10 +359,21 @@ async fn chunk_retry_loop(
                 result = server_semaphore.acquire() => result.expect("semaphore not closed"),
             };
             download_chunk(
-                &client, &url, start, end, resume_from, &file, &counters,
-                i, write_buffer_size, stall_timeout, &pause_token, &kill_token,
+                &client,
+                &url,
+                start,
+                end,
+                resume_from,
+                &file,
+                &counters,
+                i,
+                write_buffer_size,
+                stall_timeout,
+                &pause_token,
+                &kill_token,
                 &throttle,
-            ).await
+            )
+            .await
         };
 
         match chunk_result {
@@ -329,10 +401,14 @@ async fn chunk_retry_loop(
                     tracing::error!(chunk = i, attempt, "max retries exceeded");
                     return (i, ChunkOutcome::Failed);
                 }
-                let delay = retry_after.unwrap_or_else(|| {
-                    Duration::from_secs(2u64.pow(attempt.min(5)).min(30))
-                });
-                tracing::warn!(chunk = i, attempt, delay_secs = delay.as_secs(), "retrying chunk");
+                let delay = retry_after
+                    .unwrap_or_else(|| Duration::from_secs(2u64.pow(attempt.min(5)).min(30)));
+                tracing::warn!(
+                    chunk = i,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "retrying chunk"
+                );
                 tokio::select! {
                     biased;
                     _ = pause_token.cancelled() => return (i, ChunkOutcome::Paused),
@@ -397,9 +473,18 @@ pub async fn download_task(
     // if the server sends a Content-Disposition filename. Both resolved paths are
     // returned so the rest of the function uses the correct final name.
     let (total_bytes, chunks, file, part_path, destination) = match resolve_chunks(
-        resume_from, &probe_client, &chunk_client, &url,
-        destination, &config, id, &progress_tx, Arc::clone(&throttle),
-    ).await {
+        resume_from,
+        &probe_client,
+        &chunk_client,
+        &url,
+        destination,
+        &config,
+        id,
+        &progress_tx,
+        Arc::clone(&throttle),
+    )
+    .await
+    {
         Some(v) => v,
         None => return,
     };
@@ -422,7 +507,12 @@ pub async fn download_task(
         .iter()
         .map(|a| a.load(Ordering::Relaxed))
         .sum();
-    send(DownloadStatus::Downloading, already_done, Some(total_bytes), 0);
+    send(
+        DownloadStatus::Downloading,
+        already_done,
+        Some(total_bytes),
+        0,
+    );
 
     let mut pending: VecDeque<usize> = (0..num_initial_chunks)
         .filter(|&i| chunks.statuses[i] != chunk::ChunkStatus::Finished)
@@ -440,12 +530,21 @@ pub async fn download_task(
     // The logic lives in that top-level async fn; this just wires up the Arcs.
     let make_chunk_fut = |i: usize| {
         chunk_retry_loop(
-            i, url.clone(), Arc::clone(&chunk_client), Arc::clone(&file),
-            Arc::clone(&slots.downloaded), Arc::clone(&slots.starts),
-            Arc::clone(&slots.ends), Arc::clone(&slots.kill_tokens),
-            Arc::clone(&slots.activation), pause_token.clone(),
-            Arc::clone(&server_semaphore), Arc::clone(&throttle),
-            write_buffer_size, stall_timeout, max_retries,
+            i,
+            url.clone(),
+            Arc::clone(&chunk_client),
+            Arc::clone(&file),
+            Arc::clone(&slots.downloaded),
+            Arc::clone(&slots.starts),
+            Arc::clone(&slots.ends),
+            Arc::clone(&slots.kill_tokens),
+            Arc::clone(&slots.activation),
+            pause_token.clone(),
+            Arc::clone(&server_semaphore),
+            Arc::clone(&throttle),
+            write_buffer_size,
+            stall_timeout,
+            max_retries,
         )
     };
 
@@ -493,7 +592,9 @@ pub async fn download_task(
     );
 
     loop {
-        if join_set.is_empty() { break; }
+        if join_set.is_empty() {
+            break;
+        }
 
         let mut chunk_done: Option<(usize, ChunkOutcome)> = None;
         tokio::select! {
@@ -515,14 +616,18 @@ pub async fn download_task(
             if let Some(&original) = hedge_for.get(&finished_i) {
                 // Hedge finished first: snap original's counter to the full chunk
                 // range so its next attempt sees byte_start >= chunk_end and exits.
-                let range = slots.ends[original].load(Ordering::Relaxed)
+                let range = slots.ends[original]
+                    .load(Ordering::Relaxed)
                     .saturating_sub(slots.starts[original].load(Ordering::Relaxed));
                 slots.downloaded[original].store(range, Ordering::Relaxed);
                 slots.kill_tokens[original].lock().unwrap().cancel();
                 hedge_for.remove(&finished_i);
             } else {
                 // Original finished: cancel its hedge if one is running.
-                let h = hedge_for.iter().find(|&(_, &o)| o == finished_i).map(|(&h, _)| h);
+                let h = hedge_for
+                    .iter()
+                    .find(|&(_, &o)| o == finished_i)
+                    .map(|(&h, _)| h);
                 if let Some(h) = h {
                     slots.kill_tokens[h].lock().unwrap().cancel();
                     hedge_for.remove(&h);
@@ -546,14 +651,24 @@ pub async fn download_task(
             // Steal first; if nothing to steal and there is spare capacity, hedge.
             if pending.is_empty() && join_set.len() < current_limit {
                 try_steal(
-                    &slots.starts, &slots.ends, &slots.downloaded,
-                    &active, &slots.next_slot, &mut pending,
-                    write_buffer_size as u64, min_steal_bytes,
+                    &slots.starts,
+                    &slots.ends,
+                    &slots.downloaded,
+                    &active,
+                    &slots.next_slot,
+                    &mut pending,
+                    write_buffer_size as u64,
+                    min_steal_bytes,
                 );
                 if pending.is_empty() && !active.is_empty() {
                     if let Some((h, orig)) = try_hedge(
-                        &slots.starts, &slots.ends, &slots.downloaded,
-                        &active, &slots.next_slot, &mut pending, min_steal_bytes,
+                        &slots.starts,
+                        &slots.ends,
+                        &slots.downloaded,
+                        &active,
+                        &slots.next_slot,
+                        &mut pending,
+                        min_steal_bytes,
                     ) {
                         hedge_for.insert(h, orig);
                     }
@@ -573,5 +688,14 @@ pub async fn download_task(
     drop(file); // close before rename on Windows
 
     // --- 9. Completion ---
-    finalize_download(paused, all_ok, &slots, &part_path, &destination, total_bytes, &pause_sink, &send);
+    finalize_download(
+        paused,
+        all_ok,
+        &slots,
+        &part_path,
+        &destination,
+        total_bytes,
+        &pause_sink,
+        &send,
+    );
 }

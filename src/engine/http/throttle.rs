@@ -41,8 +41,8 @@ impl TokenBucket {
         let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
         inner.last_refill = now;
         // Refill up to 1 second's worth (max burst = 1s of bandwidth).
-        inner.available = (inner.available + elapsed * self.limit_bps as f64)
-            .min(self.limit_bps as f64);
+        inner.available =
+            (inner.available + elapsed * self.limit_bps as f64).min(self.limit_bps as f64);
         inner.available -= bytes as f64;
         if inner.available < 0.0 {
             Duration::from_secs_f64((-inner.available) / self.limit_bps as f64)
@@ -62,6 +62,8 @@ pub struct Throttle {
 
 impl Throttle {
     pub fn consume(&self, bytes: u64) -> Duration {
-        self.per_download.consume(bytes).max(self.global.consume(bytes))
+        self.per_download
+            .consume(bytes)
+            .max(self.global.consume(bytes))
     }
 }

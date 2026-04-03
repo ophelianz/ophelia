@@ -11,8 +11,8 @@
 //! Requires >= 2 eligible slots to have a meaningful mean to compare against.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::task::JoinHandle;
@@ -66,9 +66,7 @@ pub fn spawn_health_monitor(
             let now = activation_now();
             let eligible: Vec<(usize, f64)> = active_set
                 .iter()
-                .filter(|&&i| {
-                    now.saturating_sub(activation[i].load(Ordering::Relaxed)) >= GRACE_MS
-                })
+                .filter(|&&i| now.saturating_sub(activation[i].load(Ordering::Relaxed)) >= GRACE_MS)
                 .map(|&i| (i, ema[i]))
                 .collect();
 
@@ -83,7 +81,12 @@ pub fn spawn_health_monitor(
             }
 
             for (i, speed) in eligible.iter().filter(|(_, s)| *s < mean * SLOW_FACTOR) {
-                tracing::debug!(slot = i, speed = *speed as u64, mean = mean as u64, "health monitor killing slow worker");
+                tracing::debug!(
+                    slot = i,
+                    speed = *speed as u64,
+                    mean = mean as u64,
+                    "health monitor killing slow worker"
+                );
                 kills[*i].lock().unwrap().cancel();
             }
         }

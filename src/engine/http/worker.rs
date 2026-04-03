@@ -13,7 +13,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use super::error::{classify_io_error, classify_status, ChunkError};
+use super::error::{ChunkError, classify_io_error, classify_status};
 use super::throttle::Throttle;
 
 pub async fn download_chunk(

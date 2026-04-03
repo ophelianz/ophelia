@@ -19,24 +19,58 @@ pub enum DownloadStatus {
 
 #[allow(dead_code)]
 pub enum EngineCommand {
-    AddHttp { id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig },
-    Pause { id: DownloadId },
-    Resume { id: DownloadId },
-    Cancel { id: DownloadId },
+    AddHttp {
+        id: DownloadId,
+        url: String,
+        destination: PathBuf,
+        config: HttpDownloadConfig,
+    },
+    Pause {
+        id: DownloadId,
+    },
+    Resume {
+        id: DownloadId,
+    },
+    Cancel {
+        id: DownloadId,
+    },
     /// Pre-populate the paused map on startup without starting a task.
-    Restore { id: DownloadId, url: String, destination: PathBuf, config: HttpDownloadConfig, chunks: Vec<ChunkSnapshot> },
+    Restore {
+        id: DownloadId,
+        url: String,
+        destination: PathBuf,
+        config: HttpDownloadConfig,
+        chunks: Vec<ChunkSnapshot>,
+    },
     Shutdown,
 }
 
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
 /// The worker is the sole writer to SQLite and nothing else touches the DB.
 pub enum DbEvent {
-    Started  { id: DownloadId, url: String, destination: PathBuf },
-    Paused   { id: DownloadId, downloaded_bytes: u64, chunks: Vec<ChunkSnapshot> },
-    Resumed  { id: DownloadId },
-    Finished { id: DownloadId, total_bytes: u64 },
-    Error    { id: DownloadId },
-    Removed  { id: DownloadId },
+    Started {
+        id: DownloadId,
+        url: String,
+        destination: PathBuf,
+    },
+    Paused {
+        id: DownloadId,
+        downloaded_bytes: u64,
+        chunks: Vec<ChunkSnapshot>,
+    },
+    Resumed {
+        id: DownloadId,
+    },
+    Finished {
+        id: DownloadId,
+        total_bytes: u64,
+    },
+    Error {
+        id: DownloadId,
+    },
+    Removed {
+        id: DownloadId,
+    },
 }
 
 /// Filter for the history view.

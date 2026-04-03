@@ -31,9 +31,17 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> Result<ProbeResult, r
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split('/').last())
             .and_then(|v| v.parse::<u64>().ok());
-        Ok(ProbeResult { content_length: total, accepts_ranges: true, filename })
+        Ok(ProbeResult {
+            content_length: total,
+            accepts_ranges: true,
+            filename,
+        })
     } else {
-        Ok(ProbeResult { content_length: response.content_length(), accepts_ranges: false, filename })
+        Ok(ProbeResult {
+            content_length: response.content_length(),
+            accepts_ranges: false,
+            filename,
+        })
     }
 }
 
@@ -57,6 +65,9 @@ fn parse_content_disposition_filename(header: &str) -> Option<String> {
 fn sanitize_filename(name: &str) -> String {
     // Drop path separators and null bytes to prevent directory traversal.
     // Take only the last component in case the server sends a full path.
-    let base = name.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(name);
+    let base = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name);
     base.chars().filter(|&c| c != '\0').collect()
 }

@@ -22,7 +22,11 @@ const WINDOW_SECS: f64 = 2.0;
 fn update_ema(ema: f64, window_bytes: u64, elapsed: f64) -> f64 {
     let recent = window_bytes as f64 / elapsed;
     let updated = (1.0 - EMA_ALPHA) * ema + EMA_ALPHA * recent;
-    if window_bytes == 0 { updated * (WINDOW_SECS / elapsed.max(WINDOW_SECS)) } else { updated }
+    if window_bytes == 0 {
+        updated * (WINDOW_SECS / elapsed.max(WINDOW_SECS))
+    } else {
+        updated
+    }
 }
 
 pub fn spawn_progress_reporter(
@@ -45,8 +49,10 @@ pub fn spawn_progress_reporter(
 
             // Sum only populated slots (initial + any stolen)
             let populated = slot_count.load(Ordering::Relaxed);
-            let total_downloaded: u64 =
-                counters[..populated].iter().map(|a| a.load(Ordering::Relaxed)).sum();
+            let total_downloaded: u64 = counters[..populated]
+                .iter()
+                .map(|a| a.load(Ordering::Relaxed))
+                .sum();
             let new_bytes = total_downloaded.saturating_sub(last_total);
             last_total = total_downloaded;
             window_bytes += new_bytes;

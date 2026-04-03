@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, params};
 
-use crate::engine::types::{ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, SavedDownload};
+use crate::engine::types::{
+    ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, SavedDownload,
+};
 
 pub struct Db {
     conn: Connection,
@@ -26,7 +28,8 @@ impl Db {
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
-        self.conn.execute_batch("
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS downloads (
                 id          INTEGER PRIMARY KEY,
                 url         TEXT NOT NULL,
@@ -47,7 +50,8 @@ impl Db {
                 downloaded  INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (download_id, slot)
             );
-        ")
+        ",
+        )
     }
 
     /// On startup: any row still marked 'downloading' means we crashed mid-transfer.
@@ -71,7 +75,9 @@ impl Db {
         )?;
 
         let orphans: Vec<i64> = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
             .filter_map(|r| r.ok())
             .filter(|(_, dest)| {
                 let part = format!("{}.ophelia_part", dest);
@@ -81,9 +87,13 @@ impl Db {
             .collect();
 
         if !orphans.is_empty() {
-            tracing::info!(count = orphans.len(), "removing orphaned downloads (part file missing)");
+            tracing::info!(
+                count = orphans.len(),
+                "removing orphaned downloads (part file missing)"
+            );
             for id in orphans {
-                self.conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
+                self.conn
+                    .execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
             }
         }
         Ok(())
@@ -92,7 +102,8 @@ impl Db {
     /// Load all paused/pending downloads and their chunk snapshots for startup restoration.
     /// Also returns the global max id so DownloadEngine can continue the id sequence.
     pub fn load_for_restore(&self) -> rusqlite::Result<(Vec<SavedDownload>, u64)> {
-        let max_id = self.conn
+        let max_id = self
+            .conn
             .query_row("SELECT COALESCE(MAX(id), 0) FROM downloads", [], |row| {
                 row.get::<_, i64>(0)
             })
@@ -140,7 +151,11 @@ impl Db {
     /// Sole write path, called only from the DbEventWorker thread.
     pub fn handle(&self, event: DbEvent) -> rusqlite::Result<()> {
         match event {
-            DbEvent::Started { id, url, destination } => {
+            DbEvent::Started {
+                id,
+                url,
+                destination,
+            } => {
                 self.conn.execute(
                     "INSERT OR IGNORE INTO downloads (id, url, destination, status, added_at)
                      VALUES (?1, ?2, ?3, 'downloading', ?4)",
@@ -152,7 +167,11 @@ impl Db {
                     ],
                 )?;
             }
-            DbEvent::Paused { id, downloaded_bytes, chunks } => {
+            DbEvent::Paused {
+                id,
+                downloaded_bytes,
+                chunks,
+            } => {
                 self.conn.execute(
                     "UPDATE downloads SET status = 'paused', downloaded = ?1 WHERE id = ?2",
                     params![downloaded_bytes as i64, id.0 as i64],
@@ -187,10 +206,8 @@ impl Db {
             }
             DbEvent::Removed { id } => {
                 // ON DELETE CASCADE handles the chunks table.
-                self.conn.execute(
-                    "DELETE FROM downloads WHERE id = ?1",
-                    params![id.0 as i64],
-                )?;
+                self.conn
+                    .execute("DELETE FROM downloads WHERE id = ?1", params![id.0 as i64])?;
             }
         }
         Ok(())
@@ -246,10 +263,10 @@ impl HistoryReader {
 
     pub fn load(&self, filter: HistoryFilter, search: &str) -> rusqlite::Result<Vec<HistoryRow>> {
         let status_clause = match filter {
-            HistoryFilter::All      => "",
+            HistoryFilter::All => "",
             HistoryFilter::Finished => "AND status = 'finished'",
-            HistoryFilter::Error    => "AND status = 'error'",
-            HistoryFilter::Paused   => "AND status = 'paused'",
+            HistoryFilter::Error => "AND status = 'error'",
+            HistoryFilter::Paused => "AND status = 'paused'",
         };
         let sql = format!(
             "SELECT id, url, destination, status, total_bytes, downloaded, added_at, finished_at
@@ -281,11 +298,11 @@ impl HistoryReader {
 
 fn status_from_str(s: &str) -> DownloadStatus {
     match s {
-        "finished"    => DownloadStatus::Finished,
-        "error"       => DownloadStatus::Error,
-        "paused"      => DownloadStatus::Paused,
+        "finished" => DownloadStatus::Finished,
+        "error" => DownloadStatus::Error,
+        "paused" => DownloadStatus::Paused,
         "downloading" => DownloadStatus::Downloading,
-        _             => DownloadStatus::Pending,
+        _ => DownloadStatus::Pending,
     }
 }
 

@@ -76,7 +76,9 @@ pub fn try_steal(
 
     pending.push_front(slot);
     tracing::debug!(
-        victim = victim_i, slot, midpoint,
+        victim = victim_i,
+        slot,
+        midpoint,
         stolen_bytes = victim_end - midpoint,
         "work stolen"
     );
@@ -105,8 +107,9 @@ pub fn try_hedge(
     let (original, remaining) = active
         .iter()
         .map(|&i| {
-            let remaining = ends[i].load(Ordering::Relaxed)
-                .saturating_sub(starts[i].load(Ordering::Relaxed) + downloaded[i].load(Ordering::Relaxed));
+            let remaining = ends[i].load(Ordering::Relaxed).saturating_sub(
+                starts[i].load(Ordering::Relaxed) + downloaded[i].load(Ordering::Relaxed),
+            );
             (i, remaining)
         })
         .max_by_key(|&(_, r)| r)?;
@@ -121,14 +124,17 @@ pub fn try_hedge(
         return None;
     }
 
-    let current_pos = starts[original].load(Ordering::Relaxed) + downloaded[original].load(Ordering::Relaxed);
+    let current_pos =
+        starts[original].load(Ordering::Relaxed) + downloaded[original].load(Ordering::Relaxed);
     starts[slot].store(current_pos, Ordering::Relaxed);
     ends[slot].store(ends[original].load(Ordering::Relaxed), Ordering::Relaxed);
     // downloaded[slot] starts at 0 (pre-initialised in the main array).
 
     pending.push_back(slot);
     tracing::debug!(
-        original, slot, current_pos,
+        original,
+        slot,
+        current_pos,
         remaining_bytes = remaining,
         "hedging: racing duplicate connection on remaining range"
     );

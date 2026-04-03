@@ -19,17 +19,21 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 fn host_from_url(url: &str) -> String {
     let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
     let after_auth = after_scheme.splitn(2, '@').last().unwrap_or(after_scheme);
-    after_auth.splitn(2, '/').next().unwrap_or(after_auth).to_lowercase()
+    after_auth
+        .splitn(2, '/')
+        .next()
+        .unwrap_or(after_auth)
+        .to_lowercase()
 }
 
-use crate::engine::http::{download_task, HttpDownloadConfig, TokenBucket};
+use crate::engine::http::{HttpDownloadConfig, TokenBucket, download_task};
 use crate::engine::types::*;
 use crate::settings::Settings;
 
@@ -92,7 +96,13 @@ impl DownloadEngine {
         runtime.spawn(EngineActor::new(progress_tx, settings, db_tx, done_tx).run(cmd_rx, done_rx));
         runtime.spawn(crate::ipc::serve(ipc_tx));
 
-        Self { runtime, cmd_tx, progress_rx, ipc_rx, next_id: initial_next_id }
+        Self {
+            runtime,
+            cmd_tx,
+            progress_rx,
+            ipc_rx,
+            next_id: initial_next_id,
+        }
     }
 
     /// Pre-populate the paused map with a download restored from SQLite.
@@ -105,7 +115,13 @@ impl DownloadEngine {
         config: HttpDownloadConfig,
         chunks: Vec<ChunkSnapshot>,
     ) {
-        let _ = self.cmd_tx.send(EngineCommand::Restore { id, url, destination, config, chunks });
+        let _ = self.cmd_tx.send(EngineCommand::Restore {
+            id,
+            url,
+            destination,
+            config,
+            chunks,
+        });
     }
 
     /// Non-blocking drain of one pending IPC download request from the browser extension.
@@ -113,10 +129,20 @@ impl DownloadEngine {
         self.ipc_rx.try_recv().ok()
     }
 
-    pub fn add(&mut self, url: String, destination: PathBuf, config: HttpDownloadConfig) -> DownloadId {
+    pub fn add(
+        &mut self,
+        url: String,
+        destination: PathBuf,
+        config: HttpDownloadConfig,
+    ) -> DownloadId {
         let id = DownloadId(self.next_id);
         self.next_id += 1;
-        let _ = self.cmd_tx.send(EngineCommand::AddHttp { id, url, destination, config });
+        let _ = self.cmd_tx.send(EngineCommand::AddHttp {
+            id,
+            url,
+            destination,
+            config,
+        });
         id
     }
 
@@ -254,32 +280,59 @@ impl EngineActor {
             let ps_ = Arc::clone(&pause_sink);
             let gt_ = Arc::clone(&self.global_throttle);
             async move {
-                download_task(id, url_, dest_, cfg_, tx, pt_, ps_, resume_from, server_semaphore, gt_).await;
+                download_task(
+                    id,
+                    url_,
+                    dest_,
+                    cfg_,
+                    tx,
+                    pt_,
+                    ps_,
+                    resume_from,
+                    server_semaphore,
+                    gt_,
+                )
+                .await;
                 let _ = done_tx.send(id);
             }
         });
 
-        self.tasks.insert(id, TaskEntry {
-            handle,
-            pause_token,
-            pause_sink,
-            url,
-            destination,
-            config,
-        });
+        self.tasks.insert(
+            id,
+            TaskEntry {
+                handle,
+                pause_token,
+                pause_sink,
+                url,
+                destination,
+                config,
+            },
+        );
     }
 
     /// Pop queued tasks and spawn them until we hit max_concurrent or the queue is empty.
     fn try_start_next(&mut self) {
         while self.tasks.len() < self.max_concurrent {
-            let Some(next) = self.queue.pop_front() else { break };
-            tracing::info!(id = next.id.0, queued_remaining = self.queue.len(), "starting queued download");
+            let Some(next) = self.queue.pop_front() else {
+                break;
+            };
+            tracing::info!(
+                id = next.id.0,
+                queued_remaining = self.queue.len(),
+                "starting queued download"
+            );
             let _ = self.db_tx.send(DbEvent::Started {
                 id: next.id,
                 url: next.url.clone(),
                 destination: next.destination.clone(),
             });
-            self.spawn_task(next.id, next.url, next.destination, next.config, next.resume_from);
+            self.spawn_task(
+                next.id,
+                next.url,
+                next.destination,
+                next.config,
+                next.resume_from,
+            );
         }
     }
 
@@ -300,7 +353,13 @@ impl EngineActor {
             self.spawn_task(id, url, destination, config, None);
         } else {
             tracing::info!(id = id.0, %url, queued = self.queue.len() + 1, "download queued (at capacity)");
-            self.queue.push_back(QueuedTask { id, url, destination, config, resume_from: None });
+            self.queue.push_back(QueuedTask {
+                id,
+                url,
+                destination,
+                config,
+                resume_from: None,
+            });
         }
     }
 
@@ -317,25 +376,39 @@ impl EngineActor {
             let snapshots = entry.pause_sink.lock().unwrap().take();
             if let Some(snaps) = snapshots {
                 let downloaded_bytes: u64 = snaps.iter().map(|c| c.downloaded).sum();
-                let _ = self.db_tx.send(DbEvent::Paused { id, downloaded_bytes, chunks: snaps.clone() });
-                self.paused.insert(id, PausedTask {
-                    url: entry.url,
-                    destination: entry.destination,
-                    config: entry.config,
-                    snapshots: snaps,
+                let _ = self.db_tx.send(DbEvent::Paused {
+                    id,
+                    downloaded_bytes,
+                    chunks: snaps.clone(),
                 });
+                self.paused.insert(
+                    id,
+                    PausedTask {
+                        url: entry.url,
+                        destination: entry.destination,
+                        config: entry.config,
+                        snapshots: snaps,
+                    },
+                );
             }
         } else if let Some(pos) = self.queue.iter().position(|t| t.id == id) {
             // Not started yet -> pull from queue and park in paused with no progress.
             let task = self.queue.remove(pos).unwrap();
             tracing::info!(id = id.0, "pausing queued (unstarted) download");
-            let _ = self.db_tx.send(DbEvent::Paused { id, downloaded_bytes: 0, chunks: Vec::new() });
-            self.paused.insert(id, PausedTask {
-                url: task.url,
-                destination: task.destination,
-                config: task.config,
-                snapshots: Vec::new(),
+            let _ = self.db_tx.send(DbEvent::Paused {
+                id,
+                downloaded_bytes: 0,
+                chunks: Vec::new(),
             });
+            self.paused.insert(
+                id,
+                PausedTask {
+                    url: task.url,
+                    destination: task.destination,
+                    config: task.config,
+                    snapshots: Vec::new(),
+                },
+            );
         }
     }
 

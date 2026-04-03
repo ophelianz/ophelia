@@ -39,12 +39,18 @@ pub async fn single_download(
 
     let response = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(_) => { send(DownloadStatus::Error, 0, None, 0); return; }
+        Err(_) => {
+            send(DownloadStatus::Error, 0, None, 0);
+            return;
+        }
     };
 
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(f) => f,
-        Err(_) => { send(DownloadStatus::Error, 0, None, 0); return; }
+        Err(_) => {
+            send(DownloadStatus::Error, 0, None, 0);
+            return;
+        }
     };
 
     let mut downloaded: u64 = 0;
@@ -67,7 +73,10 @@ pub async fn single_download(
             return;
         };
 
-        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.is_err() {
+        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .is_err()
+        {
             send(DownloadStatus::Error, downloaded, None, 0);
             return;
         }
@@ -84,7 +93,12 @@ pub async fn single_download(
             window_bytes = 0;
             window_start = Instant::now();
         }
-        send(DownloadStatus::Downloading, downloaded, None, ema_speed as u64);
+        send(
+            DownloadStatus::Downloading,
+            downloaded,
+            None,
+            ema_speed as u64,
+        );
     }
 
     drop(file);

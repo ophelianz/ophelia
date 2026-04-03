@@ -64,7 +64,12 @@ pub fn split(total_size: u64, num_chunks: usize) -> ChunkList {
         statuses.push(ChunkStatus::Pending);
     }
 
-    ChunkList { starts, ends, downloaded, statuses }
+    ChunkList {
+        starts,
+        ends,
+        downloaded,
+        statuses,
+    }
 }
 
 #[cfg(test)]
@@ -126,7 +131,9 @@ mod tests {
     #[test]
     fn total_coverage_equals_file_size() {
         let chunks = split(999, 7);
-        let total: u64 = chunks.starts.iter()
+        let total: u64 = chunks
+            .starts
+            .iter()
             .zip(chunks.ends.iter())
             .map(|(s, e)| e - s)
             .sum();
