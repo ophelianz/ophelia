@@ -1,11 +1,8 @@
-//! Add Download modal overlay
-//!
-//! On open, the clipboard is checked immediately and if it holds a URL its
-//! pre-filled so the browser-extension workflow (copy → switch → confirm)
+//! Add Download modal overlay.
 
 use std::path::PathBuf;
 
-use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px, rgba};
+use gpui::{Context, Entity, EventEmitter, Window, div, prelude::*, px, rgba};
 
 use crate::ui::prelude::*;
 
@@ -17,7 +14,9 @@ pub struct DownloadConfirmed {
 pub struct DownloadCancelled;
 
 pub struct DownloadModal {
-    url: Option<String>,
+    url_input: Entity<TextField>,
+    destination_input: Entity<TextField>,
+    destination_edited: bool,
 }
 
 impl EventEmitter<DownloadConfirmed> for DownloadModal {}
@@ -25,53 +24,142 @@ impl EventEmitter<DownloadCancelled> for DownloadModal {}
 
 impl DownloadModal {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Pre-fill from clipboard if it looks like a URL.
-        let url = cx
-            .read_from_clipboard()
+        let url = Self::clipboard_url(cx).unwrap_or_default();
+        let destination = if url.is_empty() {
+            String::new()
+        } else {
+            Self::destination_for(&url).to_string_lossy().to_string()
+        };
+
+        let url_input =
+            cx.new(|cx| TextField::new(url.clone(), "https://example.com/file.zip", cx));
+        let destination_input =
+            cx.new(|cx| TextField::new(destination, "~/Downloads/file.zip", cx));
+
+        cx.subscribe(
+            &url_input,
+            |this: &mut Self, _, _: &TextFieldChanged, cx| {
+                if this.destination_edited {
+                    cx.notify();
+                    return;
+                }
+
+                let next_destination = {
+                    let url = this.url_input.read(cx).text().trim().to_string();
+                    if url.is_empty() {
+                        String::new()
+                    } else {
+                        Self::destination_for(&url).to_string_lossy().to_string()
+                    }
+                };
+
+                this.destination_input.update(cx, |input, cx| {
+                    input.set_text(next_destination, cx);
+                });
+                cx.notify();
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &destination_input,
+            |this: &mut Self, _, event: &TextFieldChanged, cx| {
+                let auto_destination = {
+                    let url = this.url_input.read(cx).text().trim().to_string();
+                    if url.is_empty() {
+                        String::new()
+                    } else {
+                        Self::destination_for(&url).to_string_lossy().to_string()
+                    }
+                };
+
+                this.destination_edited = event.text.as_ref() != auto_destination;
+                cx.notify();
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &url_input,
+            |this: &mut Self, _, _: &TextFieldSubmitted, cx| {
+                this.confirm_if_valid(cx);
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &destination_input,
+            |this: &mut Self, _, _: &TextFieldSubmitted, cx| {
+                this.confirm_if_valid(cx);
+            },
+        )
+        .detach();
+
+        Self {
+            url_input,
+            destination_input,
+            destination_edited: false,
+        }
+    }
+
+    fn clipboard_url(cx: &mut Context<Self>) -> Option<String> {
+        cx.read_from_clipboard()
             .and_then(|item| item.text())
-            .filter(|s| s.starts_with("http://") || s.starts_with("https://"));
-        Self { url }
+            .map(|text| text.trim().to_string())
+            .filter(|text| Self::is_valid_url(text))
     }
 
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        self.url = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .filter(|s| s.starts_with("http://") || s.starts_with("https://"));
+        if let Some(url) = Self::clipboard_url(cx) {
+            self.url_input
+                .update(cx, |input, cx| input.set_text(url, cx));
+        }
         cx.notify();
     }
 
     fn destination_for(url: &str) -> PathBuf {
         let filename = url
             .split('/')
-            .last()
+            .next_back()
             .and_then(|s| s.split('?').next())
             .filter(|s| !s.is_empty())
             .unwrap_or("download");
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join("Downloads").join(filename)
     }
+
+    fn is_valid_url(url: &str) -> bool {
+        let url = url.trim();
+        url.starts_with("http://") || url.starts_with("https://")
+    }
+
+    fn form_values(&self, cx: &mut Context<Self>) -> (String, String) {
+        (
+            self.url_input.read(cx).text().trim().to_string(),
+            self.destination_input.read(cx).text().trim().to_string(),
+        )
+    }
+
+    fn can_confirm(&self, cx: &mut Context<Self>) -> bool {
+        let (url, destination) = self.form_values(cx);
+        Self::is_valid_url(&url) && !destination.is_empty()
+    }
+
+    fn confirm_if_valid(&mut self, cx: &mut Context<Self>) {
+        let (url, destination) = self.form_values(cx);
+        if Self::is_valid_url(&url) && !destination.is_empty() {
+            cx.emit(DownloadConfirmed {
+                url,
+                destination: PathBuf::from(destination),
+            });
+        }
+    }
 }
 
 impl Render for DownloadModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let url = self.url.clone();
-        let dest = url.as_deref().map(Self::destination_for);
-        let can_confirm = url.is_some();
+        let can_confirm = self.can_confirm(cx);
 
-        let url_display: SharedString = url
-            .as_deref()
-            .unwrap_or("Copy a link and click Paste")
-            .to_string()
-            .into();
-
-        let dest_display: SharedString = dest
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default()
-            .into();
-
-        // Full-window dimmed backdrop
         div()
             .absolute()
             .inset_0()
@@ -79,10 +167,9 @@ impl Render for DownloadModal {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000088))
-            // Centered card
             .child(
                 div()
-                    .w(px(480.0))
+                    .w(px(520.0))
                     .rounded(px(14.0))
                     .border_1()
                     .border_color(Colors::border())
@@ -91,7 +178,6 @@ impl Render for DownloadModal {
                     .flex()
                     .flex_col()
                     .gap(px(20.0))
-                    // Title
                     .child(
                         div()
                             .text_xl()
@@ -99,7 +185,6 @@ impl Render for DownloadModal {
                             .text_color(Colors::foreground())
                             .child("Add Download"),
                     )
-                    // URL row
                     .child(
                         div()
                             .flex()
@@ -116,23 +201,7 @@ impl Render for DownloadModal {
                                 div()
                                     .flex()
                                     .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .px(px(12.0))
-                                            .py(px(10.0))
-                                            .rounded(px(8.0))
-                                            .border_1()
-                                            .border_color(Colors::input_border())
-                                            .bg(Colors::background())
-                                            .text_sm()
-                                            .text_color(if self.url.is_some() {
-                                                Colors::foreground()
-                                            } else {
-                                                Colors::muted_foreground()
-                                            })
-                                            .child(url_display),
-                                    )
+                                    .child(div().flex_1().child(self.url_input.clone()))
                                     .child(
                                         div()
                                             .id("paste-btn")
@@ -155,35 +224,20 @@ impl Render for DownloadModal {
                                     ),
                             ),
                     )
-                    // Destination row (only shown when URL is set)
-                    .when(can_confirm, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(Colors::muted_foreground())
-                                        .child("Save to"),
-                                )
-                                .child(
-                                    div()
-                                        .px(px(12.0))
-                                        .py(px(10.0))
-                                        .rounded(px(8.0))
-                                        .border_1()
-                                        .border_color(Colors::input_border())
-                                        .bg(Colors::background())
-                                        .text_sm()
-                                        .text_color(Colors::muted_foreground())
-                                        .child(dest_display),
-                                ),
-                        )
-                    })
-                    // Action buttons
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(Colors::muted_foreground())
+                                    .child("Save to"),
+                            )
+                            .child(self.destination_input.clone()),
+                    )
                     .child(
                         div()
                             .flex()
@@ -222,12 +276,8 @@ impl Render for DownloadModal {
                                     .text_color(Colors::background())
                                     .cursor_pointer()
                                     .when(can_confirm, |el| {
-                                        el.on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(url) = this.url.clone() {
-                                                let destination =
-                                                    DownloadModal::destination_for(&url);
-                                                cx.emit(DownloadConfirmed { url, destination });
-                                            }
+                                        el.on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_if_valid(cx);
                                         }))
                                     })
                                     .child("Download"),
