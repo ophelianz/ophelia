@@ -16,6 +16,7 @@ pub enum DownloadStatus {
     Paused,
     Finished,
     Error,
+    Cancelled,
 }
 
 /// Engine-level control actions. Providers may support only a subset of these.
@@ -27,13 +28,28 @@ pub enum DownloadControlAction {
     Restore,
 }
 
+/// Artifact state is tracked separately from transfer outcome so history can say
+/// "finished, but deleted" or "cancelled, and missing on disk".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactState {
+    Present,
+    Deleted,
+    Missing,
+}
+
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
 /// The worker is the sole writer to SQLite and nothing else touches the DB.
 pub enum DbEvent {
-    Started {
+    Added {
         id: DownloadId,
         source: PersistedDownloadSource,
         destination: PathBuf,
+    },
+    Queued {
+        id: DownloadId,
+    },
+    Started {
+        id: DownloadId,
     },
     Paused {
         id: DownloadId,
@@ -50,8 +66,12 @@ pub enum DbEvent {
     Error {
         id: DownloadId,
     },
-    Removed {
+    Cancelled {
         id: DownloadId,
+    },
+    ArtifactStateChanged {
+        id: DownloadId,
+        artifact_state: ArtifactState,
     },
 }
 
@@ -62,6 +82,8 @@ pub enum HistoryFilter {
     Finished,
     Error,
     Paused,
+    #[allow(dead_code)] // backend-ready filter; the current UI has not added a dedicated chip yet.
+    Cancelled,
 }
 
 /// A row returned by the history query, one entry per download ever recorded.
@@ -76,6 +98,9 @@ pub struct HistoryRow {
     pub source_label: String,
     pub destination: String,
     pub status: DownloadStatus,
+    #[allow(dead_code)]
+    // tracked for history semantics; fuller presentation wiring can land separately.
+    pub artifact_state: ArtifactState,
     pub total_bytes: Option<u64>,
     pub downloaded_bytes: u64,
     /// Unix milliseconds when the download was added.

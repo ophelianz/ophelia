@@ -86,6 +86,8 @@ impl Downloads {
             model.push_saved(saved_dl);
         }
 
+        model.refresh_history(cx);
+
         cx.spawn(async |this, cx: &mut gpui::AsyncApp| {
             loop {
                 cx.background_executor()
@@ -165,9 +167,17 @@ impl Downloads {
         cx.notify();
     }
 
-    pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine.cancel(id);
+    pub fn delete_artifact(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        let Some(idx) = self.ids.iter().position(|&download_id| download_id == id) else {
+            return;
+        };
+        let destination = PathBuf::from(self.destinations[idx].as_ref());
+        self.engine.delete_artifact(id, destination);
         cx.notify();
+    }
+
+    pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        self.delete_artifact(id, cx);
     }
 
     /// Samples total speed once per second (every 10 × 100 ms polls).
@@ -288,7 +298,10 @@ impl Downloads {
     fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
-            EngineNotification::Removed { id } => self.remove_row(id, cx),
+            EngineNotification::Removed { id } => {
+                self.remove_row(id, cx);
+                self.refresh_history(cx);
+            }
             EngineNotification::ControlUnsupported { id, action } => {
                 tracing::warn!(
                     id = id.0,

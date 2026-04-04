@@ -4,8 +4,8 @@ use rusqlite::{Connection, params};
 
 use crate::engine::state::http;
 use crate::engine::types::{
-    DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, PersistedDownloadSource,
-    ProviderResumeData, SavedDownload,
+    ArtifactState, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
+    PersistedDownloadSource, ProviderResumeData, SavedDownload,
 };
 
 #[cfg(test)]
@@ -45,6 +45,7 @@ impl Db {
                 url         TEXT NOT NULL,
                 destination TEXT NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'pending',
+                artifact_state TEXT NOT NULL DEFAULT 'present',
                 total_bytes INTEGER,
                 downloaded  INTEGER NOT NULL DEFAULT 0,
                 added_at    INTEGER NOT NULL,
@@ -55,6 +56,7 @@ impl Db {
         ",
         )?;
         self.ensure_downloads_provider_kind_column()?;
+        self.ensure_downloads_artifact_state_column()?;
         http::migrate(&self.conn)?;
         Ok(())
     }
@@ -66,6 +68,18 @@ impl Db {
 
         self.conn.execute(
             "ALTER TABLE downloads ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'http'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_downloads_artifact_state_column(&self) -> rusqlite::Result<()> {
+        if self.downloads_has_column("artifact_state")? {
+            return Ok(());
+        }
+
+        self.conn.execute(
+            "ALTER TABLE downloads ADD COLUMN artifact_state TEXT NOT NULL DEFAULT 'present'",
             [],
         )?;
         Ok(())
@@ -100,7 +114,8 @@ impl Db {
     /// Happens when the user manually deleted a partial download.
     pub fn validate_integrity(&self) -> rusqlite::Result<()> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, destination FROM downloads WHERE status IN ('paused', 'pending')",
+            "SELECT id, destination FROM downloads
+             WHERE status IN ('paused', 'pending') AND downloaded > 0",
         )?;
 
         let orphans: Vec<i64> = stmt
@@ -118,11 +133,16 @@ impl Db {
         if !orphans.is_empty() {
             tracing::info!(
                 count = orphans.len(),
-                "removing orphaned downloads (part file missing)"
+                "marking orphaned downloads missing (part file missing)"
             );
             for id in orphans {
-                self.conn
-                    .execute("DELETE FROM downloads WHERE id = ?1", params![id])?;
+                self.conn.execute(
+                    "UPDATE downloads
+                     SET status = 'cancelled', artifact_state = 'missing', finished_at = COALESCE(finished_at, ?1)
+                     WHERE id = ?2",
+                    params![unix_ms(), id],
+                )?;
+                self.save_resume_data(DownloadId(id as u64), None)?;
             }
         }
         Ok(())
@@ -197,15 +217,15 @@ impl Db {
     /// Sole write path, called only from the DbEventWorker thread.
     pub fn handle(&self, event: DbEvent) -> rusqlite::Result<()> {
         match event {
-            DbEvent::Started {
+            DbEvent::Added {
                 id,
                 source,
                 destination,
             } => {
                 self.conn.execute(
                     "INSERT OR IGNORE INTO downloads
-                     (id, provider_kind, url, destination, status, added_at)
-                     VALUES (?1, ?2, ?3, ?4, 'downloading', ?5)",
+                     (id, provider_kind, url, destination, status, artifact_state, added_at)
+                     VALUES (?1, ?2, ?3, ?4, 'pending', 'present', ?5)",
                     params![
                         id.0 as i64,
                         source.kind(),
@@ -213,6 +233,18 @@ impl Db {
                         destination.to_string_lossy().as_ref(),
                         unix_ms()
                     ],
+                )?;
+            }
+            DbEvent::Queued { id } => {
+                self.conn.execute(
+                    "UPDATE downloads SET status = 'pending' WHERE id = ?1",
+                    params![id.0 as i64],
+                )?;
+            }
+            DbEvent::Started { id } | DbEvent::Resumed { id } => {
+                self.conn.execute(
+                    "UPDATE downloads SET status = 'downloading' WHERE id = ?1",
+                    params![id.0 as i64],
                 )?;
             }
             DbEvent::Paused {
@@ -225,12 +257,6 @@ impl Db {
                     params![downloaded_bytes as i64, id.0 as i64],
                 )?;
                 self.save_resume_data(id, resume_data.as_ref())?;
-            }
-            DbEvent::Resumed { id } => {
-                self.conn.execute(
-                    "UPDATE downloads SET status = 'downloading' WHERE id = ?1",
-                    params![id.0 as i64],
-                )?;
             }
             DbEvent::Finished { id, total_bytes } => {
                 self.conn.execute(
@@ -245,14 +271,22 @@ impl Db {
             }
             DbEvent::Error { id } => {
                 self.conn.execute(
-                    "UPDATE downloads SET status = 'error' WHERE id = ?1",
-                    params![id.0 as i64],
+                    "UPDATE downloads SET status = 'error', finished_at = COALESCE(finished_at, ?1) WHERE id = ?2",
+                    params![unix_ms(), id.0 as i64],
                 )?;
             }
-            DbEvent::Removed { id } => {
-                // ON DELETE CASCADE handles the chunks table.
-                self.conn
-                    .execute("DELETE FROM downloads WHERE id = ?1", params![id.0 as i64])?;
+            DbEvent::Cancelled { id } => {
+                self.conn.execute(
+                    "UPDATE downloads SET status = 'cancelled', finished_at = COALESCE(finished_at, ?1) WHERE id = ?2",
+                    params![unix_ms(), id.0 as i64],
+                )?;
+                self.save_resume_data(id, None)?;
+            }
+            DbEvent::ArtifactStateChanged { id, artifact_state } => {
+                self.conn.execute(
+                    "UPDATE downloads SET artifact_state = ?1 WHERE id = ?2",
+                    params![artifact_state_to_str(artifact_state), id.0 as i64],
+                )?;
             }
         }
         Ok(())
@@ -313,9 +347,10 @@ impl HistoryReader {
             HistoryFilter::Finished => "AND status = 'finished'",
             HistoryFilter::Error => "AND status = 'error'",
             HistoryFilter::Paused => "AND status = 'paused'",
+            HistoryFilter::Cancelled => "AND status = 'cancelled'",
         };
         let sql = format!(
-            "SELECT id, provider_kind, url, destination, status, total_bytes, downloaded, added_at, finished_at
+            "SELECT id, provider_kind, url, destination, status, artifact_state, total_bytes, downloaded, added_at, finished_at
              FROM downloads
              WHERE 1=1 {status_clause}
                AND (?1 = ''
@@ -330,16 +365,18 @@ impl HistoryReader {
                 let provider_kind: String = row.get(1)?;
                 let locator: String = row.get(2)?;
                 let status_str: String = row.get(4)?;
+                let artifact_state_str: String = row.get(5)?;
                 Ok(HistoryRow {
                     id: DownloadId(row.get::<_, i64>(0)? as u64),
                     provider_kind: provider_kind.clone(),
                     source_label: history_source_label(&provider_kind, locator),
                     destination: row.get(3)?,
                     status: status_from_str(&status_str),
-                    total_bytes: row.get::<_, Option<i64>>(5)?.map(|b| b as u64),
-                    downloaded_bytes: row.get::<_, i64>(6)? as u64,
-                    added_at: row.get(7)?,
-                    finished_at: row.get(8)?,
+                    artifact_state: artifact_state_from_str(&artifact_state_str),
+                    total_bytes: row.get::<_, Option<i64>>(6)?.map(|b| b as u64),
+                    downloaded_bytes: row.get::<_, i64>(7)? as u64,
+                    added_at: row.get(8)?,
+                    finished_at: row.get(9)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -360,7 +397,24 @@ fn status_from_str(s: &str) -> DownloadStatus {
         "error" => DownloadStatus::Error,
         "paused" => DownloadStatus::Paused,
         "downloading" => DownloadStatus::Downloading,
+        "cancelled" => DownloadStatus::Cancelled,
         _ => DownloadStatus::Pending,
+    }
+}
+
+fn artifact_state_from_str(s: &str) -> ArtifactState {
+    match s {
+        "deleted" => ArtifactState::Deleted,
+        "missing" => ArtifactState::Missing,
+        _ => ArtifactState::Present,
+    }
+}
+
+fn artifact_state_to_str(state: ArtifactState) -> &'static str {
+    match state {
+        ArtifactState::Present => "present",
+        ArtifactState::Deleted => "deleted",
+        ArtifactState::Missing => "missing",
     }
 }
 
@@ -416,6 +470,7 @@ mod tests {
         db.migrate().unwrap();
 
         assert!(db.downloads_has_column("provider_kind").unwrap());
+        assert!(db.downloads_has_column("artifact_state").unwrap());
 
         let provider_kind: String = db
             .conn
@@ -426,6 +481,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(provider_kind, format!("'{HTTP_PROVIDER_KIND}'"));
+
+        let artifact_state: String = db
+            .conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('downloads') WHERE name = 'artifact_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_state, "'present'");
     }
 
     #[test]
@@ -500,7 +565,7 @@ mod tests {
         let (_dir, db_path) = temp_db_path();
         let db = Db::open_at(&db_path).unwrap();
 
-        db.handle(DbEvent::Started {
+        db.handle(DbEvent::Added {
             id: DownloadId(1),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/success.zip".to_string(),
@@ -508,13 +573,14 @@ mod tests {
             destination: PathBuf::from("/tmp/success.zip"),
         })
         .unwrap();
+        db.handle(DbEvent::Started { id: DownloadId(1) }).unwrap();
         db.handle(DbEvent::Finished {
             id: DownloadId(1),
             total_bytes: 100,
         })
         .unwrap();
 
-        db.handle(DbEvent::Started {
+        db.handle(DbEvent::Added {
             id: DownloadId(2),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/failure.zip".to_string(),
@@ -522,9 +588,10 @@ mod tests {
             destination: PathBuf::from("/tmp/failure.zip"),
         })
         .unwrap();
+        db.handle(DbEvent::Started { id: DownloadId(2) }).unwrap();
         db.handle(DbEvent::Error { id: DownloadId(2) }).unwrap();
 
-        db.handle(DbEvent::Started {
+        db.handle(DbEvent::Added {
             id: DownloadId(3),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/paused.zip".to_string(),
@@ -532,6 +599,7 @@ mod tests {
             destination: PathBuf::from("/tmp/paused.zip"),
         })
         .unwrap();
+        db.handle(DbEvent::Started { id: DownloadId(3) }).unwrap();
         db.handle(DbEvent::Paused {
             id: DownloadId(3),
             downloaded_bytes: 12,
@@ -567,5 +635,32 @@ mod tests {
             .load(HistoryFilter::All, HTTP_PROVIDER_KIND)
             .unwrap();
         assert_eq!(provider_search.len(), 3);
+    }
+
+    #[test]
+    fn history_reader_keeps_cancelled_rows_and_tracks_artifact_state() {
+        let (_dir, db_path) = temp_db_path();
+        let db = Db::open_at(&db_path).unwrap();
+
+        db.handle(DbEvent::Added {
+            id: DownloadId(4),
+            source: PersistedDownloadSource::Http {
+                url: "https://example.com/deleted.zip".to_string(),
+            },
+            destination: PathBuf::from("/tmp/deleted.zip"),
+        })
+        .unwrap();
+        db.handle(DbEvent::Cancelled { id: DownloadId(4) }).unwrap();
+        db.handle(DbEvent::ArtifactStateChanged {
+            id: DownloadId(4),
+            artifact_state: ArtifactState::Deleted,
+        })
+        .unwrap();
+
+        let history = HistoryReader::open_at(&db_path).unwrap();
+        let cancelled = history.load(HistoryFilter::Cancelled, "").unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].status, DownloadStatus::Cancelled);
+        assert_eq!(cancelled[0].artifact_state, ArtifactState::Deleted);
     }
 }

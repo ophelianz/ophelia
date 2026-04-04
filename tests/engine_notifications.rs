@@ -19,7 +19,7 @@ fn wait_for_notification(engine: &mut DownloadEngine) -> EngineNotification {
 }
 
 #[test]
-fn queued_pause_resume_and_remove_emit_notifications() {
+fn queued_pause_resume_and_delete_emit_notifications() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
     let settings = Settings {
         max_concurrent_downloads: 0,
@@ -28,9 +28,10 @@ fn queued_pause_resume_and_remove_emit_notifications() {
     let mut engine = DownloadEngine::new(settings, db_tx, 1);
 
     let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
-        tempdir.path().join("file.bin"),
+        destination.clone(),
         HttpDownloadConfig::default(),
     ));
 
@@ -56,9 +57,13 @@ fn queued_pause_resume_and_remove_emit_notifications() {
         other => panic!("expected pending update, got {other:?}"),
     }
 
-    engine.cancel(id);
+    std::fs::write(&destination, b"partial").unwrap();
+    engine.delete_artifact(id, destination.clone());
     match wait_for_notification(&mut engine) {
-        EngineNotification::Removed { id: removed } => assert_eq!(removed, id),
+        EngineNotification::Removed { id: removed } => {
+            assert_eq!(removed, id);
+            assert!(!destination.exists());
+        }
         other => panic!("expected removed notification, got {other:?}"),
     }
 }

@@ -136,6 +136,7 @@ impl HistoryRowModel {
         let (status_icon, status_color) = match row.status {
             DownloadStatus::Finished => (IconName::CircleCheck, Colors::active().into()),
             DownloadStatus::Error => (IconName::CircleX, Colors::error().into()),
+            DownloadStatus::Cancelled => (IconName::CircleX, Colors::muted_foreground().into()),
             DownloadStatus::Paused => (IconName::CirclePause, Colors::queued().into()),
             DownloadStatus::Downloading => (IconName::ArrowDownToLine, Colors::finished().into()),
             DownloadStatus::Pending => {
