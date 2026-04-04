@@ -12,8 +12,22 @@ use tokio::sync::mpsc;
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
+use super::task::TaskFinalState;
+
 const EMA_ALPHA: f64 = 0.3;
 const WINDOW_SECS: f64 = 2.0;
+
+fn task_state(
+    status: DownloadStatus,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) -> TaskFinalState {
+    TaskFinalState {
+        status,
+        downloaded_bytes,
+        total_bytes,
+    }
+}
 
 pub async fn single_download(
     id: DownloadId,
@@ -24,7 +38,7 @@ pub async fn single_download(
     stall_timeout_secs: u64,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     throttle: Arc<Throttle>,
-) {
+) -> TaskFinalState {
     let stall_timeout = Duration::from_secs(stall_timeout_secs);
 
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
@@ -41,7 +55,7 @@ pub async fn single_download(
         Ok(r) => r,
         Err(_) => {
             send(DownloadStatus::Error, 0, None, 0);
-            return;
+            return task_state(DownloadStatus::Error, 0, None);
         }
     };
 
@@ -49,7 +63,7 @@ pub async fn single_download(
         Ok(f) => f,
         Err(_) => {
             send(DownloadStatus::Error, 0, None, 0);
-            return;
+            return task_state(DownloadStatus::Error, 0, None);
         }
     };
 
@@ -65,12 +79,12 @@ pub async fn single_download(
         let result = tokio::time::timeout(stall_timeout, stream.next()).await;
         let Ok(maybe) = result else {
             send(DownloadStatus::Error, downloaded, None, 0);
-            return;
+            return task_state(DownloadStatus::Error, downloaded, None);
         };
         let Some(item) = maybe else { break };
         let Ok(chunk) = item else {
             send(DownloadStatus::Error, downloaded, None, 0);
-            return;
+            return task_state(DownloadStatus::Error, downloaded, None);
         };
 
         if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
@@ -78,7 +92,7 @@ pub async fn single_download(
             .is_err()
         {
             send(DownloadStatus::Error, downloaded, None, 0);
-            return;
+            return task_state(DownloadStatus::Error, downloaded, None);
         }
         let wait = throttle.consume(chunk.len() as u64);
         if !wait.is_zero() {
@@ -103,10 +117,14 @@ pub async fn single_download(
 
     drop(file);
     match std::fs::rename(&part_path, &destination) {
-        Ok(()) => send(DownloadStatus::Finished, downloaded, None, 0),
+        Ok(()) => {
+            send(DownloadStatus::Finished, downloaded, None, 0);
+            task_state(DownloadStatus::Finished, downloaded, None)
+        }
         Err(e) => {
             tracing::error!(err = %e, "rename failed after single download");
             send(DownloadStatus::Error, downloaded, None, 0);
+            task_state(DownloadStatus::Error, downloaded, None)
         }
     }
 }

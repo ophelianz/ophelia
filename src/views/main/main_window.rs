@@ -64,8 +64,12 @@ impl MainWindow {
     }
 
     pub(crate) fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
-        self.downloads.update(cx, |downloads, _| {
-            downloads.settings = settings;
+        self.downloads.update(cx, |downloads, cx| {
+            downloads.apply_settings(settings.clone(), cx);
+        });
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.download_dir = settings.download_dir();
+            cx.notify();
         });
         cx.notify();
     }

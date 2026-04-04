@@ -3,8 +3,12 @@ use std::path::PathBuf;
 use rusqlite::{Connection, params};
 
 use crate::engine::types::{
-    ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, SavedDownload,
+    ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, HttpResumeData,
+    PersistedDownloadSource, ProviderResumeData, SavedDownload,
 };
+
+#[cfg(test)]
+const HTTP_PROVIDER_KIND: &str = "http";
 
 pub struct Db {
     conn: Connection,
@@ -32,6 +36,7 @@ impl Db {
             "
             CREATE TABLE IF NOT EXISTS downloads (
                 id          INTEGER PRIMARY KEY,
+                provider_kind TEXT NOT NULL DEFAULT 'http',
                 url         TEXT NOT NULL,
                 destination TEXT NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'pending',
@@ -51,7 +56,33 @@ impl Db {
                 PRIMARY KEY (download_id, slot)
             );
         ",
-        )
+        )?;
+        self.ensure_downloads_provider_kind_column()?;
+        Ok(())
+    }
+
+    fn ensure_downloads_provider_kind_column(&self) -> rusqlite::Result<()> {
+        if self.downloads_has_column("provider_kind")? {
+            return Ok(());
+        }
+
+        self.conn.execute(
+            "ALTER TABLE downloads ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'http'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn downloads_has_column(&self, column_name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(downloads)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column_name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// On startup: any row still marked 'downloading' means we crashed mid-transfer.
@@ -99,7 +130,8 @@ impl Db {
         Ok(())
     }
 
-    /// Load all paused/pending downloads and their chunk snapshots for startup restoration.
+    /// Load all paused/pending downloads and their provider-specific resume state
+    /// for startup restoration.
     /// Also returns the global max id so DownloadEngine can continue the id sequence.
     pub fn load_for_restore(&self) -> rusqlite::Result<(Vec<SavedDownload>, u64)> {
         let max_id = self
@@ -110,30 +142,59 @@ impl Db {
             .unwrap_or(0) as u64;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, url, destination, downloaded, total_bytes
+            "SELECT id, provider_kind, url, destination, downloaded, total_bytes
              FROM downloads WHERE status IN ('paused', 'pending') ORDER BY id",
         )?;
 
-        let mut downloads: Vec<SavedDownload> = stmt
-            .query_map([], |row| {
-                Ok(SavedDownload {
-                    id: DownloadId(row.get::<_, i64>(0)? as u64),
-                    url: row.get(1)?,
-                    destination: PathBuf::from(row.get::<_, String>(2)?),
-                    downloaded_bytes: row.get::<_, i64>(3)? as u64,
-                    total_bytes: row.get::<_, Option<i64>>(4)?.map(|b| b as u64),
-                    chunks: Vec::new(),
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+        struct SavedDownloadRow {
+            id: DownloadId,
+            provider_kind: String,
+            url: String,
+            destination: PathBuf,
+            downloaded_bytes: u64,
+            total_bytes: Option<u64>,
+        }
+
+        let mut downloads = Vec::new();
+        let rows = stmt.query_map([], |row| {
+            Ok(SavedDownloadRow {
+                id: DownloadId(row.get::<_, i64>(0)? as u64),
+                provider_kind: row.get(1)?,
+                url: row.get(2)?,
+                destination: PathBuf::from(row.get::<_, String>(3)?),
+                downloaded_bytes: row.get::<_, i64>(4)? as u64,
+                total_bytes: row.get::<_, Option<i64>>(5)?.map(|b| b as u64),
+            })
+        })?;
+
+        for row in rows {
+            let row = row?;
+            let Some(source) = PersistedDownloadSource::from_parts(&row.provider_kind, row.url)
+            else {
+                tracing::warn!(
+                    id = row.id.0,
+                    provider_kind = row.provider_kind,
+                    "skipping restore for unsupported persisted provider kind"
+                );
+                continue;
+            };
+
+            downloads.push(SavedDownload {
+                id: row.id,
+                source,
+                destination: row.destination,
+                downloaded_bytes: row.downloaded_bytes,
+                total_bytes: row.total_bytes,
+                resume_data: None,
+            });
+        }
 
         for dl in &mut downloads {
             let mut cstmt = self.conn.prepare(
                 "SELECT start, end_byte, downloaded FROM chunks
                  WHERE download_id = ?1 ORDER BY slot",
             )?;
-            dl.chunks = cstmt
+            let chunks: Vec<ChunkSnapshot> = cstmt
                 .query_map(params![dl.id.0 as i64], |row| {
                     Ok(ChunkSnapshot {
                         start: row.get::<_, i64>(0)? as u64,
@@ -143,6 +204,8 @@ impl Db {
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+            dl.resume_data =
+                (!chunks.is_empty()).then(|| ProviderResumeData::Http(HttpResumeData::new(chunks)));
         }
 
         Ok((downloads, max_id))
@@ -153,15 +216,17 @@ impl Db {
         match event {
             DbEvent::Started {
                 id,
-                url,
+                source,
                 destination,
             } => {
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO downloads (id, url, destination, status, added_at)
-                     VALUES (?1, ?2, ?3, 'downloading', ?4)",
+                    "INSERT OR IGNORE INTO downloads
+                     (id, provider_kind, url, destination, status, added_at)
+                     VALUES (?1, ?2, ?3, ?4, 'downloading', ?5)",
                     params![
                         id.0 as i64,
-                        url,
+                        source.kind(),
+                        source.url(),
                         destination.to_string_lossy().as_ref(),
                         unix_ms()
                     ],
@@ -170,13 +235,13 @@ impl Db {
             DbEvent::Paused {
                 id,
                 downloaded_bytes,
-                chunks,
+                resume_data,
             } => {
                 self.conn.execute(
                     "UPDATE downloads SET status = 'paused', downloaded = ?1 WHERE id = ?2",
                     params![downloaded_bytes as i64, id.0 as i64],
                 )?;
-                self.save_chunks(id, &chunks)?;
+                self.save_resume_data(id, resume_data.as_ref())?;
             }
             DbEvent::Resumed { id } => {
                 self.conn.execute(
@@ -213,23 +278,29 @@ impl Db {
         Ok(())
     }
 
-    fn save_chunks(&self, id: DownloadId, chunks: &[ChunkSnapshot]) -> rusqlite::Result<()> {
+    fn save_resume_data(
+        &self,
+        id: DownloadId,
+        resume_data: Option<&ProviderResumeData>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "DELETE FROM chunks WHERE download_id = ?1",
             params![id.0 as i64],
         )?;
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO chunks (download_id, slot, start, end_byte, downloaded)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-        for (slot, chunk) in chunks.iter().enumerate() {
-            stmt.execute(params![
-                id.0 as i64,
-                slot as i64,
-                chunk.start as i64,
-                chunk.end as i64,
-                chunk.downloaded as i64,
-            ])?;
+        if let Some(ProviderResumeData::Http(data)) = resume_data {
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO chunks (download_id, slot, start, end_byte, downloaded)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (slot, chunk) in data.chunks.iter().enumerate() {
+                stmt.execute(params![
+                    id.0 as i64,
+                    slot as i64,
+                    chunk.start as i64,
+                    chunk.end as i64,
+                    chunk.downloaded as i64,
+                ])?;
+            }
         }
         Ok(())
     }
@@ -311,4 +382,102 @@ fn unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_adds_provider_kind_to_legacy_downloads_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE downloads (
+                id          INTEGER PRIMARY KEY,
+                url         TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                total_bytes INTEGER,
+                downloaded  INTEGER NOT NULL DEFAULT 0,
+                added_at    INTEGER NOT NULL,
+                finished_at INTEGER,
+                etag        TEXT,
+                mime_type   TEXT
+            );
+            CREATE TABLE chunks (
+                download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+                slot        INTEGER NOT NULL,
+                start       INTEGER NOT NULL,
+                end_byte    INTEGER NOT NULL,
+                downloaded  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (download_id, slot)
+            );
+            ",
+        )
+        .unwrap();
+
+        let db = Db { conn };
+        db.migrate().unwrap();
+
+        assert!(db.downloads_has_column("provider_kind").unwrap());
+
+        let provider_kind: String = db
+            .conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('downloads') WHERE name = 'provider_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(provider_kind, format!("'{HTTP_PROVIDER_KIND}'"));
+    }
+
+    #[test]
+    fn load_for_restore_reads_provider_kind_and_http_resume_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        let db = Db { conn };
+        db.migrate().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO downloads
+                 (id, provider_kind, url, destination, status, total_bytes, downloaded, added_at)
+                 VALUES (?1, ?2, ?3, ?4, 'paused', ?5, ?6, ?7)",
+                params![
+                    7_i64,
+                    HTTP_PROVIDER_KIND,
+                    "https://example.com/file.bin",
+                    "/tmp/file.bin",
+                    100_i64,
+                    25_i64,
+                    1_i64
+                ],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO chunks (download_id, slot, start, end_byte, downloaded)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![7_i64, 0_i64, 0_i64, 100_i64, 25_i64],
+            )
+            .unwrap();
+
+        let (downloads, max_id) = db.load_for_restore().unwrap();
+        assert_eq!(max_id, 7);
+        assert_eq!(downloads.len(), 1);
+
+        let saved = &downloads[0];
+        assert_eq!(saved.id, DownloadId(7));
+        assert_eq!(saved.source.kind(), HTTP_PROVIDER_KIND);
+        assert_eq!(saved.url(), "https://example.com/file.bin");
+        assert_eq!(saved.downloaded_bytes, 25);
+        assert_eq!(saved.total_bytes, Some(100));
+
+        let resume = saved.resume_data.as_ref().unwrap().as_http().unwrap();
+        assert_eq!(resume.chunks.len(), 1);
+        assert_eq!(resume.chunks[0].start, 0);
+        assert_eq!(resume.chunks[0].end, 100);
+        assert_eq!(resume.chunks[0].downloaded, 25);
+    }
 }

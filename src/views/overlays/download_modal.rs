@@ -6,6 +6,7 @@ use gpui::{Context, Entity, EventEmitter, IntoElement, Render, Window, div, prel
 use rust_i18n::t;
 
 use crate::app::Downloads;
+use crate::engine::AddDownloadRequest;
 use crate::ui::prelude::*;
 
 pub struct DownloadConfirmed {
@@ -130,14 +131,9 @@ impl DownloadModal {
     }
 
     fn destination_for(url: &str) -> PathBuf {
-        let filename = url
-            .split('/')
-            .next_back()
-            .and_then(|s| s.split('?').next())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("download");
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join("Downloads").join(filename)
+        AddDownloadRequest::from_url(url.to_string())
+            .destination_in(&PathBuf::from(home).join("Downloads"))
     }
 
     fn is_valid_url(url: &str) -> bool {
@@ -213,12 +209,7 @@ impl DownloadModalLayer {
                 let url = event.url.clone();
                 let destination = event.destination.clone();
                 this.downloads.update(cx, |downloads, cx| {
-                    downloads.add(
-                        url,
-                        destination,
-                        crate::engine::http::HttpDownloadConfig::default(),
-                        cx,
-                    );
+                    downloads.add(url, destination, cx);
                 });
                 this.close(cx);
             },

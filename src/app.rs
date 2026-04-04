@@ -5,9 +5,9 @@
 //! and calls cx.notify() to trigger a re-render.
 //!
 //! Startup sequence:
-//!   1. Open SQLite DB, normalize stale rows, validate integrity.
-//!   2. Load paused/pending downloads from DB.
-//!   3. Spawn DbEventWorker thread (sole writer to DB from here on).
+//!   1. Load persisted settings.
+//!   2. Bootstrap backend state (SQLite restore data, DB worker, history reader).
+//!   3. Create the app-owned IPC ingress server.
 //!   4. Create DownloadEngine with db_tx and initial_next_id > DB max.
 //!   5. Restore saved downloads into the engine's paused map and SoA vecs.
 
@@ -17,20 +17,20 @@ use std::time::Duration;
 
 use gpui::{Context, SharedString};
 
-use crate::engine::http::HttpDownloadConfig;
-use crate::engine::state::{self, Db, HistoryReader};
+use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    DbEvent, DownloadEngine, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, ProgressUpdate,
-    SavedDownload,
+    AddDownloadRequest, DownloadEngine, DownloadId, DownloadStatus, EngineNotification,
+    HistoryFilter, HistoryRow, ProgressUpdate, RestoredDownload, SavedDownload,
 };
+use crate::ipc::IpcServer;
 use crate::settings::Settings;
 
 /// All live download state in SoA layout.
 /// One vec per field, all vecs share the same index space.
 pub struct Downloads {
     engine: DownloadEngine,
+    ipc: IpcServer,
     pub settings: Settings,
-    db_tx: std::sync::mpsc::Sender<DbEvent>,
 
     pub ids: Vec<DownloadId>,
     pub filenames: Vec<SharedString>,
@@ -52,28 +52,19 @@ pub struct Downloads {
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
-
-        let db = Db::open().expect("failed to open database");
-        if let Err(e) = db.normalize_stale() {
-            tracing::warn!("normalize stale: {e}");
-        }
-        if let Err(e) = db.validate_integrity() {
-            tracing::warn!("integrity check: {e}");
-        }
-        let (saved, max_id) = db
-            .load_for_restore()
-            .expect("failed to load saved downloads");
-
-        let (db_tx, db_rx) = std::sync::mpsc::channel::<DbEvent>();
-        state::spawn_worker(db, db_rx);
-
-        let engine = DownloadEngine::new(settings.clone(), db_tx.clone(), max_id + 1);
-        let history_reader = HistoryReader::open().expect("failed to open history reader");
+        let bootstrap = state::bootstrap().expect("failed to bootstrap backend state");
+        let history_reader = bootstrap.history_reader;
+        let engine = DownloadEngine::new(
+            settings.clone(),
+            bootstrap.db_tx,
+            bootstrap.next_download_id,
+        );
+        let ipc = IpcServer::start();
 
         let mut model = Self {
             engine,
+            ipc,
             settings,
-            db_tx,
             ids: Vec::new(),
             filenames: Vec::new(),
             destinations: Vec::new(),
@@ -88,14 +79,10 @@ impl Downloads {
             history_filter: HistoryFilter::All,
         };
 
-        for saved_dl in &saved {
-            model.engine.restore(
-                saved_dl.id,
-                saved_dl.url.clone(),
-                saved_dl.destination.clone(),
-                HttpDownloadConfig::default(),
-                saved_dl.chunks.clone(),
-            );
+        for saved_dl in &bootstrap.saved_downloads {
+            model
+                .engine
+                .restore(RestoredDownload::from_saved(saved_dl, &model.settings));
             model.push_saved(saved_dl);
         }
 
@@ -109,19 +96,12 @@ impl Downloads {
                         while let Some(update) = model.engine.poll_progress() {
                             model.apply_progress(update, cx);
                         }
-                        while let Some(req) = model.engine.poll_ipc() {
-                            let dir = model.settings.download_dir();
-                            let name =
-                                req.filename.filter(|n| !n.is_empty()).unwrap_or_else(|| {
-                                    req.url
-                                        .rsplit('/')
-                                        .next()
-                                        .and_then(|s| s.split('?').next())
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or("download")
-                                        .to_string()
-                                });
-                            model.add(req.url, dir.join(name), HttpDownloadConfig::default(), cx);
+                        while let Some(notification) = model.engine.poll_notification() {
+                            model.apply_notification(notification, cx);
+                        }
+                        while let Some(req) = model.ipc.try_recv() {
+                            let destination = req.destination_in(&model.settings.download_dir());
+                            model.add_request(req, destination, cx);
                         }
                         model.tick_speed();
                     })
@@ -135,11 +115,14 @@ impl Downloads {
         model
     }
 
-    pub fn add(
+    pub fn add(&mut self, url: String, destination: PathBuf, cx: &mut Context<Self>) -> DownloadId {
+        self.add_request(AddDownloadRequest::from_url(url), destination, cx)
+    }
+
+    pub fn add_request(
         &mut self,
-        url: String,
+        request: AddDownloadRequest,
         destination: PathBuf,
-        config: HttpDownloadConfig,
         cx: &mut Context<Self>,
     ) -> DownloadId {
         let filename: SharedString = destination
@@ -150,7 +133,8 @@ impl Downloads {
             .into();
         let dest_str: SharedString = destination.to_string_lossy().to_string().into();
 
-        let id = self.engine.add(url, destination, config);
+        let spec = request.into_spec(destination, &self.settings);
+        let id = self.engine.add(spec);
         self.ids.push(id);
         self.filenames.push(filename);
         self.destinations.push(dest_str);
@@ -164,32 +148,23 @@ impl Downloads {
 
     pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.pause(id);
-        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
-            self.statuses[idx] = DownloadStatus::Paused;
-            cx.notify();
-        }
+        cx.notify();
+    }
+
+    pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        self.engine.update_settings(settings.clone());
+        self.settings = settings;
+        cx.notify();
     }
 
     pub fn resume(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.resume(id);
-        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
-            self.statuses[idx] = DownloadStatus::Downloading;
-            cx.notify();
-        }
+        cx.notify();
     }
 
     pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.cancel(id);
-        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
-            self.ids.remove(idx);
-            self.filenames.remove(idx);
-            self.destinations.remove(idx);
-            self.statuses.remove(idx);
-            self.downloaded_bytes.remove(idx);
-            self.total_bytes.remove(idx);
-            self.speeds.remove(idx);
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// Samples total speed once per second (every 10 × 100 ms polls).
@@ -286,23 +261,13 @@ impl Downloads {
             self.total_bytes[idx] = update.total_bytes;
             self.speeds[idx] = update.speed_bytes_per_sec;
 
-            // Emit Finished/Error to DB and show notification on first terminal transition.
+            // Show notification on first terminal transition.
             let is_terminal = matches!(
                 update.status,
                 DownloadStatus::Finished | DownloadStatus::Error
             );
             let was_terminal = matches!(prev, DownloadStatus::Finished | DownloadStatus::Error);
             if is_terminal && !was_terminal {
-                let event = if update.status == DownloadStatus::Finished {
-                    DbEvent::Finished {
-                        id: update.id,
-                        total_bytes: update.total_bytes.unwrap_or(update.downloaded_bytes),
-                    }
-                } else {
-                    DbEvent::Error { id: update.id }
-                };
-                let _ = self.db_tx.send(event);
-
                 let filename = self.filenames[idx].clone();
                 let kind = if update.status == DownloadStatus::Finished {
                     crate::views::overlays::notification::NotificationKind::Success
@@ -313,6 +278,26 @@ impl Downloads {
                 self.refresh_history(cx);
             }
 
+            cx.notify();
+        }
+    }
+
+    fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
+        match notification {
+            EngineNotification::Update(update) => self.apply_progress(update, cx),
+            EngineNotification::Removed { id } => self.remove_row(id, cx),
+        }
+    }
+
+    fn remove_row(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
+            self.ids.remove(idx);
+            self.filenames.remove(idx);
+            self.destinations.remove(idx);
+            self.statuses.remove(idx);
+            self.downloaded_bytes.remove(idx);
+            self.total_bytes.remove(idx);
+            self.speeds.remove(idx);
             cx.notify();
         }
     }

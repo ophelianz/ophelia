@@ -1,9 +1,10 @@
-//! Protocol-agnostic types shared across the entire engine.
-//! Nothing in this file should be specific to HTTP, FTP, or any other protocol.
+//! Shared engine-facing types.
+//!
+//! Most types in this module are protocol-neutral. Persistence now keeps
+//! provider-specific source and resume details behind small enums so the
+//! generic engine/app layers do not have to traffic in raw HTTP chunk vectors.
 
 use std::path::PathBuf;
-
-use crate::engine::http::HttpDownloadConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DownloadId(pub u64);
@@ -17,46 +18,18 @@ pub enum DownloadStatus {
     Error,
 }
 
-#[allow(dead_code)]
-pub enum EngineCommand {
-    AddHttp {
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-    },
-    Pause {
-        id: DownloadId,
-    },
-    Resume {
-        id: DownloadId,
-    },
-    Cancel {
-        id: DownloadId,
-    },
-    /// Pre-populate the paused map on startup without starting a task.
-    Restore {
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-        chunks: Vec<ChunkSnapshot>,
-    },
-    Shutdown,
-}
-
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
 /// The worker is the sole writer to SQLite and nothing else touches the DB.
 pub enum DbEvent {
     Started {
         id: DownloadId,
-        url: String,
+        source: PersistedDownloadSource,
         destination: PathBuf,
     },
     Paused {
         id: DownloadId,
         downloaded_bytes: u64,
-        chunks: Vec<ChunkSnapshot>,
+        resume_data: Option<ProviderResumeData>,
     },
     Resumed {
         id: DownloadId,
@@ -107,14 +80,47 @@ impl HistoryRow {
 }
 
 /// A download loaded from SQLite on startup to restore paused/pending state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SavedDownload {
     pub id: DownloadId,
-    pub url: String,
+    pub source: PersistedDownloadSource,
     pub destination: PathBuf,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
-    pub chunks: Vec<ChunkSnapshot>,
+    pub resume_data: Option<ProviderResumeData>,
+}
+
+impl SavedDownload {
+    pub fn url(&self) -> &str {
+        self.source.url()
+    }
+}
+
+/// Provider-specific source information persisted with a transfer record.
+#[derive(Debug, Clone)]
+pub enum PersistedDownloadSource {
+    Http { url: String },
+}
+
+impl PersistedDownloadSource {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Http { url } => url,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Http { .. } => "http",
+        }
+    }
+
+    pub fn from_parts(kind: &str, url: String) -> Option<Self> {
+        match kind {
+            "http" => Some(Self::Http { url }),
+            _ => None,
+        }
+    }
 }
 
 /// Per-chunk resume state. `start` is the stable identity (aria2 / AB DM both key on
@@ -126,6 +132,52 @@ pub struct ChunkSnapshot {
     pub downloaded: u64,
 }
 
+/// HTTP-specific resume data persisted for byte-range downloads.
+#[derive(Debug, Clone)]
+pub struct HttpResumeData {
+    pub chunks: Vec<ChunkSnapshot>,
+}
+
+impl HttpResumeData {
+    pub fn new(chunks: Vec<ChunkSnapshot>) -> Self {
+        Self { chunks }
+    }
+
+    pub fn downloaded_bytes(&self) -> u64 {
+        self.chunks.iter().map(|chunk| chunk.downloaded).sum()
+    }
+
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.chunks.last().map(|chunk| chunk.end)
+    }
+}
+
+/// Provider-specific resume data stored behind a generic boundary.
+#[derive(Debug, Clone)]
+pub enum ProviderResumeData {
+    Http(HttpResumeData),
+}
+
+impl ProviderResumeData {
+    pub fn as_http(&self) -> Option<&HttpResumeData> {
+        match self {
+            Self::Http(data) => Some(data),
+        }
+    }
+
+    pub fn downloaded_bytes(&self) -> u64 {
+        match self {
+            Self::Http(data) => data.downloaded_bytes(),
+        }
+    }
+
+    pub fn total_bytes(&self) -> Option<u64> {
+        match self {
+            Self::Http(data) => data.total_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProgressUpdate {
     pub id: DownloadId,
@@ -133,4 +185,10 @@ pub struct ProgressUpdate {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum EngineNotification {
+    Update(ProgressUpdate),
+    Removed { id: DownloadId },
 }

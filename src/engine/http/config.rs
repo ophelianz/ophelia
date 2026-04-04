@@ -2,6 +2,8 @@
 //! Fields here are intentionally HTTP-specific: connection count, stall detection,
 //! and retry behavior are concepts that don't apply to all protocols.
 
+use crate::settings::Settings;
+
 #[derive(Debug, Clone)]
 pub struct HttpDownloadConfig {
     /// Hard ceiling on parallel connections per download. The actual count is
@@ -34,6 +36,15 @@ impl Default for HttpDownloadConfig {
             max_retries_per_chunk: 3,
             min_steal_bytes: 4 * 1024 * 1024,
             speed_limit_bps: 0,
+        }
+    }
+}
+
+impl HttpDownloadConfig {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            max_connections: settings.max_connections_per_download,
+            ..Self::default()
         }
     }
 }
