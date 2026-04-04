@@ -16,6 +16,7 @@ pub enum DownloadStatus {
     Paused,
     Finished,
     Error,
+    Cancelled,
 }
 
 /// Engine-level control actions. Providers may support only a subset of these.
@@ -27,13 +28,57 @@ pub enum DownloadControlAction {
     Restore,
 }
 
+/// Provider-declared lifecycle controls exposed at the app/UI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferControlSupport {
+    pub can_pause: bool,
+    pub can_resume: bool,
+    pub can_cancel: bool,
+    pub can_restore: bool,
+}
+
+impl TransferControlSupport {
+    pub const fn all() -> Self {
+        Self {
+            can_pause: true,
+            can_resume: true,
+            can_cancel: true,
+            can_restore: true,
+        }
+    }
+
+    pub const fn supports(self, action: DownloadControlAction) -> bool {
+        match action {
+            DownloadControlAction::Pause => self.can_pause,
+            DownloadControlAction::Resume => self.can_resume,
+            DownloadControlAction::Cancel => self.can_cancel,
+            DownloadControlAction::Restore => self.can_restore,
+        }
+    }
+}
+
+/// Artifact state is tracked separately from transfer outcome so history can say
+/// "finished, but deleted" or "cancelled, and missing on disk".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactState {
+    Present,
+    Deleted,
+    Missing,
+}
+
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
 /// The worker is the sole writer to SQLite and nothing else touches the DB.
 pub enum DbEvent {
-    Started {
+    Added {
         id: DownloadId,
         source: PersistedDownloadSource,
         destination: PathBuf,
+    },
+    Queued {
+        id: DownloadId,
+    },
+    Started {
+        id: DownloadId,
     },
     Paused {
         id: DownloadId,
@@ -50,8 +95,12 @@ pub enum DbEvent {
     Error {
         id: DownloadId,
     },
-    Removed {
+    Cancelled {
         id: DownloadId,
+    },
+    ArtifactStateChanged {
+        id: DownloadId,
+        artifact_state: ArtifactState,
     },
 }
 
@@ -62,6 +111,8 @@ pub enum HistoryFilter {
     Finished,
     Error,
     Paused,
+    #[allow(dead_code)] // backend-ready filter; the current UI has not added a dedicated chip yet.
+    Cancelled,
 }
 
 /// A row returned by the history query, one entry per download ever recorded.
@@ -76,6 +127,9 @@ pub struct HistoryRow {
     pub source_label: String,
     pub destination: String,
     pub status: DownloadStatus,
+    #[allow(dead_code)]
+    // tracked for history semantics; fuller presentation wiring can land separately.
+    pub artifact_state: ArtifactState,
     pub total_bytes: Option<u64>,
     pub downloaded_bytes: u64,
     /// Unix milliseconds when the download was added.
@@ -124,6 +178,12 @@ impl PersistedDownloadSource {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Http { .. } => "http",
+        }
+    }
+
+    pub fn control_support(&self) -> TransferControlSupport {
+        match self {
+            Self::Http { .. } => TransferControlSupport::all(),
         }
     }
 
@@ -202,11 +262,20 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone)]
 pub enum EngineNotification {
     Update(ProgressUpdate),
-    Removed {
+    LiveTransferRemoved {
         id: DownloadId,
+        action: LiveTransferRemovalAction,
+        artifact_state: ArtifactState,
     },
     ControlUnsupported {
         id: DownloadId,
         action: DownloadControlAction,
     },
+}
+
+/// Why a live transfer row left the active/transfers surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveTransferRemovalAction {
+    Cancelled,
+    DeleteArtifact,
 }

@@ -1,4 +1,9 @@
-use gpui::{App, Entity, Window, div, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{
+    App, Context, Entity, IntoElement, Render, RenderOnce, SharedString, Window, div, prelude::*,
+    px, transparent_black,
+};
 
 use crate::app::Downloads;
 use crate::engine::DownloadStatus;
@@ -7,21 +12,82 @@ use crate::views::main::download_row::{DownloadRow, DownloadState};
 
 use rust_i18n::t;
 
+type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferFilter {
+    All,
+    Active,
+    Finished,
+    Paused,
+    Failed,
+}
+
+impl TransferFilter {
+    fn matches(self, status: DownloadStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::Active => matches!(status, DownloadStatus::Downloading | DownloadStatus::Pending),
+            Self::Finished => status == DownloadStatus::Finished,
+            Self::Paused => status == DownloadStatus::Paused,
+            Self::Failed => matches!(status, DownloadStatus::Error | DownloadStatus::Cancelled),
+        }
+    }
+}
+
 pub struct DownloadList {
     downloads: Entity<Downloads>,
+    filter: TransferFilter,
 }
 
 impl DownloadList {
     pub fn new(downloads: Entity<Downloads>, cx: &mut Context<Self>) -> Self {
         cx.observe(&downloads, |_, _, cx| cx.notify()).detach();
-        Self { downloads }
+        Self {
+            downloads,
+            filter: TransferFilter::All,
+        }
     }
 
     fn view_model(&self, cx: &App) -> DownloadListViewModel {
         let entity = self.downloads.clone();
         let downloads = self.downloads.read(cx);
 
+        let filters = vec![
+            TransferFilterChipModel::new(
+                0,
+                TransferFilter::All,
+                t!("transfers.filter_all").to_string(),
+                self.filter == TransferFilter::All,
+            ),
+            TransferFilterChipModel::new(
+                1,
+                TransferFilter::Active,
+                t!("transfers.filter_active").to_string(),
+                self.filter == TransferFilter::Active,
+            ),
+            TransferFilterChipModel::new(
+                2,
+                TransferFilter::Finished,
+                t!("transfers.filter_finished").to_string(),
+                self.filter == TransferFilter::Finished,
+            ),
+            TransferFilterChipModel::new(
+                3,
+                TransferFilter::Paused,
+                t!("transfers.filter_paused").to_string(),
+                self.filter == TransferFilter::Paused,
+            ),
+            TransferFilterChipModel::new(
+                4,
+                TransferFilter::Failed,
+                t!("transfers.filter_failed").to_string(),
+                self.filter == TransferFilter::Failed,
+            ),
+        ];
+
         let rows = (0..downloads.len())
+            .filter(|&i| self.filter.matches(downloads.statuses[i]))
             .map(|i| {
                 let id = downloads.ids[i];
                 let progress = match downloads.total_bytes[i] {
@@ -32,8 +98,8 @@ impl DownloadList {
                     DownloadStatus::Downloading => DownloadState::Active,
                     DownloadStatus::Paused => DownloadState::Paused,
                     DownloadStatus::Finished => DownloadState::Finished,
-                    DownloadStatus::Error => DownloadState::Error,
-                    _ => DownloadState::Queued,
+                    DownloadStatus::Error | DownloadStatus::Cancelled => DownloadState::Error,
+                    DownloadStatus::Pending => DownloadState::Queued,
                 };
 
                 let on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>> =
@@ -73,13 +139,14 @@ impl DownloadList {
             })
             .collect();
 
-        DownloadListViewModel { rows }
+        DownloadListViewModel { filters, rows }
     }
 }
 
 impl Render for DownloadList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view_model = self.view_model(cx);
+        let weak = cx.weak_entity();
 
         v_flex()
             .child(
@@ -88,18 +155,122 @@ impl Render for DownloadList {
                     .text_color(Colors::muted_foreground())
                     .font_weight(gpui::FontWeight::EXTRA_BOLD)
                     .mb(px(Spacing::SECTION_LABEL_BOTTOM_MARGIN))
-                    .child(t!("downloads.section_label").to_string()),
+                    .child(t!("transfers.section_label").to_string()),
             )
             .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(Chrome::MENU_BAR_GAP))
+                    .mb(px(Spacing::SECTION_GAP))
+                    .children(view_model.filters.into_iter().map(|filter_model| {
+                        let filter = filter_model.filter;
+                        let on_click: ClickHandler = Rc::new({
+                            let weak = weak.clone();
+                            move |_, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.filter = filter;
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        TransferFilterChip::new(filter_model, on_click)
+                    })),
+            )
+            .child(if view_model.rows.is_empty() {
+                DownloadListEmptyState.into_any_element()
+            } else {
                 v_flex()
                     .gap(px(Spacing::LIST_GAP))
-                    .children(view_model.rows),
-            )
+                    .children(view_model.rows)
+                    .into_any_element()
+            })
     }
 }
 
 struct DownloadListViewModel {
+    filters: Vec<TransferFilterChipModel>,
     rows: Vec<DownloadRow>,
+}
+
+#[derive(Clone)]
+struct TransferFilterChipModel {
+    id: usize,
+    filter: TransferFilter,
+    label: SharedString,
+    active: bool,
+}
+
+impl TransferFilterChipModel {
+    fn new(
+        id: usize,
+        filter: TransferFilter,
+        label: impl Into<SharedString>,
+        active: bool,
+    ) -> Self {
+        Self {
+            id,
+            filter,
+            label: label.into(),
+            active,
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct TransferFilterChip {
+    model: TransferFilterChipModel,
+    on_click: ClickHandler,
+}
+
+impl TransferFilterChip {
+    fn new(model: TransferFilterChipModel, on_click: ClickHandler) -> Self {
+        Self { model, on_click }
+    }
+}
+
+impl RenderOnce for TransferFilterChip {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let on_click = Rc::clone(&self.on_click);
+
+        div()
+            .id(("transfer-filter", self.model.id))
+            .px(px(12.0))
+            .py(px(6.0))
+            .rounded(px(Chrome::CONTROL_RADIUS))
+            .text_sm()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .bg(if self.model.active {
+                Colors::muted().into()
+            } else {
+                transparent_black()
+            })
+            .text_color(if self.model.active {
+                Colors::foreground()
+            } else {
+                Colors::muted_foreground()
+            })
+            .on_click(move |_, window, cx| {
+                on_click(window, cx);
+            })
+            .child(self.model.label)
+    }
+}
+
+#[derive(IntoElement)]
+struct DownloadListEmptyState;
+
+impl RenderOnce for DownloadListEmptyState {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(Colors::muted_foreground())
+            .child(t!("downloads.empty_state").to_string())
+    }
 }
 
 fn format_speed(bytes_per_sec: u64) -> String {

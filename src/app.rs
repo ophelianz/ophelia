@@ -21,6 +21,7 @@ use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
     AddDownloadRequest, DownloadControlAction, DownloadEngine, DownloadId, DownloadStatus,
     EngineNotification, HistoryFilter, HistoryRow, ProgressUpdate, RestoredDownload, SavedDownload,
+    TransferControlSupport,
 };
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
@@ -33,9 +34,16 @@ pub struct Downloads {
     pub settings: Settings,
 
     pub ids: Vec<DownloadId>,
+    /// Provider identifier per live transfer, kept app-side so future workflow
+    /// views do not have to infer it from engine internals.
+    pub provider_kinds: Vec<SharedString>,
+    /// User-facing source label per live transfer (URL today, richer labels later).
+    pub source_labels: Vec<SharedString>,
     pub filenames: Vec<SharedString>,
     pub destinations: Vec<SharedString>,
     pub statuses: Vec<DownloadStatus>,
+    /// Provider-declared lifecycle controls for each live transfer.
+    pub control_supports: Vec<TransferControlSupport>,
     pub downloaded_bytes: Vec<u64>,
     pub total_bytes: Vec<Option<u64>>,
     pub speeds: Vec<u64>,
@@ -66,9 +74,12 @@ impl Downloads {
             ipc,
             settings,
             ids: Vec::new(),
+            provider_kinds: Vec::new(),
+            source_labels: Vec::new(),
             filenames: Vec::new(),
             destinations: Vec::new(),
             statuses: Vec::new(),
+            control_supports: Vec::new(),
             downloaded_bytes: Vec::new(),
             total_bytes: Vec::new(),
             speeds: Vec::new(),
@@ -85,6 +96,8 @@ impl Downloads {
                 .restore(RestoredDownload::from_saved(saved_dl, &model.settings));
             model.push_saved(saved_dl);
         }
+
+        model.refresh_history(cx);
 
         cx.spawn(async |this, cx: &mut gpui::AsyncApp| {
             loop {
@@ -134,11 +147,17 @@ impl Downloads {
         let dest_str: SharedString = destination.to_string_lossy().to_string().into();
 
         let spec = request.into_spec(destination, &self.settings);
+        let provider_kind: SharedString = spec.provider_kind().to_string().into();
+        let source_label: SharedString = spec.source_label().to_string().into();
+        let control_support = spec.control_support();
         let id = self.engine.add(spec);
         self.ids.push(id);
+        self.provider_kinds.push(provider_kind);
+        self.source_labels.push(source_label);
         self.filenames.push(filename);
         self.destinations.push(dest_str);
         self.statuses.push(DownloadStatus::Pending);
+        self.control_supports.push(control_support);
         self.downloaded_bytes.push(0);
         self.total_bytes.push(None);
         self.speeds.push(0);
@@ -165,9 +184,27 @@ impl Downloads {
         cx.notify();
     }
 
-    pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+    /// Cancel a live transfer without deleting any bytes already on disk.
+    #[allow(dead_code)] // reserved for a future UI with a distinct cancel-transfer action.
+    pub fn cancel_transfer(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.cancel(id);
         cx.notify();
+    }
+
+    /// Delete the artifact for a live transfer. History is preserved separately.
+    pub fn delete_artifact(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        let Some(idx) = self.ids.iter().position(|&download_id| download_id == id) else {
+            return;
+        };
+        let destination = PathBuf::from(self.destinations[idx].as_ref());
+        self.engine.delete_artifact(id, destination);
+        cx.notify();
+    }
+
+    /// Current live-transfer remove semantics are delete-the-artifact and let the
+    /// history surface retain the persisted record.
+    pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
+        self.delete_artifact(id, cx);
     }
 
     /// Samples total speed once per second (every 10 × 100 ms polls).
@@ -246,11 +283,16 @@ impl Downloads {
             .to_string()
             .into();
         let dest_str: SharedString = saved.destination.to_string_lossy().to_string().into();
+        let provider_kind: SharedString = saved.source.kind().to_string().into();
+        let source_label: SharedString = saved.source.display_label().to_string().into();
 
         self.ids.push(saved.id);
+        self.provider_kinds.push(provider_kind);
+        self.source_labels.push(source_label);
         self.filenames.push(filename);
         self.destinations.push(dest_str);
         self.statuses.push(DownloadStatus::Paused);
+        self.control_supports.push(saved.source.control_support());
         self.downloaded_bytes.push(saved.downloaded_bytes);
         self.total_bytes.push(saved.total_bytes);
         self.speeds.push(0);
@@ -288,7 +330,20 @@ impl Downloads {
     fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
-            EngineNotification::Removed { id } => self.remove_row(id, cx),
+            EngineNotification::LiveTransferRemoved {
+                id,
+                action,
+                artifact_state,
+            } => {
+                tracing::debug!(
+                    id = id.0,
+                    action = live_transfer_removal_action_name(action),
+                    artifact_state = artifact_state_name(artifact_state),
+                    "live transfer left the active surface"
+                );
+                self.remove_row(id, cx);
+                self.refresh_history(cx);
+            }
             EngineNotification::ControlUnsupported { id, action } => {
                 tracing::warn!(
                     id = id.0,
@@ -302,9 +357,12 @@ impl Downloads {
     fn remove_row(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         if let Some(idx) = self.ids.iter().position(|&d| d == id) {
             self.ids.remove(idx);
+            self.provider_kinds.remove(idx);
+            self.source_labels.remove(idx);
             self.filenames.remove(idx);
             self.destinations.remove(idx);
             self.statuses.remove(idx);
+            self.control_supports.remove(idx);
             self.downloaded_bytes.remove(idx);
             self.total_bytes.remove(idx);
             self.speeds.remove(idx);
@@ -319,5 +377,22 @@ fn control_action_name(action: DownloadControlAction) -> &'static str {
         DownloadControlAction::Resume => "resume",
         DownloadControlAction::Cancel => "cancel",
         DownloadControlAction::Restore => "restore",
+    }
+}
+
+fn live_transfer_removal_action_name(
+    action: crate::engine::LiveTransferRemovalAction,
+) -> &'static str {
+    match action {
+        crate::engine::LiveTransferRemovalAction::Cancelled => "cancelled",
+        crate::engine::LiveTransferRemovalAction::DeleteArtifact => "delete_artifact",
+    }
+}
+
+fn artifact_state_name(state: crate::engine::ArtifactState) -> &'static str {
+    match state {
+        crate::engine::ArtifactState::Present => "present",
+        crate::engine::ArtifactState::Deleted => "deleted",
+        crate::engine::ArtifactState::Missing => "missing",
     }
 }

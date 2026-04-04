@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::http::{TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
-    PersistedDownloadSource, ProgressUpdate, ProviderResumeData,
+    PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TransferControlSupport,
 };
 use crate::settings::Settings;
 
@@ -34,14 +34,6 @@ pub(super) enum SchedulerKey {
 pub(super) struct SharedSchedulerRequirement {
     pub(super) key: SchedulerKey,
     pub(super) limit: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ProviderLifecycleCapabilities {
-    pub(super) can_pause: bool,
-    pub(super) can_resume: bool,
-    pub(super) can_cancel: bool,
-    pub(super) can_restore: bool,
 }
 
 pub(super) struct ProviderCapabilities {
@@ -68,25 +60,14 @@ pub(super) fn capabilities(spec: &DownloadSpec, settings: &Settings) -> Provider
     }
 }
 
-pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> ProviderLifecycleCapabilities {
+pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupport {
     match &spec.source {
-        DownloadSource::Http { .. } => ProviderLifecycleCapabilities {
-            can_pause: true,
-            can_resume: true,
-            can_cancel: true,
-            can_restore: true,
-        },
+        DownloadSource::Http { .. } => TransferControlSupport::all(),
     }
 }
 
 pub(super) fn supports_control_action(spec: &DownloadSpec, action: DownloadControlAction) -> bool {
-    let lifecycle = lifecycle_capabilities(spec);
-    match action {
-        DownloadControlAction::Pause => lifecycle.can_pause,
-        DownloadControlAction::Resume => lifecycle.can_resume,
-        DownloadControlAction::Cancel => lifecycle.can_cancel,
-        DownloadControlAction::Restore => lifecycle.can_restore,
-    }
+    lifecycle_capabilities(spec).supports(action)
 }
 
 pub(super) fn shared_scheduler_limit(key: &SchedulerKey, settings: &Settings) -> Option<usize> {

@@ -90,7 +90,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = spawn_worker(db, rx);
 
-        tx.send(DbEvent::Started {
+        tx.send(DbEvent::Added {
             id: DownloadId(10),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/movie.mkv".to_string(),
@@ -98,6 +98,7 @@ mod tests {
             destination: PathBuf::from("/tmp/movie.mkv"),
         })
         .unwrap();
+        tx.send(DbEvent::Started { id: DownloadId(10) }).unwrap();
         tx.send(DbEvent::Paused {
             id: DownloadId(10),
             downloaded_bytes: 64,

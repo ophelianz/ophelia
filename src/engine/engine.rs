@@ -15,6 +15,8 @@
 //!            then advance queue manually since done_rx won't fire.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::runtime::Runtime;
@@ -27,19 +29,37 @@ use crate::engine::provider::{
     self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDone, TaskPauseSink,
 };
 use crate::engine::{
-    DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus, EngineNotification,
-    ProgressUpdate, ProviderResumeData, RestoredDownload,
+    ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
+    EngineNotification, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
+    RestoredDownload,
 };
 use crate::settings::Settings;
 
 #[allow(dead_code)]
 enum EngineCommand {
-    Add { id: DownloadId, spec: DownloadSpec },
-    Pause { id: DownloadId },
-    Resume { id: DownloadId },
-    Cancel { id: DownloadId },
-    Restore { download: RestoredDownload },
-    UpdateSettings { settings: Settings },
+    Add {
+        id: DownloadId,
+        spec: DownloadSpec,
+    },
+    Pause {
+        id: DownloadId,
+    },
+    Resume {
+        id: DownloadId,
+    },
+    Cancel {
+        id: DownloadId,
+    },
+    DeleteArtifact {
+        id: DownloadId,
+        destination: PathBuf,
+    },
+    Restore {
+        download: RestoredDownload,
+    },
+    UpdateSettings {
+        settings: Settings,
+    },
     Shutdown,
 }
 
@@ -128,8 +148,15 @@ impl DownloadEngine {
         let _ = self.cmd_tx.send(EngineCommand::Resume { id });
     }
 
+    #[allow(dead_code)] // kept as an explicit backend control even though the current UI deletes artifacts instead.
     pub fn cancel(&self, id: DownloadId) {
         let _ = self.cmd_tx.send(EngineCommand::Cancel { id });
+    }
+
+    pub fn delete_artifact(&self, id: DownloadId, destination: PathBuf) {
+        let _ = self
+            .cmd_tx
+            .send(EngineCommand::DeleteArtifact { id, destination });
     }
 
     pub fn update_settings(&self, settings: Settings) {
@@ -222,6 +249,8 @@ impl EngineActor {
                             self.handle_resume(id),
                         EngineCommand::Cancel { id } =>
                             self.handle_cancel(id),
+                        EngineCommand::DeleteArtifact { id, destination } =>
+                            self.handle_delete_artifact(id, &destination),
                         EngineCommand::Restore { download } => {
                             if !provider::supports_control_action(
                                 &download.spec,
@@ -301,15 +330,16 @@ impl EngineActor {
                 queued_remaining = self.queue.len(),
                 "starting queued download"
             );
-            let _ = self.db_tx.send(self.started_event(next.id, &next.spec));
+            let _ = self.db_tx.send(DbEvent::Started { id: next.id });
             self.spawn_task(next.id, next.spec, next.resume_data);
         }
     }
 
     fn handle_add(&mut self, id: DownloadId, spec: DownloadSpec) {
+        let _ = self.db_tx.send(self.added_event(id, &spec));
         if self.tasks.len() < self.max_concurrent {
             tracing::info!(id = id.0, url = spec.url(), "download starting");
-            let _ = self.db_tx.send(self.started_event(id, &spec));
+            let _ = self.db_tx.send(DbEvent::Started { id });
             self.spawn_task(id, spec, None);
         } else {
             tracing::info!(
@@ -396,9 +426,9 @@ impl EngineActor {
 
         if let Some(pt) = self.paused.remove(&id) {
             tracing::info!(id = id.0, "resuming download");
-            let _ = self.db_tx.send(DbEvent::Resumed { id });
             let (downloaded_bytes, total_bytes) = snapshot_totals(pt.resume_data.as_ref());
             if self.tasks.len() < self.max_concurrent {
+                let _ = self.db_tx.send(DbEvent::Resumed { id });
                 let _ = self.notification_tx.send(self.status_notification(
                     id,
                     DownloadStatus::Downloading,
@@ -408,6 +438,7 @@ impl EngineActor {
                 self.spawn_task(id, pt.spec, pt.resume_data);
             } else {
                 // At capacity -> put at front of queue so it's next to start.
+                let _ = self.db_tx.send(DbEvent::Queued { id });
                 let _ = self.notification_tx.send(self.status_notification(
                     id,
                     DownloadStatus::Pending,
@@ -424,27 +455,76 @@ impl EngineActor {
     }
 
     fn handle_cancel(&mut self, id: DownloadId) {
-        let Some(spec) = self.cancel_target_spec(id) else {
+        let Some((supports_cancel, destination)) = self.cancel_target_spec(id).map(|spec| {
+            (
+                provider::supports_control_action(spec, DownloadControlAction::Cancel),
+                spec.destination().to_path_buf(),
+            )
+        }) else {
             return;
         };
-        if !provider::supports_control_action(spec, DownloadControlAction::Cancel) {
+        if !supports_cancel {
             self.notify_unsupported_control(id, DownloadControlAction::Cancel);
             return;
         }
 
+        let mut removed = false;
         if let Some(entry) = self.tasks.remove(&id) {
             tracing::info!(id = id.0, "download cancelled");
             // abort() prevents done_tx from firing, so we advance the queue manually.
             entry.handle.abort();
             self.try_start_next();
+            removed = true;
         }
-        // Also remove from queue or paused if it hadn't started yet.
+        let queued_before = self.queue.len();
         self.queue.retain(|t| t.id != id);
-        self.paused.remove(&id);
-        let _ = self.db_tx.send(DbEvent::Removed { id });
+        removed |= self.queue.len() != queued_before;
+        removed |= self.paused.remove(&id).is_some();
+
+        if removed {
+            let artifact_state = current_artifact_state(&destination);
+            let _ = self.db_tx.send(DbEvent::Cancelled { id });
+            let _ = self
+                .db_tx
+                .send(DbEvent::ArtifactStateChanged { id, artifact_state });
+            let _ = self
+                .notification_tx
+                .send(EngineNotification::LiveTransferRemoved {
+                    id,
+                    action: LiveTransferRemovalAction::Cancelled,
+                    artifact_state,
+                });
+        }
+    }
+
+    fn handle_delete_artifact(&mut self, id: DownloadId, destination: &Path) {
+        let was_active = self.tasks.remove(&id).map(|entry| {
+            entry.handle.abort();
+        });
+        if was_active.is_some() {
+            self.try_start_next();
+        }
+
+        let queued_before = self.queue.len();
+        self.queue.retain(|task| task.id != id);
+        let removed_queued = self.queue.len() != queued_before;
+        let removed_paused = self.paused.remove(&id).is_some();
+        let removed_runtime_state = was_active.is_some() || removed_queued || removed_paused;
+
+        if removed_runtime_state {
+            let _ = self.db_tx.send(DbEvent::Cancelled { id });
+        }
+        let artifact_state = delete_artifact_files(destination);
+        let _ = self
+            .db_tx
+            .send(DbEvent::ArtifactStateChanged { id, artifact_state });
         let _ = self
             .notification_tx
-            .send(EngineNotification::Removed { id });
+            .send(EngineNotification::LiveTransferRemoved {
+                id,
+                action: LiveTransferRemovalAction::DeleteArtifact,
+                artifact_state,
+            });
     }
 
     fn handle_shutdown(&mut self) {
@@ -487,7 +567,7 @@ impl EngineActor {
                     self.try_start_next();
                 }
             }
-            DownloadStatus::Pending | DownloadStatus::Downloading => {
+            DownloadStatus::Pending | DownloadStatus::Downloading | DownloadStatus::Cancelled => {
                 self.try_start_next();
             }
         }
@@ -531,8 +611,8 @@ impl EngineActor {
         }
     }
 
-    fn started_event(&self, id: DownloadId, spec: &DownloadSpec) -> DbEvent {
-        DbEvent::Started {
+    fn added_event(&self, id: DownloadId, spec: &DownloadSpec) -> DbEvent {
+        DbEvent::Added {
             id,
             source: provider::persisted_source(spec),
             destination: spec.destination().to_path_buf(),
@@ -592,5 +672,41 @@ fn snapshot_totals(resume_data: Option<&ProviderResumeData>) -> (u64, Option<u64
     match resume_data {
         Some(data) => (data.downloaded_bytes(), data.total_bytes()),
         None => (0, None),
+    }
+}
+
+fn artifact_paths(destination: &Path) -> [PathBuf; 2] {
+    [
+        destination.to_path_buf(),
+        PathBuf::from(format!("{}.ophelia_part", destination.display())),
+    ]
+}
+
+fn current_artifact_state(destination: &Path) -> ArtifactState {
+    if artifact_paths(destination).iter().any(|path| path.exists()) {
+        ArtifactState::Present
+    } else {
+        ArtifactState::Missing
+    }
+}
+
+fn delete_artifact_files(destination: &Path) -> ArtifactState {
+    let mut removed_any = false;
+    for path in artifact_paths(destination) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed_any = true,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "failed to delete artifact: {error}")
+            }
+        }
+    }
+
+    if artifact_paths(destination).iter().any(|path| path.exists()) {
+        ArtifactState::Present
+    } else if removed_any {
+        ArtifactState::Deleted
+    } else {
+        ArtifactState::Missing
     }
 }

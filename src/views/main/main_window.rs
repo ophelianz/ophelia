@@ -14,7 +14,7 @@ use super::history::HistoryView;
 use super::sidebar::Sidebar;
 use super::stats_bar::StatsBar;
 
-const HISTORY_NAV_INDEX: usize = 4;
+const HISTORY_NAV_INDEX: usize = 1;
 
 /// Root view
 /// owns the full window layout and all live state.

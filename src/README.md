@@ -31,6 +31,9 @@ These names are intentional too:
 - `provider`: protocol/tool-specific download implementation such as HTTP
 - `state`: persistence and history access
 - `ingress`: transport for getting external requests into the app, such as local IPC
+- `artifact state`: whether a transfer's bytes are still present on disk, tracked separately from transfer outcome/history
+- `live transfer metadata`: provider kind, source label, and control support cached next to live rows so workflow-shaped views can mirror backend semantics cheaply
+- `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
 
 ## Directory map
 
@@ -53,10 +56,10 @@ These names are intentional too:
 
 - `main/`
   - `main_window.rs`: root application window
-  - `sidebar.rs`: main navigation/sidebar
-  - `download_list.rs`: active download list composition
+  - `sidebar.rs`: top-level `Transfers` / `History` navigation
+  - `download_list.rs`: live transfers surface with internal status filters
   - `download_row.rs`: individual download row pieces
-  - `history.rs`: history view and filter chips
+  - `history.rs`: global history view and filter chips
   - `stats_bar.rs`: throughput and status summary card
 - `settings/`
   - `mod.rs`: settings window entity
@@ -70,6 +73,10 @@ These names are intentional too:
 ### Backend-adjacent root
 
 - `app.rs`: GPUI-facing download model, backend service owner, progress polling, and history bridge
+  - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
+  - also caches provider kind, source label, and control support for each live row
+  - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
+  - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
 - `ipc.rs`: local Axum server plus app-owned IPC ingress handle
 - `settings/`
   - `mod.rs`: persisted settings model and atomic load/save
@@ -102,3 +109,4 @@ For deeper backend notes:
 
 - See `docs/architecture.md` for the as-built backend architecture, current gaps, and incremental direction.
 - See `tests/` plus local `engine/provider.rs`, `ipc.rs`, `engine/state/db.rs`, and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, provider glue, engine notifications, provider-kind persistence migration, history queries, IPC ingress normalization, and DB worker event flow.
+- Backend history now keeps transfer outcome and artifact presence separate, which is the basis for "delete file but keep history" behavior.
