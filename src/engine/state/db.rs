@@ -20,7 +20,7 @@ impl Db {
         Self::open_at(db_path())
     }
 
-    fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+    pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let path = path.as_ref();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
@@ -300,7 +300,7 @@ impl HistoryReader {
         Self::open_at(db_path())
     }
 
-    fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+    pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let conn = Connection::open(path.as_ref())?;
         // Best-effort read-only hint; doesn't error on older SQLite.
         let _ = conn.execute_batch("PRAGMA query_only=ON;");

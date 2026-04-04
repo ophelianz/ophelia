@@ -100,4 +100,4 @@ For backend code:
 For deeper backend notes:
 
 - See `docs/architecture.md` for the as-built backend architecture, current gaps, and incremental direction.
-- See `tests/` plus local `engine/state/db.rs` unit tests for backend coverage of the current HTTP executor path, engine notifications, provider-kind persistence migration, and history queries.
+- See `tests/` plus local `engine/state/db.rs` and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, engine notifications, provider-kind persistence migration, history queries, and DB worker event flow.
