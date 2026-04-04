@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::app::Downloads;
-use crate::engine::{DownloadStatus, HistoryFilter, HistoryRow};
+use crate::engine::{DownloadId, DownloadStatus, HistoryFilter, HistoryRow};
 use crate::ui::prelude::*;
 
 use rust_i18n::t;
@@ -122,6 +122,7 @@ impl HistoryFilterChipModel {
 }
 
 struct HistoryRowModel {
+    id: DownloadId,
     status_icon: IconName,
     status_color: Hsla,
     filename: SharedString,
@@ -143,12 +144,13 @@ impl HistoryRowModel {
         };
 
         Self {
+            id: row.id,
             status_icon,
             status_color,
             filename: row.filename().to_string().into(),
-            subtitle: row.url.clone().into(),
+            subtitle: format_source_label(row).into(),
             size_label: format_bytes(row.total_bytes.unwrap_or(row.downloaded_bytes)).into(),
-            age_label: format_age(row.added_at).into(),
+            age_label: format_age(row.finished_at.unwrap_or(row.added_at)).into(),
         }
     }
 }
@@ -208,6 +210,7 @@ impl HistoryItemRow {
 impl RenderOnce for HistoryItemRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         h_flex()
+            .id(("history-row", self.model.id.0))
             .items_center()
             .gap(px(Spacing::ROW_GAP))
             .px(px(Spacing::ROW_PADDING_X))
@@ -291,6 +294,14 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.0} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+fn format_source_label(row: &HistoryRow) -> String {
+    if row.provider_kind == "http" {
+        row.source_label.clone()
+    } else {
+        format!("{}: {}", row.provider_kind, row.source_label)
     }
 }
 

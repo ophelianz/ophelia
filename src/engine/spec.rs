@@ -144,11 +144,10 @@ impl RestoredDownload {
     }
 
     pub fn from_saved(saved: &SavedDownload, settings: &Settings) -> Self {
-        let url = saved.url().to_string();
         match &saved.source {
-            PersistedDownloadSource::Http { .. } => Self::http(
+            PersistedDownloadSource::Http { url } => Self::http(
                 saved.id,
-                url,
+                url.clone(),
                 saved.destination.clone(),
                 HttpDownloadConfig::from_settings(settings),
                 saved.resume_data.clone(),

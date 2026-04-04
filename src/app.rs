@@ -59,7 +59,7 @@ impl Downloads {
             bootstrap.db_tx,
             bootstrap.next_download_id,
         );
-        let ipc = IpcServer::start();
+        let ipc = IpcServer::start(settings.ipc_port);
 
         let mut model = Self {
             engine,
@@ -152,6 +152,9 @@ impl Downloads {
     }
 
     pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        if settings.ipc_port != self.settings.ipc_port {
+            self.ipc = IpcServer::start(settings.ipc_port);
+        }
         self.engine.update_settings(settings.clone());
         self.settings = settings;
         cx.notify();

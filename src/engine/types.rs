@@ -59,7 +59,12 @@ pub enum HistoryFilter {
 #[derive(Debug, Clone)]
 pub struct HistoryRow {
     pub id: DownloadId,
-    pub url: String,
+    /// Storage-facing provider identifier. Kept as a string so history can still
+    /// display rows for providers this build does not yet support restoring.
+    pub provider_kind: String,
+    /// User-facing source label for the transfer, derived from the persisted
+    /// provider/source pair when possible and falling back to the stored locator.
+    pub source_label: String,
     pub destination: String,
     pub status: DownloadStatus,
     pub total_bytes: Option<u64>,
@@ -90,12 +95,6 @@ pub struct SavedDownload {
     pub resume_data: Option<ProviderResumeData>,
 }
 
-impl SavedDownload {
-    pub fn url(&self) -> &str {
-        self.source.url()
-    }
-}
-
 /// Provider-specific source information persisted with a transfer record.
 #[derive(Debug, Clone)]
 pub enum PersistedDownloadSource {
@@ -103,10 +102,14 @@ pub enum PersistedDownloadSource {
 }
 
 impl PersistedDownloadSource {
-    pub fn url(&self) -> &str {
+    pub fn locator(&self) -> &str {
         match self {
             Self::Http { url } => url,
         }
+    }
+
+    pub fn display_label(&self) -> &str {
+        self.locator()
     }
 
     pub fn kind(&self) -> &'static str {
@@ -115,9 +118,9 @@ impl PersistedDownloadSource {
         }
     }
 
-    pub fn from_parts(kind: &str, url: String) -> Option<Self> {
+    pub fn from_parts(kind: &str, locator: String) -> Option<Self> {
         match kind {
-            "http" => Some(Self::Http { url }),
+            "http" => Some(Self::Http { url: locator }),
             _ => None,
         }
     }

@@ -209,7 +209,7 @@ impl Db {
                     params![
                         id.0 as i64,
                         source.kind(),
-                        source.url(),
+                        source.locator(),
                         destination.to_string_lossy().as_ref(),
                         unix_ms()
                     ],
@@ -315,31 +315,43 @@ impl HistoryReader {
             HistoryFilter::Paused => "AND status = 'paused'",
         };
         let sql = format!(
-            "SELECT id, url, destination, status, total_bytes, downloaded, added_at, finished_at
+            "SELECT id, provider_kind, url, destination, status, total_bytes, downloaded, added_at, finished_at
              FROM downloads
              WHERE 1=1 {status_clause}
-               AND (?1 = '' OR destination LIKE '%' || ?1 || '%' OR url LIKE '%' || ?1 || '%')
+               AND (?1 = ''
+                    OR destination LIKE '%' || ?1 || '%'
+                    OR url LIKE '%' || ?1 || '%'
+                    OR provider_kind LIKE '%' || ?1 || '%')
              ORDER BY added_at DESC LIMIT 500"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![search], |row| {
-                let status_str: String = row.get(3)?;
+                let provider_kind: String = row.get(1)?;
+                let locator: String = row.get(2)?;
+                let status_str: String = row.get(4)?;
                 Ok(HistoryRow {
                     id: DownloadId(row.get::<_, i64>(0)? as u64),
-                    url: row.get(1)?,
-                    destination: row.get(2)?,
+                    provider_kind: provider_kind.clone(),
+                    source_label: history_source_label(&provider_kind, locator),
+                    destination: row.get(3)?,
                     status: status_from_str(&status_str),
-                    total_bytes: row.get::<_, Option<i64>>(4)?.map(|b| b as u64),
-                    downloaded_bytes: row.get::<_, i64>(5)? as u64,
-                    added_at: row.get(6)?,
-                    finished_at: row.get(7)?,
+                    total_bytes: row.get::<_, Option<i64>>(5)?.map(|b| b as u64),
+                    downloaded_bytes: row.get::<_, i64>(6)? as u64,
+                    added_at: row.get(7)?,
+                    finished_at: row.get(8)?,
                 })
             })?
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
     }
+}
+
+fn history_source_label(provider_kind: &str, locator: String) -> String {
+    PersistedDownloadSource::from_parts(provider_kind, locator.clone())
+        .map(|source| source.display_label().to_string())
+        .unwrap_or(locator)
 }
 
 fn status_from_str(s: &str) -> DownloadStatus {
@@ -453,7 +465,7 @@ mod tests {
         let saved = &downloads[0];
         assert_eq!(saved.id, DownloadId(7));
         assert_eq!(saved.source.kind(), HTTP_PROVIDER_KIND);
-        assert_eq!(saved.url(), "https://example.com/file.bin");
+        assert_eq!(saved.source.locator(), "https://example.com/file.bin");
         assert_eq!(saved.downloaded_bytes, 25);
         assert_eq!(saved.total_bytes, Some(100));
 
@@ -538,6 +550,8 @@ mod tests {
         let finished = history.load(HistoryFilter::Finished, "").unwrap();
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[0].status, DownloadStatus::Finished);
+        assert_eq!(finished[0].provider_kind, HTTP_PROVIDER_KIND);
+        assert_eq!(finished[0].source_label, "https://example.com/success.zip");
         assert_eq!(finished[0].destination, "/tmp/success.zip");
 
         let paused = history.load(HistoryFilter::Paused, "").unwrap();
@@ -547,6 +561,11 @@ mod tests {
         let searched = history.load(HistoryFilter::All, "failure").unwrap();
         assert_eq!(searched.len(), 1);
         assert_eq!(searched[0].status, DownloadStatus::Error);
-        assert!(searched[0].url.contains("failure"));
+        assert!(searched[0].source_label.contains("failure"));
+
+        let provider_search = history
+            .load(HistoryFilter::All, HTTP_PROVIDER_KIND)
+            .unwrap();
+        assert_eq!(provider_search.len(), 3);
     }
 }

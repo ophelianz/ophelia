@@ -11,7 +11,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_IPC_PORT: u16 = 7373;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub max_connections_per_server: usize,
     pub max_connections_per_download: usize,
@@ -19,6 +22,8 @@ pub struct Settings {
     pub default_download_dir: Option<PathBuf>,
     /// Global bandwidth cap across all concurrent downloads. 0 = unlimited.
     pub global_speed_limit_bps: u64,
+    /// Localhost port used by the browser-extension IPC server.
+    pub ipc_port: u16,
 }
 
 impl Default for Settings {
@@ -29,6 +34,7 @@ impl Default for Settings {
             max_concurrent_downloads: 3,
             default_download_dir: None,
             global_speed_limit_bps: 0,
+            ipc_port: DEFAULT_IPC_PORT,
         }
     }
 }
@@ -73,5 +79,32 @@ impl Settings {
             .join("Application Support")
             .join("Ophelia")
             .join("settings.json")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_include_default_ipc_port() {
+        assert_eq!(Settings::default().ipc_port, DEFAULT_IPC_PORT);
+    }
+
+    #[test]
+    fn missing_ipc_port_deserializes_to_default() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "max_connections_per_server": 6,
+                "max_connections_per_download": 10,
+                "max_concurrent_downloads": 4,
+                "default_download_dir": null,
+                "global_speed_limit_bps": 0
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ipc_port, DEFAULT_IPC_PORT);
+        assert_eq!(settings.max_connections_per_server, 6);
     }
 }
