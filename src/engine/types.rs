@@ -18,6 +18,15 @@ pub enum DownloadStatus {
     Error,
 }
 
+/// Engine-level control actions. Providers may support only a subset of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadControlAction {
+    Pause,
+    Resume,
+    Cancel,
+    Restore,
+}
+
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
 /// The worker is the sole writer to SQLite and nothing else touches the DB.
 pub enum DbEvent {
@@ -193,5 +202,11 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone)]
 pub enum EngineNotification {
     Update(ProgressUpdate),
-    Removed { id: DownloadId },
+    Removed {
+        id: DownloadId,
+    },
+    ControlUnsupported {
+        id: DownloadId,
+        action: DownloadControlAction,
+    },
 }

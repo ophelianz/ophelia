@@ -75,7 +75,7 @@ These names are intentional too:
   - `mod.rs`: persisted settings model and atomic load/save
 - `engine/`
   - `engine.rs`: `DownloadEngine` handle and `EngineActor`
-  - `provider.rs`: internal provider dispatch, provider capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
+  - `provider.rs`: internal provider dispatch, provider lifecycle capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
   - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config mapping
   - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
   - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader

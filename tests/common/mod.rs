@@ -46,6 +46,7 @@ pub fn last_status(updates: &[ProgressUpdate]) -> Option<DownloadStatus> {
 
 use wiremock::{Respond, ResponseTemplate};
 
+#[allow(dead_code)] // shared test helper used selectively by integration test targets
 pub struct RangeResponder {
     pub data: Vec<u8>,
 }
@@ -69,6 +70,7 @@ impl Respond for RangeResponder {
     }
 }
 
+#[allow(dead_code)] // shared test helper used selectively by integration test targets
 pub struct SlowRangeResponder {
     pub data: Vec<u8>,
     pub delay: Duration,
