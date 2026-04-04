@@ -1,4 +1,5 @@
 pub mod app_menu_bar;
+pub mod directory_input;
 pub mod icon;
 pub mod logo;
 pub mod modal;

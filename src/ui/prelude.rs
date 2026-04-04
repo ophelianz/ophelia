@@ -2,6 +2,7 @@ use gpui::{Div, Styled, div};
 
 pub use crate::theme::*;
 pub use crate::ui::app_menu_bar::*;
+pub use crate::ui::directory_input::*;
 pub use crate::ui::icon::*;
 pub use crate::ui::logo::*;
 pub use crate::ui::modal::*;

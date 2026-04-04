@@ -56,7 +56,7 @@ impl Section {
 pub struct SettingsWindow {
     pub settings: Settings,
     active: Section,
-    pub(super) download_dir_input: Entity<TextField>,
+    pub(super) download_dir_input: Entity<DirectoryInput>,
     pub(super) global_speed_limit_input: Entity<NumberInput>,
     pub(super) concurrent_downloads_input: Entity<NumberInput>,
     pub(super) connections_per_download_input: Entity<NumberInput>,
@@ -71,7 +71,7 @@ impl SettingsWindow {
 
         Self {
             download_dir_input: cx.new(|cx| {
-                TextField::new(
+                DirectoryInput::new(
                     settings.download_dir().to_string_lossy().to_string(),
                     t!("settings.general.download_folder_placeholder").to_string(),
                     cx,
@@ -124,7 +124,7 @@ impl SettingsWindow {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.settings.default_download_dir =
-            parse_path_input(self.download_dir_input.read(cx).text());
+            parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref());
         self.settings.global_speed_limit_bps = parse_speed_limit_input(
             self.global_speed_limit_input.read(cx).text(),
             self.settings.global_speed_limit_bps,
@@ -271,7 +271,7 @@ impl SettingsWindow {
     }
 }
 
-pub(super) fn setting_text_input(input: Entity<TextField>) -> gpui::Div {
+pub(super) fn setting_directory_input(input: Entity<DirectoryInput>) -> gpui::Div {
     div().w(px(220.0)).child(input)
 }
 
