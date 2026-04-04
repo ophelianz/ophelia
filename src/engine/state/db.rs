@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
+use crate::engine::state::http;
 use crate::engine::types::{
-    ChunkSnapshot, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, HttpResumeData,
-    PersistedDownloadSource, ProviderResumeData, SavedDownload,
+    DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, PersistedDownloadSource,
+    ProviderResumeData, SavedDownload,
 };
 
 #[cfg(test)]
@@ -16,11 +17,15 @@ pub struct Db {
 
 impl Db {
     pub fn open() -> rusqlite::Result<Self> {
-        let path = db_path();
+        Self::open_at(db_path())
+    }
+
+    fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let path = path.as_ref();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
@@ -47,17 +52,10 @@ impl Db {
                 etag        TEXT,
                 mime_type   TEXT
             );
-            CREATE TABLE IF NOT EXISTS chunks (
-                download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
-                slot        INTEGER NOT NULL,
-                start       INTEGER NOT NULL,
-                end_byte    INTEGER NOT NULL,
-                downloaded  INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (download_id, slot)
-            );
         ",
         )?;
         self.ensure_downloads_provider_kind_column()?;
+        http::migrate(&self.conn)?;
         Ok(())
     }
 
@@ -190,22 +188,7 @@ impl Db {
         }
 
         for dl in &mut downloads {
-            let mut cstmt = self.conn.prepare(
-                "SELECT start, end_byte, downloaded FROM chunks
-                 WHERE download_id = ?1 ORDER BY slot",
-            )?;
-            let chunks: Vec<ChunkSnapshot> = cstmt
-                .query_map(params![dl.id.0 as i64], |row| {
-                    Ok(ChunkSnapshot {
-                        start: row.get::<_, i64>(0)? as u64,
-                        end: row.get::<_, i64>(1)? as u64,
-                        downloaded: row.get::<_, i64>(2)? as u64,
-                    })
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-            dl.resume_data =
-                (!chunks.is_empty()).then(|| ProviderResumeData::Http(HttpResumeData::new(chunks)));
+            dl.resume_data = self.load_provider_resume_data(dl.id, &dl.source)?;
         }
 
         Ok((downloads, max_id))
@@ -258,10 +241,7 @@ impl Db {
                 )?;
                 // Chunks not needed once finished; CASCADE would handle it on delete
                 // but we delete explicitly to free space immediately.
-                self.conn.execute(
-                    "DELETE FROM chunks WHERE download_id = ?1",
-                    params![id.0 as i64],
-                )?;
+                self.save_resume_data(id, None)?;
             }
             DbEvent::Error { id } => {
                 self.conn.execute(
@@ -283,26 +263,17 @@ impl Db {
         id: DownloadId,
         resume_data: Option<&ProviderResumeData>,
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM chunks WHERE download_id = ?1",
-            params![id.0 as i64],
-        )?;
-        if let Some(ProviderResumeData::Http(data)) = resume_data {
-            let mut stmt = self.conn.prepare(
-                "INSERT INTO chunks (download_id, slot, start, end_byte, downloaded)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for (slot, chunk) in data.chunks.iter().enumerate() {
-                stmt.execute(params![
-                    id.0 as i64,
-                    slot as i64,
-                    chunk.start as i64,
-                    chunk.end as i64,
-                    chunk.downloaded as i64,
-                ])?;
-            }
+        http::save_resume_data(&self.conn, id, resume_data)
+    }
+
+    fn load_provider_resume_data(
+        &self,
+        download_id: DownloadId,
+        source: &PersistedDownloadSource,
+    ) -> rusqlite::Result<Option<ProviderResumeData>> {
+        match source {
+            PersistedDownloadSource::Http { .. } => http::load_resume_data(&self.conn, download_id),
         }
-        Ok(())
     }
 }
 
@@ -326,7 +297,11 @@ pub struct HistoryReader {
 
 impl HistoryReader {
     pub fn open() -> rusqlite::Result<Self> {
-        let conn = Connection::open(db_path())?;
+        Self::open_at(db_path())
+    }
+
+    fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path.as_ref())?;
         // Best-effort read-only hint; doesn't error on older SQLite.
         let _ = conn.execute_batch("PRAGMA query_only=ON;");
         Ok(Self { conn })
@@ -387,6 +362,14 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::types::{ChunkSnapshot, HttpResumeData};
+    use tempfile::TempDir;
+
+    fn temp_db_path() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("downloads.db");
+        (dir, path)
+    }
 
     #[test]
     fn migrate_adds_provider_kind_to_legacy_downloads_table() {
@@ -435,8 +418,8 @@ mod tests {
 
     #[test]
     fn load_for_restore_reads_provider_kind_and_http_resume_data() {
-        let conn = Connection::open_in_memory().unwrap();
-        let db = Db { conn };
+        let (_dir, db_path) = temp_db_path();
+        let db = Db::open_at(&db_path).unwrap();
         db.migrate().unwrap();
 
         db.conn
@@ -479,5 +462,91 @@ mod tests {
         assert_eq!(resume.chunks[0].start, 0);
         assert_eq!(resume.chunks[0].end, 100);
         assert_eq!(resume.chunks[0].downloaded, 25);
+    }
+
+    #[test]
+    fn load_for_restore_skips_unknown_provider_kind() {
+        let (_dir, db_path) = temp_db_path();
+        let db = Db::open_at(&db_path).unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO downloads
+                 (id, provider_kind, url, destination, status, downloaded, added_at)
+                 VALUES (?1, ?2, ?3, ?4, 'paused', ?5, ?6)",
+                params![1_i64, "unknown", "opaque:thing", "/tmp/thing", 0_i64, 1_i64],
+            )
+            .unwrap();
+
+        let (downloads, max_id) = db.load_for_restore().unwrap();
+        assert_eq!(max_id, 1);
+        assert!(downloads.is_empty());
+    }
+
+    #[test]
+    fn history_reader_filters_and_searches_transfer_rows() {
+        let (_dir, db_path) = temp_db_path();
+        let db = Db::open_at(&db_path).unwrap();
+
+        db.handle(DbEvent::Started {
+            id: DownloadId(1),
+            source: PersistedDownloadSource::Http {
+                url: "https://example.com/success.zip".to_string(),
+            },
+            destination: PathBuf::from("/tmp/success.zip"),
+        })
+        .unwrap();
+        db.handle(DbEvent::Finished {
+            id: DownloadId(1),
+            total_bytes: 100,
+        })
+        .unwrap();
+
+        db.handle(DbEvent::Started {
+            id: DownloadId(2),
+            source: PersistedDownloadSource::Http {
+                url: "https://example.com/failure.zip".to_string(),
+            },
+            destination: PathBuf::from("/tmp/failure.zip"),
+        })
+        .unwrap();
+        db.handle(DbEvent::Error { id: DownloadId(2) }).unwrap();
+
+        db.handle(DbEvent::Started {
+            id: DownloadId(3),
+            source: PersistedDownloadSource::Http {
+                url: "https://example.com/paused.zip".to_string(),
+            },
+            destination: PathBuf::from("/tmp/paused.zip"),
+        })
+        .unwrap();
+        db.handle(DbEvent::Paused {
+            id: DownloadId(3),
+            downloaded_bytes: 12,
+            resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
+                ChunkSnapshot {
+                    start: 0,
+                    end: 100,
+                    downloaded: 12,
+                },
+            ]))),
+        })
+        .unwrap();
+
+        let history = HistoryReader::open_at(&db_path).unwrap();
+
+        let finished = history.load(HistoryFilter::Finished, "").unwrap();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].status, DownloadStatus::Finished);
+        assert_eq!(finished[0].destination, "/tmp/success.zip");
+
+        let paused = history.load(HistoryFilter::Paused, "").unwrap();
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].downloaded_bytes, 12);
+
+        let searched = history.load(HistoryFilter::All, "failure").unwrap();
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].status, DownloadStatus::Error);
+        assert!(searched[0].url.contains("failure"));
     }
 }

@@ -77,7 +77,7 @@ These names are intentional too:
   - `engine.rs`: `DownloadEngine` handle and `EngineActor`
   - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config mapping
   - `types.rs`: shared engine-facing types, persisted source/resume data, progress updates, and engine notifications
-  - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, DB worker, and history reader
+  - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
   - `http/`: HTTP-specific executor pipeline
 
 ## Placement rules
@@ -100,4 +100,4 @@ For backend code:
 For deeper backend notes:
 
 - See `docs/architecture.md` for the as-built backend architecture, current gaps, and incremental direction.
-- See `tests/` plus local `engine/state/db.rs` unit tests for backend coverage of the current HTTP executor path, engine notifications, and provider-kind persistence migration.
+- See `tests/` plus local `engine/state/db.rs` unit tests for backend coverage of the current HTTP executor path, engine notifications, provider-kind persistence migration, and history queries.

@@ -1,4 +1,5 @@
 mod db;
+mod http;
 use db::Db;
 pub use db::HistoryReader;
 
