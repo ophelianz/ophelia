@@ -28,6 +28,35 @@ pub enum DownloadControlAction {
     Restore,
 }
 
+/// Provider-declared lifecycle controls exposed at the app/UI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferControlSupport {
+    pub can_pause: bool,
+    pub can_resume: bool,
+    pub can_cancel: bool,
+    pub can_restore: bool,
+}
+
+impl TransferControlSupport {
+    pub const fn all() -> Self {
+        Self {
+            can_pause: true,
+            can_resume: true,
+            can_cancel: true,
+            can_restore: true,
+        }
+    }
+
+    pub const fn supports(self, action: DownloadControlAction) -> bool {
+        match action {
+            DownloadControlAction::Pause => self.can_pause,
+            DownloadControlAction::Resume => self.can_resume,
+            DownloadControlAction::Cancel => self.can_cancel,
+            DownloadControlAction::Restore => self.can_restore,
+        }
+    }
+}
+
 /// Artifact state is tracked separately from transfer outcome so history can say
 /// "finished, but deleted" or "cancelled, and missing on disk".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +181,12 @@ impl PersistedDownloadSource {
         }
     }
 
+    pub fn control_support(&self) -> TransferControlSupport {
+        match self {
+            Self::Http { .. } => TransferControlSupport::all(),
+        }
+    }
+
     pub fn from_parts(kind: &str, locator: String) -> Option<Self> {
         match kind {
             "http" => Some(Self::Http { url: locator }),
@@ -227,11 +262,20 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone)]
 pub enum EngineNotification {
     Update(ProgressUpdate),
-    Removed {
+    LiveTransferRemoved {
         id: DownloadId,
+        action: LiveTransferRemovalAction,
+        artifact_state: ArtifactState,
     },
     ControlUnsupported {
         id: DownloadId,
         action: DownloadControlAction,
     },
+}
+
+/// Why a live transfer row left the active/transfers surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveTransferRemovalAction {
+    Cancelled,
+    DeleteArtifact,
 }

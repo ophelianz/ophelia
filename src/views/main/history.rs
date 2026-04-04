@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::app::Downloads;
-use crate::engine::{DownloadId, DownloadStatus, HistoryFilter, HistoryRow};
+use crate::engine::{ArtifactState, DownloadId, DownloadStatus, HistoryFilter, HistoryRow};
 use crate::ui::prelude::*;
 
 use rust_i18n::t;
@@ -51,6 +51,12 @@ impl HistoryView {
                     HistoryFilter::Paused,
                     t!("history.filter_paused").to_string(),
                     downloads.history_filter == HistoryFilter::Paused,
+                ),
+                HistoryFilterChipModel::new(
+                    4,
+                    HistoryFilter::Cancelled,
+                    t!("history.filter_cancelled").to_string(),
+                    downloads.history_filter == HistoryFilter::Cancelled,
                 ),
             ],
             rows: downloads
@@ -127,6 +133,8 @@ struct HistoryRowModel {
     status_color: Hsla,
     filename: SharedString,
     subtitle: SharedString,
+    artifact_label: SharedString,
+    artifact_color: Hsla,
     size_label: SharedString,
     age_label: SharedString,
 }
@@ -143,6 +151,7 @@ impl HistoryRowModel {
                 (IconName::ArrowDownToLine, Colors::muted_foreground().into())
             }
         };
+        let (artifact_label, artifact_color) = artifact_state_presentation(row.artifact_state);
 
         Self {
             id: row.id,
@@ -150,6 +159,8 @@ impl HistoryRowModel {
             status_color,
             filename: row.filename().to_string().into(),
             subtitle: format_source_label(row).into(),
+            artifact_label: artifact_label.into(),
+            artifact_color,
             size_label: format_bytes(row.total_bytes.unwrap_or(row.downloaded_bytes)).into(),
             age_label: format_age(row.finished_at.unwrap_or(row.added_at)).into(),
         }
@@ -260,6 +271,12 @@ impl RenderOnce for HistoryItemRow {
                     .child(
                         div()
                             .text_xs()
+                            .text_color(self.model.artifact_color)
+                            .child(self.model.artifact_label),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
                             .text_color(Colors::muted_foreground())
                             .child(self.model.age_label),
                     ),
@@ -303,6 +320,23 @@ fn format_source_label(row: &HistoryRow) -> String {
         row.source_label.clone()
     } else {
         format!("{}: {}", row.provider_kind, row.source_label)
+    }
+}
+
+fn artifact_state_presentation(state: ArtifactState) -> (String, Hsla) {
+    match state {
+        ArtifactState::Present => (
+            t!("history.artifact.present").to_string(),
+            Colors::muted_foreground().into(),
+        ),
+        ArtifactState::Deleted => (
+            t!("history.artifact.deleted").to_string(),
+            Colors::muted_foreground().into(),
+        ),
+        ArtifactState::Missing => (
+            t!("history.artifact.missing").to_string(),
+            Colors::error().into(),
+        ),
     }
 }
 

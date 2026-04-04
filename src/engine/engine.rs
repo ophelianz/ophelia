@@ -30,7 +30,8 @@ use crate::engine::provider::{
 };
 use crate::engine::{
     ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
-    EngineNotification, ProgressUpdate, ProviderResumeData, RestoredDownload,
+    EngineNotification, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
+    RestoredDownload,
 };
 use crate::settings::Settings;
 
@@ -481,14 +482,18 @@ impl EngineActor {
         removed |= self.paused.remove(&id).is_some();
 
         if removed {
+            let artifact_state = current_artifact_state(&destination);
             let _ = self.db_tx.send(DbEvent::Cancelled { id });
-            let _ = self.db_tx.send(DbEvent::ArtifactStateChanged {
-                id,
-                artifact_state: current_artifact_state(&destination),
-            });
+            let _ = self
+                .db_tx
+                .send(DbEvent::ArtifactStateChanged { id, artifact_state });
             let _ = self
                 .notification_tx
-                .send(EngineNotification::Removed { id });
+                .send(EngineNotification::LiveTransferRemoved {
+                    id,
+                    action: LiveTransferRemovalAction::Cancelled,
+                    artifact_state,
+                });
         }
     }
 
@@ -515,7 +520,11 @@ impl EngineActor {
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
         let _ = self
             .notification_tx
-            .send(EngineNotification::Removed { id });
+            .send(EngineNotification::LiveTransferRemoved {
+                id,
+                action: LiveTransferRemovalAction::DeleteArtifact,
+                artifact_state,
+            });
     }
 
     fn handle_shutdown(&mut self) {

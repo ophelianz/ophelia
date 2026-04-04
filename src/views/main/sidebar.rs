@@ -5,7 +5,7 @@ use std::{
 
 use crate::app_menu;
 use crate::ui::prelude::*;
-use gpui::{App, Context, Hsla, RenderOnce, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{App, Context, Hsla, Render, RenderOnce, SharedString, Window, div, prelude::*, px, relative};
 use rust_i18n::t;
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -31,32 +31,14 @@ impl Sidebar {
                 SidebarNavItemModel::new(
                     0,
                     IconName::Inbox,
-                    t!("sidebar.downloads").to_string(),
+                    t!("sidebar.transfers").to_string(),
                     self.active_item == 0,
                 ),
                 SidebarNavItemModel::new(
                     1,
-                    IconName::ArrowDownToLine,
-                    t!("sidebar.active").to_string(),
-                    self.active_item == 1,
-                ),
-                SidebarNavItemModel::new(
-                    2,
-                    IconName::CircleCheck,
-                    t!("sidebar.finished").to_string(),
-                    self.active_item == 2,
-                ),
-                SidebarNavItemModel::new(
-                    3,
-                    IconName::CirclePause,
-                    t!("sidebar.paused").to_string(),
-                    self.active_item == 3,
-                ),
-                SidebarNavItemModel::new(
-                    4,
                     IconName::Database,
                     t!("sidebar.history").to_string(),
-                    self.active_item == 4,
+                    self.active_item == 1,
                 ),
             ],
             storage: StorageCardModel::from_path(&self.download_dir),

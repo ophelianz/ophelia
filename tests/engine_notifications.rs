@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::{DownloadEngine, DownloadSpec, DownloadStatus, EngineNotification};
+use ophelia::engine::{
+    ArtifactState, DownloadEngine, DownloadSpec, DownloadStatus, EngineNotification,
+    LiveTransferRemovalAction,
+};
 use ophelia::settings::Settings;
 
 fn wait_for_notification(engine: &mut DownloadEngine) -> EngineNotification {
@@ -19,7 +22,7 @@ fn wait_for_notification(engine: &mut DownloadEngine) -> EngineNotification {
 }
 
 #[test]
-fn queued_pause_resume_and_delete_emit_notifications() {
+fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
     let settings = Settings {
         max_concurrent_downloads: 0,
@@ -57,11 +60,36 @@ fn queued_pause_resume_and_delete_emit_notifications() {
         other => panic!("expected pending update, got {other:?}"),
     }
 
+    engine.cancel(id);
+    match wait_for_notification(&mut engine) {
+        EngineNotification::LiveTransferRemoved {
+            id: removed,
+            action,
+            artifact_state,
+        } => {
+            assert_eq!(removed, id);
+            assert_eq!(action, LiveTransferRemovalAction::Cancelled);
+            assert_eq!(artifact_state, ArtifactState::Missing);
+        }
+        other => panic!("expected cancelled removal notification, got {other:?}"),
+    }
+
+    let id = engine.add(DownloadSpec::http(
+        "https://example.com/file.bin".to_string(),
+        destination.clone(),
+        HttpDownloadConfig::default(),
+    ));
     std::fs::write(&destination, b"partial").unwrap();
     engine.delete_artifact(id, destination.clone());
     match wait_for_notification(&mut engine) {
-        EngineNotification::Removed { id: removed } => {
+        EngineNotification::LiveTransferRemoved {
+            id: removed,
+            action,
+            artifact_state,
+        } => {
             assert_eq!(removed, id);
+            assert_eq!(action, LiveTransferRemovalAction::DeleteArtifact);
+            assert_eq!(artifact_state, ArtifactState::Deleted);
             assert!(!destination.exists());
         }
         other => panic!("expected removed notification, got {other:?}"),

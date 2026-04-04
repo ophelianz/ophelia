@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
-    DownloadId, PersistedDownloadSource, ProviderResumeData, SavedDownload,
+    DownloadId, PersistedDownloadSource, ProviderResumeData, SavedDownload, TransferControlSupport,
 };
 use crate::settings::Settings;
 
@@ -102,6 +102,18 @@ impl DownloadSpec {
     pub fn url(&self) -> &str {
         self.source.url()
     }
+
+    pub fn provider_kind(&self) -> &'static str {
+        self.source.provider_kind()
+    }
+
+    pub fn source_label(&self) -> &str {
+        self.source.source_label()
+    }
+
+    pub fn control_support(&self) -> TransferControlSupport {
+        self.source.control_support()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +128,24 @@ impl DownloadSource {
     pub fn url(&self) -> &str {
         match self {
             Self::Http { url, .. } => url,
+        }
+    }
+
+    pub fn provider_kind(&self) -> &'static str {
+        match self {
+            Self::Http { .. } => "http",
+        }
+    }
+
+    pub fn source_label(&self) -> &str {
+        match self {
+            Self::Http { url, .. } => url,
+        }
+    }
+
+    pub fn control_support(&self) -> TransferControlSupport {
+        match self {
+            Self::Http { .. } => TransferControlSupport::all(),
         }
     }
 }
@@ -200,6 +230,23 @@ mod tests {
     }
 
     #[test]
+    fn download_spec_exposes_provider_metadata_and_control_support() {
+        let spec = DownloadSpec::http(
+            "https://example.com/file.bin".to_string(),
+            PathBuf::from("/tmp/file.bin"),
+            HttpDownloadConfig::default(),
+        );
+
+        assert_eq!(spec.provider_kind(), "http");
+        assert_eq!(spec.source_label(), "https://example.com/file.bin");
+        let controls = spec.control_support();
+        assert!(controls.can_pause);
+        assert!(controls.can_resume);
+        assert!(controls.can_cancel);
+        assert!(controls.can_restore);
+    }
+
+    #[test]
     fn restored_download_from_saved_rebuilds_provider_config_from_settings() {
         let settings = Settings {
             max_connections_per_download: 5,
@@ -225,6 +272,21 @@ mod tests {
                 assert_eq!(config.max_connections, 5);
             }
         }
+    }
+
+    #[test]
+    fn persisted_source_exposes_provider_metadata_and_control_support() {
+        let source = PersistedDownloadSource::Http {
+            url: "https://example.com/archive.zip".to_string(),
+        };
+
+        assert_eq!(source.kind(), "http");
+        assert_eq!(source.display_label(), "https://example.com/archive.zip");
+        let controls = source.control_support();
+        assert!(controls.can_pause);
+        assert!(controls.can_resume);
+        assert!(controls.can_cancel);
+        assert!(controls.can_restore);
     }
 
     #[test]

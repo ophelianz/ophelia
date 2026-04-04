@@ -31,13 +31,21 @@ downloads:
     empty_state: "No downloads yet"
     speed: "%{speed}"
     section_label: "RECENT"
+transfers:
+    section_label: "TRANSFERS"
+    filter_all: "All"
+    filter_active: "Active"
+    filter_finished: "Finished"
+    filter_paused: "Paused"
+    filter_failed: "Failed"
 sidebar:
     active: "Active"
     add_download: "Add Download"
-    downloads: "Downloads"
+    downloads: "Transfers"
     finished: "Finished"
     history: "History"
     paused: "Paused"
+    transfers: "Transfers"
     storage: "Storage"
     storage_used: "used"
 notifications:
@@ -46,10 +54,15 @@ notifications:
 history:
     title: "History"
     filter_all: "All"
+    filter_cancelled: "Cancelled"
     filter_finished: "Finished"
     filter_failed: "Failed"
     filter_paused: "Paused"
     empty: "No downloads in history"
+    artifact:
+        present: "File present"
+        deleted: "Deleted"
+        missing: "Missing"
     age:
         just_now: "just now"
         minute_ago: "1 minute ago"
