@@ -6,6 +6,7 @@
 //! in-memory settings copy immediately.
 
 use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
+use rust_i18n::t;
 
 use crate::settings::Settings;
 use crate::theme::APP_FONT_FAMILY;
@@ -56,10 +57,10 @@ pub struct SettingsWindow {
     pub settings: Settings,
     active: Section,
     pub(super) download_dir_input: Entity<TextField>,
-    pub(super) global_speed_limit_input: Entity<TextField>,
-    pub(super) concurrent_downloads_input: Entity<TextField>,
-    pub(super) connections_per_download_input: Entity<TextField>,
-    pub(super) connections_per_server_input: Entity<TextField>,
+    pub(super) global_speed_limit_input: Entity<NumberInput>,
+    pub(super) concurrent_downloads_input: Entity<NumberInput>,
+    pub(super) connections_per_download_input: Entity<NumberInput>,
+    pub(super) connections_per_server_input: Entity<NumberInput>,
 }
 
 impl EventEmitter<SettingsClosed> for SettingsWindow {}
@@ -72,29 +73,49 @@ impl SettingsWindow {
             download_dir_input: cx.new(|cx| {
                 TextField::new(
                     settings.download_dir().to_string_lossy().to_string(),
-                    "Downloads folder",
+                    t!("settings.general.download_folder_placeholder").to_string(),
                     cx,
                 )
             }),
             global_speed_limit_input: cx.new(|cx| {
-                TextField::new(
+                NumberInput::new(
                     format!("{}", settings.global_speed_limit_bps / 1024),
-                    "0",
+                    t!("settings.network.global_speed_limit_placeholder").to_string(),
+                    0,
+                    1_000_000,
+                    64,
                     cx,
                 )
             }),
             concurrent_downloads_input: cx.new(|cx| {
-                TextField::new(format!("{}", settings.max_concurrent_downloads), "3", cx)
+                NumberInput::new(
+                    format!("{}", settings.max_concurrent_downloads),
+                    t!("settings.network.concurrent_downloads_placeholder").to_string(),
+                    1,
+                    10,
+                    1,
+                    cx,
+                )
             }),
             connections_per_download_input: cx.new(|cx| {
-                TextField::new(
+                NumberInput::new(
                     format!("{}", settings.max_connections_per_download),
-                    "8",
+                    t!("settings.network.connections_per_download_placeholder").to_string(),
+                    1,
+                    16,
+                    1,
                     cx,
                 )
             }),
             connections_per_server_input: cx.new(|cx| {
-                TextField::new(format!("{}", settings.max_connections_per_server), "4", cx)
+                NumberInput::new(
+                    format!("{}", settings.max_connections_per_server),
+                    t!("settings.network.connections_per_server_placeholder").to_string(),
+                    1,
+                    16,
+                    1,
+                    cx,
+                )
             }),
             settings,
             active: Section::General,
@@ -146,7 +167,7 @@ impl Render for SettingsWindow {
             .bg(Colors::background())
             .text_color(Colors::foreground())
             .font_family(APP_FONT_FAMILY)
-            .child(WindowHeader::new("Settings"))
+            .child(WindowHeader::new(t!("settings.title").to_string()))
             .child(
                 div()
                     .flex()
@@ -176,14 +197,17 @@ impl SettingsWindow {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let sections = [("General", Section::General), ("Network", Section::Network)];
+        let sections = [
+            (t!("settings.general.section").to_string(), Section::General),
+            (t!("settings.network.section").to_string(), Section::Network),
+        ];
         let nav_items = sections
             .into_iter()
             .map(|(label, section)| {
                 let is_active = self.active == section;
 
                 div()
-                    .id(SharedString::from(label))
+                    .id(SharedString::from(label.clone()))
                     .px(px(12.0))
                     .py(px(8.0))
                     .rounded(px(6.0))
@@ -212,7 +236,7 @@ impl SettingsWindow {
                         cx.notify();
                     }))
                     .child(icon_m(section.icon(), section.icon_color()))
-                    .child(SharedString::from(label))
+                    .child(label)
             })
             .collect::<Vec<_>>();
 
@@ -242,12 +266,16 @@ impl SettingsWindow {
                     .text_color(Colors::background())
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
-                    .child("Done"),
+                    .child(t!("settings.done").to_string()),
             )
     }
 }
 
 pub(super) fn setting_text_input(input: Entity<TextField>) -> gpui::Div {
+    div().w(px(220.0)).child(input)
+}
+
+pub(super) fn setting_number_input(input: Entity<NumberInput>) -> gpui::Div {
     div().w(px(220.0)).child(input)
 }
 
@@ -281,10 +309,12 @@ fn parse_bounded_usize_input(input: &str, fallback: usize, min: usize, max: usiz
 // ---------------------------------------------------------------------------
 
 fn setting_row(
-    label: &'static str,
-    description: &'static str,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> gpui::Div {
+    let label = label.into();
+    let description = description.into();
     div()
         .flex()
         .items_center()

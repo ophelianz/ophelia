@@ -26,6 +26,7 @@ fn run() {
             app_menu::init(cx);
             app_actions::init(cx);
             ui::modal::bind_actions(cx);
+            ui::number_input::init(cx);
             ui::text_field::init(cx);
 
             cx.text_system()
