@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::http::{TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
-    ChunkSnapshot, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
+    ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
     PersistedDownloadSource, ProgressUpdate, ProviderResumeData,
 };
 use crate::settings::Settings;
@@ -36,6 +36,14 @@ pub(super) struct SharedSchedulerRequirement {
     pub(super) limit: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProviderLifecycleCapabilities {
+    pub(super) can_pause: bool,
+    pub(super) can_resume: bool,
+    pub(super) can_cancel: bool,
+    pub(super) can_restore: bool,
+}
+
 pub(super) struct ProviderCapabilities {
     pub(super) shared_scheduler: Option<SharedSchedulerRequirement>,
 }
@@ -57,6 +65,27 @@ pub(super) fn capabilities(spec: &DownloadSpec, settings: &Settings) -> Provider
                 limit: settings.max_connections_per_server,
             }),
         },
+    }
+}
+
+pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> ProviderLifecycleCapabilities {
+    match &spec.source {
+        DownloadSource::Http { .. } => ProviderLifecycleCapabilities {
+            can_pause: true,
+            can_resume: true,
+            can_cancel: true,
+            can_restore: true,
+        },
+    }
+}
+
+pub(super) fn supports_control_action(spec: &DownloadSpec, action: DownloadControlAction) -> bool {
+    let lifecycle = lifecycle_capabilities(spec);
+    match action {
+        DownloadControlAction::Pause => lifecycle.can_pause,
+        DownloadControlAction::Resume => lifecycle.can_resume,
+        DownloadControlAction::Cancel => lifecycle.can_cancel,
+        DownloadControlAction::Restore => lifecycle.can_restore,
     }
 }
 
@@ -182,6 +211,29 @@ mod tests {
             scheduler.key,
             SchedulerKey::Hostname("example.com:443".to_string())
         );
+    }
+
+    #[test]
+    fn lifecycle_support_is_explicit_for_http_controls() {
+        let spec = DownloadSpec::http(
+            "https://example.com/archive.zip".to_string(),
+            PathBuf::from("/tmp/archive.zip"),
+            HttpDownloadConfig::default(),
+        );
+
+        assert!(supports_control_action(&spec, DownloadControlAction::Pause));
+        assert!(supports_control_action(
+            &spec,
+            DownloadControlAction::Resume
+        ));
+        assert!(supports_control_action(
+            &spec,
+            DownloadControlAction::Cancel
+        ));
+        assert!(supports_control_action(
+            &spec,
+            DownloadControlAction::Restore
+        ));
     }
 
     #[test]

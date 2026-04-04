@@ -19,8 +19,8 @@ use gpui::{Context, SharedString};
 
 use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddDownloadRequest, DownloadEngine, DownloadId, DownloadStatus, EngineNotification,
-    HistoryFilter, HistoryRow, ProgressUpdate, RestoredDownload, SavedDownload,
+    AddDownloadRequest, DownloadControlAction, DownloadEngine, DownloadId, DownloadStatus,
+    EngineNotification, HistoryFilter, HistoryRow, ProgressUpdate, RestoredDownload, SavedDownload,
 };
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
@@ -289,6 +289,13 @@ impl Downloads {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
             EngineNotification::Removed { id } => self.remove_row(id, cx),
+            EngineNotification::ControlUnsupported { id, action } => {
+                tracing::warn!(
+                    id = id.0,
+                    action = control_action_name(action),
+                    "provider does not support requested control action"
+                );
+            }
         }
     }
 
@@ -303,5 +310,14 @@ impl Downloads {
             self.speeds.remove(idx);
             cx.notify();
         }
+    }
+}
+
+fn control_action_name(action: DownloadControlAction) -> &'static str {
+    match action {
+        DownloadControlAction::Pause => "pause",
+        DownloadControlAction::Resume => "resume",
+        DownloadControlAction::Cancel => "cancel",
+        DownloadControlAction::Restore => "restore",
     }
 }

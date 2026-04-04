@@ -27,8 +27,8 @@ use crate::engine::provider::{
     self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDone, TaskPauseSink,
 };
 use crate::engine::{
-    DbEvent, DownloadId, DownloadSpec, DownloadStatus, EngineNotification, ProgressUpdate,
-    ProviderResumeData, RestoredDownload,
+    DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus, EngineNotification,
+    ProgressUpdate, ProviderResumeData, RestoredDownload,
 };
 use crate::settings::Settings;
 
@@ -223,6 +223,20 @@ impl EngineActor {
                         EngineCommand::Cancel { id } =>
                             self.handle_cancel(id),
                         EngineCommand::Restore { download } => {
+                            if !provider::supports_control_action(
+                                &download.spec,
+                                DownloadControlAction::Restore,
+                            ) {
+                                self.notify_unsupported_control(
+                                    download.id,
+                                    DownloadControlAction::Restore,
+                                );
+                                tracing::warn!(
+                                    id = download.id.0,
+                                    "provider does not support restart restore for this download"
+                                );
+                                continue;
+                            }
                             tracing::info!(id = download.id.0, "restoring paused download from database");
                             self.paused.insert(download.id, PausedTask {
                                 spec: download.spec,
@@ -316,6 +330,14 @@ impl EngineActor {
     /// read the provider-specific resume state it left in the pause sink.
     /// If the download is in the queue (not yet started), move it to paused directly.
     async fn handle_pause(&mut self, id: DownloadId) {
+        let Some(spec) = self.pause_target_spec(id) else {
+            return;
+        };
+        if !provider::supports_control_action(spec, DownloadControlAction::Pause) {
+            self.notify_unsupported_control(id, DownloadControlAction::Pause);
+            return;
+        }
+
         if let Some(entry) = self.tasks.remove(&id) {
             tracing::info!(id = id.0, "pausing download");
             entry.pause_token.cancel();
@@ -364,6 +386,14 @@ impl EngineActor {
     }
 
     fn handle_resume(&mut self, id: DownloadId) {
+        let Some(spec) = self.resume_target_spec(id) else {
+            return;
+        };
+        if !provider::supports_control_action(spec, DownloadControlAction::Resume) {
+            self.notify_unsupported_control(id, DownloadControlAction::Resume);
+            return;
+        }
+
         if let Some(pt) = self.paused.remove(&id) {
             tracing::info!(id = id.0, "resuming download");
             let _ = self.db_tx.send(DbEvent::Resumed { id });
@@ -394,6 +424,14 @@ impl EngineActor {
     }
 
     fn handle_cancel(&mut self, id: DownloadId) {
+        let Some(spec) = self.cancel_target_spec(id) else {
+            return;
+        };
+        if !provider::supports_control_action(spec, DownloadControlAction::Cancel) {
+            self.notify_unsupported_control(id, DownloadControlAction::Cancel);
+            return;
+        }
+
         if let Some(entry) = self.tasks.remove(&id) {
             tracing::info!(id = id.0, "download cancelled");
             // abort() prevents done_tx from firing, so we advance the queue manually.
@@ -515,6 +553,38 @@ impl EngineActor {
             total_bytes,
             speed_bytes_per_sec: 0,
         })
+    }
+
+    fn notify_unsupported_control(&self, id: DownloadId, action: DownloadControlAction) {
+        let _ = self
+            .notification_tx
+            .send(EngineNotification::ControlUnsupported { id, action });
+    }
+
+    fn pause_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
+        self.tasks.get(&id).map(|entry| &entry.spec).or_else(|| {
+            self.queue
+                .iter()
+                .find(|task| task.id == id)
+                .map(|task| &task.spec)
+        })
+    }
+
+    fn resume_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
+        self.paused.get(&id).map(|task| &task.spec)
+    }
+
+    fn cancel_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
+        self.tasks
+            .get(&id)
+            .map(|entry| &entry.spec)
+            .or_else(|| self.paused.get(&id).map(|task| &task.spec))
+            .or_else(|| {
+                self.queue
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map(|task| &task.spec)
+            })
     }
 }
 
