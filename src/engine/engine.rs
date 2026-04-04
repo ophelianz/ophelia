@@ -6,7 +6,7 @@
 //! Queue lifecycle:
 //!   Add    → if tasks < max_concurrent, spawn immediately; else push to queue.
 //!   Done   → done_rx fires when a task returns naturally (finish or error);
-//!            remove from tasks, advance queue.
+//!            remove from tasks, persist terminal state, advance queue.
 //!   Pause  → cancel the task's CancellationToken, await the handle, read chunk
 //!            offsets from the pause_sink, store in `paused` map. If the id is
 //!            in the queue (not yet started), move it directly to `paused`.
@@ -15,7 +15,6 @@
 //!            then advance queue manually since done_rx won't fire.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
@@ -23,19 +22,47 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::engine::http::{TaskFinalState, TokenBucket, download_task};
+use crate::engine::{
+    ChunkSnapshot, DbEvent, DownloadId, DownloadSource, DownloadSpec, DownloadStatus, ProgressUpdate,
+    RestoredDownload,
+};
+use crate::settings::Settings;
+
 fn host_from_url(url: &str) -> String {
-    let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
-    let after_auth = after_scheme.splitn(2, '@').last().unwrap_or(after_scheme);
-    after_auth
-        .splitn(2, '/')
-        .next()
-        .unwrap_or(after_auth)
-        .to_lowercase()
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let after_auth = after_scheme.rsplit('@').next().unwrap_or(after_scheme);
+    after_auth.split('/').next().unwrap_or(after_auth).to_lowercase()
 }
 
-use crate::engine::http::{HttpDownloadConfig, TokenBucket, download_task};
-use crate::engine::types::*;
-use crate::settings::Settings;
+#[allow(dead_code)]
+enum EngineCommand {
+    Add {
+        id: DownloadId,
+        spec: DownloadSpec,
+    },
+    Pause {
+        id: DownloadId,
+    },
+    Resume {
+        id: DownloadId,
+    },
+    Cancel {
+        id: DownloadId,
+    },
+    Restore {
+        download: RestoredDownload,
+    },
+    UpdateSettings {
+        settings: Settings,
+    },
+    Shutdown,
+}
+
+struct TaskDone {
+    id: DownloadId,
+    final_state: TaskFinalState,
+}
 
 // --- per-task bookkeeping ------------------------------------------------
 
@@ -47,16 +74,12 @@ struct TaskEntry {
     /// Written by the task on pause; read by the engine after awaiting the handle.
     pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
     /// Kept for re-spawning on resume.
-    url: String,
-    destination: PathBuf,
-    config: HttpDownloadConfig,
+    spec: DownloadSpec,
 }
 
 /// State stored when a download is paused, used to re-spawn on resume.
 struct PausedTask {
-    url: String,
-    destination: PathBuf,
-    config: HttpDownloadConfig,
+    spec: DownloadSpec,
     snapshots: Vec<ChunkSnapshot>,
 }
 
@@ -64,9 +87,7 @@ struct PausedTask {
 /// resumed a paused download that couldn't start immediately.
 struct QueuedTask {
     id: DownloadId,
-    url: String,
-    destination: PathBuf,
-    config: HttpDownloadConfig,
+    spec: DownloadSpec,
     resume_from: Option<Vec<ChunkSnapshot>>,
 }
 
@@ -91,7 +112,7 @@ impl DownloadEngine {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
-        let (done_tx, done_rx) = mpsc::unbounded_channel::<DownloadId>();
+        let (done_tx, done_rx) = mpsc::unbounded_channel::<TaskDone>();
 
         runtime.spawn(EngineActor::new(progress_tx, settings, db_tx, done_tx).run(cmd_rx, done_rx));
         runtime.spawn(crate::ipc::serve(ipc_tx));
@@ -107,21 +128,8 @@ impl DownloadEngine {
 
     /// Pre-populate the paused map with a download restored from SQLite.
     /// Does not start a task, user must resume explicitly.
-    pub fn restore(
-        &self,
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-        chunks: Vec<ChunkSnapshot>,
-    ) {
-        let _ = self.cmd_tx.send(EngineCommand::Restore {
-            id,
-            url,
-            destination,
-            config,
-            chunks,
-        });
+    pub fn restore(&self, download: RestoredDownload) {
+        let _ = self.cmd_tx.send(EngineCommand::Restore { download });
     }
 
     /// Non-blocking drain of one pending IPC download request from the browser extension.
@@ -129,20 +137,10 @@ impl DownloadEngine {
         self.ipc_rx.try_recv().ok()
     }
 
-    pub fn add(
-        &mut self,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-    ) -> DownloadId {
+    pub fn add(&mut self, spec: DownloadSpec) -> DownloadId {
         let id = DownloadId(self.next_id);
         self.next_id += 1;
-        let _ = self.cmd_tx.send(EngineCommand::AddHttp {
-            id,
-            url,
-            destination,
-            config,
-        });
+        let _ = self.cmd_tx.send(EngineCommand::Add { id, spec });
         id
     }
 
@@ -158,6 +156,10 @@ impl DownloadEngine {
         let _ = self.cmd_tx.send(EngineCommand::Cancel { id });
     }
 
+    pub fn update_settings(&self, settings: Settings) {
+        let _ = self.cmd_tx.send(EngineCommand::UpdateSettings { settings });
+    }
+
     pub fn poll_progress(&mut self) -> Option<ProgressUpdate> {
         self.progress_rx.try_recv().ok()
     }
@@ -167,13 +169,13 @@ impl DownloadEngine {
 
 /// Owns all mutable engine state and handles commands on the tokio runtime.
 /// New state (speed limits, scheduler) goes here as fields.
-/// New protocols get a handle_* method; the dispatch loop never changes shape.
+/// New providers add new spec variants and spawn paths; the dispatch loop stays flat.
 struct EngineActor {
     tasks: HashMap<DownloadId, TaskEntry>,
     paused: HashMap<DownloadId, PausedTask>,
     queue: VecDeque<QueuedTask>,
     max_concurrent: usize,
-    done_tx: mpsc::UnboundedSender<DownloadId>,
+    done_tx: mpsc::UnboundedSender<TaskDone>,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     settings: Settings,
     /// One semaphore per hostname; permits = settings.max_connections_per_server.
@@ -189,7 +191,7 @@ impl EngineActor {
         progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
         settings: Settings,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
-        done_tx: mpsc::UnboundedSender<DownloadId>,
+        done_tx: mpsc::UnboundedSender<TaskDone>,
     ) -> Self {
         let max_concurrent = settings.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(settings.global_speed_limit_bps));
@@ -219,7 +221,7 @@ impl EngineActor {
     async fn run(
         mut self,
         mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
-        mut done_rx: mpsc::UnboundedReceiver<DownloadId>,
+        mut done_rx: mpsc::UnboundedReceiver<TaskDone>,
     ) {
         loop {
             tokio::select! {
@@ -227,17 +229,23 @@ impl EngineActor {
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
                     match cmd {
-                        EngineCommand::AddHttp { id, url, destination, config } =>
-                            self.handle_add_http(id, url, destination, config),
+                        EngineCommand::Add { id, spec } =>
+                            self.handle_add(id, spec),
                         EngineCommand::Pause { id } =>
                             self.handle_pause(id).await,
                         EngineCommand::Resume { id } =>
                             self.handle_resume(id),
                         EngineCommand::Cancel { id } =>
                             self.handle_cancel(id),
-                        EngineCommand::Restore { id, url, destination, config, chunks } => {
-                            tracing::info!(id = id.0, "restoring paused download from database");
-                            self.paused.insert(id, PausedTask { url, destination, config, snapshots: chunks });
+                        EngineCommand::Restore { download } => {
+                            tracing::info!(id = download.id.0, "restoring paused download from database");
+                            self.paused.insert(download.id, PausedTask {
+                                spec: download.spec,
+                                snapshots: download.chunks,
+                            });
+                        }
+                        EngineCommand::UpdateSettings { settings } => {
+                            self.handle_update_settings(settings);
                         }
                         EngineCommand::Shutdown => {
                             self.handle_shutdown();
@@ -245,14 +253,8 @@ impl EngineActor {
                         }
                     }
                 }
-                Some(id) = done_rx.recv() => {
-                    self.tasks.remove(&id);
-                    // A paused task also fires done_rx (task returned normally after
-                    // soft-cancel). In that case the id is already in self.paused and
-                    // the slot isn't freed so don't advance the queue.
-                    if !self.paused.contains_key(&id) {
-                        self.try_start_next();
-                    }
+                Some(done) = done_rx.recv() => {
+                    self.handle_task_done(done);
                 }
             }
         }
@@ -261,41 +263,43 @@ impl EngineActor {
     fn spawn_task(
         &mut self,
         id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
+        spec: DownloadSpec,
         resume_from: Option<Vec<ChunkSnapshot>>,
     ) {
         let pause_token = CancellationToken::new();
         let pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>> = Arc::new(Mutex::new(None));
         let tx = self.progress_tx.clone();
-        let server_semaphore = self.server_semaphore(&url);
         let done_tx = self.done_tx.clone();
 
-        let handle = tokio::spawn({
-            let url_ = url.clone();
-            let dest_ = destination.clone();
-            let cfg_ = config.clone();
-            let pt_ = pause_token.clone();
-            let ps_ = Arc::clone(&pause_sink);
-            let gt_ = Arc::clone(&self.global_throttle);
-            async move {
-                download_task(
-                    id,
-                    url_,
-                    dest_,
-                    cfg_,
-                    tx,
-                    pt_,
-                    ps_,
-                    resume_from,
-                    server_semaphore,
-                    gt_,
-                )
-                .await;
-                let _ = done_tx.send(id);
+        let handle = match &spec.source {
+            DownloadSource::Http { url, config } => {
+                let server_semaphore = self.server_semaphore(url);
+                tokio::spawn({
+                    let url_ = url.clone();
+                    let dest_ = spec.destination.clone();
+                    let cfg_ = config.clone();
+                    let pt_ = pause_token.clone();
+                    let ps_ = Arc::clone(&pause_sink);
+                    let gt_ = Arc::clone(&self.global_throttle);
+                    async move {
+                        let final_state = download_task(
+                            id,
+                            url_,
+                            dest_,
+                            cfg_,
+                            tx,
+                            pt_,
+                            ps_,
+                            resume_from,
+                            server_semaphore,
+                            gt_,
+                        )
+                        .await;
+                        let _ = done_tx.send(TaskDone { id, final_state });
+                    }
+                })
             }
-        });
+        };
 
         self.tasks.insert(
             id,
@@ -303,9 +307,7 @@ impl EngineActor {
                 handle,
                 pause_token,
                 pause_sink,
-                url,
-                destination,
-                config,
+                spec,
             },
         );
     }
@@ -321,43 +323,26 @@ impl EngineActor {
                 queued_remaining = self.queue.len(),
                 "starting queued download"
             );
-            let _ = self.db_tx.send(DbEvent::Started {
-                id: next.id,
-                url: next.url.clone(),
-                destination: next.destination.clone(),
-            });
-            self.spawn_task(
-                next.id,
-                next.url,
-                next.destination,
-                next.config,
-                next.resume_from,
-            );
+            let _ = self.db_tx.send(self.started_event(next.id, &next.spec));
+            self.spawn_task(next.id, next.spec, next.resume_from);
         }
     }
 
-    fn handle_add_http(
-        &mut self,
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-    ) {
+    fn handle_add(&mut self, id: DownloadId, spec: DownloadSpec) {
         if self.tasks.len() < self.max_concurrent {
-            tracing::info!(id = id.0, %url, "download starting");
-            let _ = self.db_tx.send(DbEvent::Started {
-                id,
-                url: url.clone(),
-                destination: destination.clone(),
-            });
-            self.spawn_task(id, url, destination, config, None);
+            tracing::info!(id = id.0, url = spec.url(), "download starting");
+            let _ = self.db_tx.send(self.started_event(id, &spec));
+            self.spawn_task(id, spec, None);
         } else {
-            tracing::info!(id = id.0, %url, queued = self.queue.len() + 1, "download queued (at capacity)");
+            tracing::info!(
+                id = id.0,
+                url = spec.url(),
+                queued = self.queue.len() + 1,
+                "download queued (at capacity)"
+            );
             self.queue.push_back(QueuedTask {
                 id,
-                url,
-                destination,
-                config,
+                spec,
                 resume_from: None,
             });
         }
@@ -384,9 +369,7 @@ impl EngineActor {
                 self.paused.insert(
                     id,
                     PausedTask {
-                        url: entry.url,
-                        destination: entry.destination,
-                        config: entry.config,
+                        spec: entry.spec,
                         snapshots: snaps,
                     },
                 );
@@ -403,9 +386,7 @@ impl EngineActor {
             self.paused.insert(
                 id,
                 PausedTask {
-                    url: task.url,
-                    destination: task.destination,
-                    config: task.config,
+                    spec: task.spec,
                     snapshots: Vec::new(),
                 },
             );
@@ -417,14 +398,12 @@ impl EngineActor {
             tracing::info!(id = id.0, "resuming download");
             let _ = self.db_tx.send(DbEvent::Resumed { id });
             if self.tasks.len() < self.max_concurrent {
-                self.spawn_task(id, pt.url, pt.destination, pt.config, Some(pt.snapshots));
+                self.spawn_task(id, pt.spec, Some(pt.snapshots));
             } else {
                 // At capacity -> put at front of queue so it's next to start.
                 self.queue.push_front(QueuedTask {
                     id,
-                    url: pt.url,
-                    destination: pt.destination,
-                    config: pt.config,
+                    spec: pt.spec,
                     resume_from: Some(pt.snapshots),
                 });
             }
@@ -456,5 +435,77 @@ impl EngineActor {
         }
         self.paused.clear();
         self.queue.clear();
+    }
+
+    fn handle_task_done(&mut self, done: TaskDone) {
+        let removed_active = self.tasks.remove(&done.id).is_some();
+        if !removed_active && !self.paused.contains_key(&done.id) {
+            return;
+        }
+
+        match done.final_state.status {
+            DownloadStatus::Finished => {
+                let _ = self.db_tx.send(DbEvent::Finished {
+                    id: done.id,
+                    total_bytes: done
+                        .final_state
+                        .total_bytes
+                        .unwrap_or(done.final_state.downloaded_bytes),
+                });
+                self.try_start_next();
+            }
+            DownloadStatus::Error => {
+                let _ = self.db_tx.send(DbEvent::Error { id: done.id });
+                self.try_start_next();
+            }
+            DownloadStatus::Paused => {
+                if !self.paused.contains_key(&done.id) {
+                    self.try_start_next();
+                }
+            }
+            DownloadStatus::Pending | DownloadStatus::Downloading => {
+                self.try_start_next();
+            }
+        }
+    }
+
+    fn handle_update_settings(&mut self, settings: Settings) {
+        let old_max_concurrent = self.max_concurrent;
+        let old_per_server = self.settings.max_connections_per_server;
+
+        self.max_concurrent = settings.max_concurrent_downloads;
+        self.global_throttle.set_limit(settings.global_speed_limit_bps);
+        self.adjust_server_semaphores(old_per_server, settings.max_connections_per_server);
+        self.settings = settings;
+
+        if self.max_concurrent > old_max_concurrent {
+            self.try_start_next();
+        }
+    }
+
+    fn adjust_server_semaphores(&mut self, old_limit: usize, new_limit: usize) {
+        if old_limit == new_limit {
+            return;
+        }
+
+        for semaphore in self.server_semaphores.values() {
+            let available = semaphore.available_permits();
+            let in_use = old_limit.saturating_sub(available);
+            let desired_available = new_limit.saturating_sub(in_use);
+
+            if desired_available > available {
+                semaphore.add_permits(desired_available - available);
+            } else if desired_available < available {
+                let _ = semaphore.forget_permits(available - desired_available);
+            }
+        }
+    }
+
+    fn started_event(&self, id: DownloadId, spec: &DownloadSpec) -> DbEvent {
+        DbEvent::Started {
+            id,
+            url: spec.url().to_string(),
+            destination: spec.destination().to_path_buf(),
+        }
     }
 }

@@ -1,9 +1,10 @@
-//! Protocol-agnostic types shared across the entire engine.
-//! Nothing in this file should be specific to HTTP, FTP, or any other protocol.
+//! Shared engine-facing types.
+//!
+//! Most types in this module are protocol-neutral. A few persistence-oriented
+//! types still reflect the current byte-range HTTP resume model and can be
+//! lifted into a more provider-specific boundary later.
 
 use std::path::PathBuf;
-
-use crate::engine::http::HttpDownloadConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DownloadId(pub u64);
@@ -15,34 +16,6 @@ pub enum DownloadStatus {
     Paused,
     Finished,
     Error,
-}
-
-#[allow(dead_code)]
-pub enum EngineCommand {
-    AddHttp {
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-    },
-    Pause {
-        id: DownloadId,
-    },
-    Resume {
-        id: DownloadId,
-    },
-    Cancel {
-        id: DownloadId,
-    },
-    /// Pre-populate the paused map on startup without starting a task.
-    Restore {
-        id: DownloadId,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-        chunks: Vec<ChunkSnapshot>,
-    },
-    Shutdown,
 }
 
 /// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.

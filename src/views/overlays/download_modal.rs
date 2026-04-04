@@ -213,12 +213,7 @@ impl DownloadModalLayer {
                 let url = event.url.clone();
                 let destination = event.destination.clone();
                 this.downloads.update(cx, |downloads, cx| {
-                    downloads.add(
-                        url,
-                        destination,
-                        crate::engine::http::HttpDownloadConfig::default(),
-                        cx,
-                    );
+                    downloads.add(url, destination, cx);
                 });
                 this.close(cx);
             },

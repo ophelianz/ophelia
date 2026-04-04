@@ -33,6 +33,21 @@ use super::single::single_download;
 use super::steal::{try_hedge, try_steal};
 use super::worker::download_chunk;
 
+#[derive(Debug, Clone, Copy)]
+pub struct TaskFinalState {
+    pub status: DownloadStatus,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+fn task_state(status: DownloadStatus, downloaded_bytes: u64, total_bytes: Option<u64>) -> TaskFinalState {
+    TaskFinalState {
+        status,
+        downloaded_bytes,
+        total_bytes,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -41,8 +56,16 @@ use super::worker::download_chunk;
 ///
 /// Takes `destination` by value; may update its filename component if the server
 /// sends a `Content-Disposition` header with a better name. Returns
-/// `(total_bytes, chunks, file, part_path, effective_destination)`, or `None` on
-/// unrecoverable error (already reported via `send`).
+/// `(total_bytes, chunks, file, part_path, effective_destination)`, or a final
+/// task state when the download exits early.
+struct ResolvedChunks {
+    total_bytes: u64,
+    chunks: chunk::ChunkList,
+    file: std::fs::File,
+    part_path: PathBuf,
+    destination: PathBuf,
+}
+
 async fn resolve_chunks(
     resume_from: Option<Vec<ChunkSnapshot>>,
     probe_client: &reqwest::Client,
@@ -53,7 +76,7 @@ async fn resolve_chunks(
     id: DownloadId,
     progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
     throttle: Arc<Throttle>,
-) -> Option<(u64, chunk::ChunkList, std::fs::File, PathBuf, PathBuf)> {
+) -> Result<ResolvedChunks, TaskFinalState> {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
         let _ = progress_tx.send(ProgressUpdate {
             id,
@@ -87,7 +110,7 @@ async fn resolve_chunks(
                 Ok(f) => f,
                 Err(_) => {
                     send(DownloadStatus::Error, 0, Some(total));
-                    return None;
+                    return Err(task_state(DownloadStatus::Error, 0, Some(total)));
                 }
             };
             tracing::info!(
@@ -95,14 +118,20 @@ async fn resolve_chunks(
                 chunks = cl.len(),
                 "resuming chunked download"
             );
-            Some((total, cl, file, part_path, destination))
+            Ok(ResolvedChunks {
+                total_bytes: total,
+                chunks: cl,
+                file,
+                part_path,
+                destination,
+            })
         }
         None => {
             let probe_result = match probe(probe_client, url).await {
                 Ok(p) => p,
                 Err(_) => {
                     send(DownloadStatus::Error, 0, None);
-                    return None;
+                    return Err(task_state(DownloadStatus::Error, 0, None));
                 }
             };
             tracing::debug!(
@@ -127,7 +156,7 @@ async fn resolve_chunks(
                 Some(len) => len,
                 None => {
                     tracing::info!("no content-length, falling back to single stream");
-                    single_download(
+                    return Err(single_download(
                         id,
                         Arc::clone(chunk_client),
                         url.to_owned(),
@@ -137,8 +166,7 @@ async fn resolve_chunks(
                         progress_tx.clone(),
                         throttle,
                     )
-                    .await;
-                    return None;
+                    .await);
                 }
             };
 
@@ -151,17 +179,17 @@ async fn resolve_chunks(
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     tracing::warn!("part file already exists, another download may be active");
                     send(DownloadStatus::Error, 0, Some(total_bytes));
-                    return None;
+                    return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
                 Err(_) => {
                     send(DownloadStatus::Error, 0, Some(total_bytes));
-                    return None;
+                    return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
             };
 
             if preallocate(&file, total_bytes).is_err() {
                 send(DownloadStatus::Error, 0, Some(total_bytes));
-                return None;
+                return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
             }
 
             let num_chunks = if probe_result.accepts_ranges {
@@ -174,7 +202,13 @@ async fn resolve_chunks(
 
             tracing::info!(total_bytes, num_chunks, "starting chunked download");
             let chunks = chunk::split(total_bytes, num_chunks);
-            Some((total_bytes, chunks, file, part_path, destination))
+            Ok(ResolvedChunks {
+                total_bytes,
+                chunks,
+                file,
+                part_path,
+                destination,
+            })
         }
     }
 }
@@ -263,7 +297,7 @@ fn finalize_download(
     total_bytes: u64,
     pause_sink: &Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
     send: &dyn Fn(DownloadStatus, u64, Option<u64>, u64),
-) {
+) -> TaskFinalState {
     let populated = slots.next_slot.load(Ordering::Relaxed);
 
     if paused {
@@ -286,15 +320,18 @@ fn finalize_download(
             Some(total_bytes),
             0,
         );
+        task_state(DownloadStatus::Paused, total_downloaded, Some(total_bytes))
     } else if all_ok {
         match std::fs::rename(part_path, destination) {
             Ok(()) => {
                 tracing::info!(total_bytes, "download finished");
                 send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
+                task_state(DownloadStatus::Finished, total_bytes, Some(total_bytes))
             }
             Err(e) => {
                 tracing::error!(err = %e, "rename failed after download");
                 send(DownloadStatus::Error, total_bytes, Some(total_bytes), 0);
+                task_state(DownloadStatus::Error, total_bytes, Some(total_bytes))
             }
         }
     } else {
@@ -309,6 +346,7 @@ fn finalize_download(
             Some(total_bytes),
             0,
         );
+        task_state(DownloadStatus::Error, total_downloaded, Some(total_bytes))
     }
 }
 
@@ -438,7 +476,7 @@ pub async fn download_task(
     resume_from: Option<Vec<ChunkSnapshot>>,
     server_semaphore: Arc<Semaphore>,
     global_throttle: Arc<TokenBucket>,
-) {
+) -> TaskFinalState {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
         let _ = progress_tx.send(ProgressUpdate {
             id,
@@ -472,7 +510,7 @@ pub async fn download_task(
     // resolve_chunks constructs part_path internally and may update `destination`
     // if the server sends a Content-Disposition filename. Both resolved paths are
     // returned so the rest of the function uses the correct final name.
-    let (total_bytes, chunks, file, part_path, destination) = match resolve_chunks(
+    let resolved = match resolve_chunks(
         resume_from,
         &probe_client,
         &chunk_client,
@@ -485,9 +523,16 @@ pub async fn download_task(
     )
     .await
     {
-        Some(v) => v,
-        None => return,
+        Ok(v) => v,
+        Err(final_state) => return final_state,
     };
+    let ResolvedChunks {
+        total_bytes,
+        chunks,
+        file,
+        part_path,
+        destination,
+    } = resolved;
 
     let file = Arc::new(file);
 
@@ -697,5 +742,5 @@ pub async fn download_task(
         total_bytes,
         &pause_sink,
         &send,
-    );
+    )
 }

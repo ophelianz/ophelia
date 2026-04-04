@@ -20,8 +20,8 @@ use gpui::{Context, SharedString};
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::state::{self, Db, HistoryReader};
 use crate::engine::{
-    DbEvent, DownloadEngine, DownloadId, DownloadStatus, HistoryFilter, HistoryRow, ProgressUpdate,
-    SavedDownload,
+    DbEvent, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, HistoryFilter, HistoryRow,
+    ProgressUpdate, RestoredDownload, SavedDownload,
 };
 use crate::settings::Settings;
 
@@ -30,7 +30,6 @@ use crate::settings::Settings;
 pub struct Downloads {
     engine: DownloadEngine,
     pub settings: Settings,
-    db_tx: std::sync::mpsc::Sender<DbEvent>,
 
     pub ids: Vec<DownloadId>,
     pub filenames: Vec<SharedString>,
@@ -67,13 +66,12 @@ impl Downloads {
         let (db_tx, db_rx) = std::sync::mpsc::channel::<DbEvent>();
         state::spawn_worker(db, db_rx);
 
-        let engine = DownloadEngine::new(settings.clone(), db_tx.clone(), max_id + 1);
+        let engine = DownloadEngine::new(settings.clone(), db_tx, max_id + 1);
         let history_reader = HistoryReader::open().expect("failed to open history reader");
 
         let mut model = Self {
             engine,
             settings,
-            db_tx,
             ids: Vec::new(),
             filenames: Vec::new(),
             destinations: Vec::new(),
@@ -89,13 +87,13 @@ impl Downloads {
         };
 
         for saved_dl in &saved {
-            model.engine.restore(
+            model.engine.restore(RestoredDownload::http(
                 saved_dl.id,
                 saved_dl.url.clone(),
                 saved_dl.destination.clone(),
-                HttpDownloadConfig::default(),
+                model.http_download_config(),
                 saved_dl.chunks.clone(),
-            );
+            ));
             model.push_saved(saved_dl);
         }
 
@@ -121,7 +119,7 @@ impl Downloads {
                                         .unwrap_or("download")
                                         .to_string()
                                 });
-                            model.add(req.url, dir.join(name), HttpDownloadConfig::default(), cx);
+                            model.add(req.url, dir.join(name), cx);
                         }
                         model.tick_speed();
                     })
@@ -135,13 +133,7 @@ impl Downloads {
         model
     }
 
-    pub fn add(
-        &mut self,
-        url: String,
-        destination: PathBuf,
-        config: HttpDownloadConfig,
-        cx: &mut Context<Self>,
-    ) -> DownloadId {
+    pub fn add(&mut self, url: String, destination: PathBuf, cx: &mut Context<Self>) -> DownloadId {
         let filename: SharedString = destination
             .file_name()
             .and_then(|n| n.to_str())
@@ -150,7 +142,8 @@ impl Downloads {
             .into();
         let dest_str: SharedString = destination.to_string_lossy().to_string().into();
 
-        let id = self.engine.add(url, destination, config);
+        let spec = DownloadSpec::http(url, destination, self.http_download_config());
+        let id = self.engine.add(spec);
         self.ids.push(id);
         self.filenames.push(filename);
         self.destinations.push(dest_str);
@@ -168,6 +161,12 @@ impl Downloads {
             self.statuses[idx] = DownloadStatus::Paused;
             cx.notify();
         }
+    }
+
+    pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        self.engine.update_settings(settings.clone());
+        self.settings = settings;
+        cx.notify();
     }
 
     pub fn resume(&mut self, id: DownloadId, cx: &mut Context<Self>) {
@@ -286,23 +285,13 @@ impl Downloads {
             self.total_bytes[idx] = update.total_bytes;
             self.speeds[idx] = update.speed_bytes_per_sec;
 
-            // Emit Finished/Error to DB and show notification on first terminal transition.
+            // Show notification on first terminal transition.
             let is_terminal = matches!(
                 update.status,
                 DownloadStatus::Finished | DownloadStatus::Error
             );
             let was_terminal = matches!(prev, DownloadStatus::Finished | DownloadStatus::Error);
             if is_terminal && !was_terminal {
-                let event = if update.status == DownloadStatus::Finished {
-                    DbEvent::Finished {
-                        id: update.id,
-                        total_bytes: update.total_bytes.unwrap_or(update.downloaded_bytes),
-                    }
-                } else {
-                    DbEvent::Error { id: update.id }
-                };
-                let _ = self.db_tx.send(event);
-
                 let filename = self.filenames[idx].clone();
                 let kind = if update.status == DownloadStatus::Finished {
                     crate::views::overlays::notification::NotificationKind::Success
@@ -314,6 +303,13 @@ impl Downloads {
             }
 
             cx.notify();
+        }
+    }
+
+    fn http_download_config(&self) -> HttpDownloadConfig {
+        HttpDownloadConfig {
+            max_connections: self.settings.max_connections_per_download,
+            ..HttpDownloadConfig::default()
         }
     }
 }
