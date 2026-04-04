@@ -1,5 +1,6 @@
 use crate::ui::prelude::*;
 use gpui::{App, Background, Hsla, PathBuilder, Window, canvas, div, point, prelude::*, px, rgba};
+use rust_i18n::t;
 
 #[derive(IntoElement)]
 pub struct StatsBar {
@@ -20,10 +21,10 @@ impl RenderOnce for StatsBar {
         div()
             .flex()
             .flex_col()
-            .gap(px(16.0))
-            .mb(px(24.0))
-            .p(px(24.0))
-            .rounded(px(12.0))
+            .gap(px(Spacing::SECTION_GAP))
+            .mb(px(Spacing::CONTENT_PADDING_Y))
+            .p(px(Chrome::STATS_CARD_PADDING))
+            .rounded(px(Chrome::PANEL_RADIUS))
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
@@ -37,19 +38,19 @@ impl RenderOnce for StatsBar {
                             .text_sm()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(Colors::muted_foreground())
-                            .child("NETWORK THROUGHPUT"),
+                            .child(t!("stats.title").to_string()),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(Colors::muted_foreground())
-                            .child("last 60s"),
+                            .child(t!("stats.window").to_string()),
                     ),
             )
             .child(
                 div()
                     .w_full()
-                    .h(px(120.0))
+                    .h(px(Chrome::STATS_GRAPH_HEIGHT))
                     .child(network_graph(self.download_samples, self.upload_samples)),
             )
             .child(
@@ -66,17 +67,17 @@ impl RenderOnce for StatsBar {
                     ))
                     .child(div().w(px(1.0)).h(px(14.0)).bg(Colors::border()))
                     .child(stat_pill(
-                        "Active",
+                        &t!("stats.active").to_string(),
                         &self.active_count.to_string(),
                         Colors::active().into(),
                     ))
                     .child(stat_pill(
-                        "Finished",
+                        &t!("stats.finished").to_string(),
                         &self.finished_count.to_string(),
                         Colors::finished().into(),
                     ))
                     .child(stat_pill(
-                        "Queued",
+                        &t!("stats.queued").to_string(),
                         &self.queued_count.to_string(),
                         Colors::queued().into(),
                     )),

@@ -66,7 +66,7 @@ impl RenderOnce for WindowHeader {
                         .h_full()
                         .w_full()
                         .items_center()
-                        .gap(px(12.0))
+                        .gap(px(Chrome::HEADER_GAP))
                         .pl(px(chrome.leading_padding))
                         .pr(px(chrome.horizontal_padding))
                         .when_some(self.leading.take(), |this, leading| this.child(leading))
@@ -125,7 +125,7 @@ impl RenderOnce for WindowHeader {
 fn window_controls() -> impl IntoElement {
     h_flex()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(Chrome::MENU_BAR_GAP))
         .child(window_control_button(0, "—", false, |window| {
             window.minimize_window();
         }))
@@ -148,9 +148,9 @@ fn window_control_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(38.0))
-        .h(px(28.0))
-        .rounded(px(6.0))
+        .w(px(Chrome::WINDOW_CONTROL_WIDTH))
+        .h(px(Chrome::WINDOW_CONTROL_HEIGHT))
+        .rounded(px(Chrome::CONTROL_RADIUS))
         .text_sm()
         .text_color(Colors::muted_foreground())
         .cursor_pointer()

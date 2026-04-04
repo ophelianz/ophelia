@@ -72,15 +72,15 @@ impl RenderOnce for AboutModal {
             })
             .child(
                 div()
-                    .w(px(460.0))
-                    .p(px(28.0))
+                    .w(px(Chrome::ABOUT_MODAL_WIDTH))
+                    .p(px(Chrome::MODAL_PADDING))
                     .flex()
                     .flex_col()
-                    .gap(px(18.0))
+                    .gap(px(Chrome::MODAL_STACK_GAP))
                     .child(
                         h_flex()
                             .items_center()
-                            .gap(px(16.0))
+                            .gap(px(Spacing::SECTION_GAP))
                             .child(OpheliaLogo::new(52.0))
                             .child(
                                 v_flex()
@@ -119,7 +119,7 @@ impl RenderOnce for AboutModal {
                                 .id("about-close")
                                 .px(px(18.0))
                                 .py(px(10.0))
-                                .rounded(px(8.0))
+                                .rounded(px(Chrome::BUTTON_RADIUS))
                                 .bg(Colors::active())
                                 .text_sm()
                                 .font_weight(FontWeight::BOLD)

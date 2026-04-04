@@ -7,7 +7,7 @@ use gpui::{
 };
 use gpui::{actions, prelude::FluentBuilder};
 
-use crate::theme::Colors;
+use crate::theme::{Chrome, Colors};
 
 pub type OnExitHandler = dyn Fn(&mut Window, &mut App);
 
@@ -61,7 +61,7 @@ impl RenderOnce for Modal {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let decorations = window.window_decorations();
         let size = window.viewport_size();
-        let rounding = px(12.0);
+        let rounding = px(Chrome::PANEL_RADIUS);
 
         anchored().position(point(px(0.0), px(0.0))).child(deferred(
             div()
@@ -101,7 +101,7 @@ impl RenderOnce for Modal {
                         .border_1()
                         .border_color(Colors::border())
                         .bg(Colors::card())
-                        .rounded(px(14.0))
+                        .rounded(px(Chrome::MODAL_RADIUS))
                         .flex_col()
                         .on_any_mouse_down(|_, _, cx| {
                             cx.stop_propagation();

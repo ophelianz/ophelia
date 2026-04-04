@@ -39,6 +39,7 @@ sidebar:
     history: "History"
     paused: "Paused"
     storage: "Storage"
+    storage_used: "used"
 notifications:
     complete: "Download complete"
     failed: "Download failed"
@@ -49,6 +50,20 @@ history:
     filter_failed: "Failed"
     filter_paused: "Paused"
     empty: "No downloads in history"
+    age:
+        just_now: "just now"
+        minute_ago: "1 minute ago"
+        minutes_ago: "%{count} minutes ago"
+        hour_ago: "1 hour ago"
+        hours_ago: "%{count} hours ago"
+        yesterday: "yesterday"
+        days_ago: "%{count} days ago"
+stats:
+    title: "NETWORK THROUGHPUT"
+    window: "last 60s"
+    active: "Active"
+    finished: "Finished"
+    queued: "Queued"
 settings:
     title: "Settings"
     done: "Done"

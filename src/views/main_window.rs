@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, Window, div, prelude::*, px};
 
 use crate::app::Downloads;
 use crate::app_actions;
@@ -68,11 +68,34 @@ impl MainWindow {
         });
         cx.notify();
     }
+
+    fn view_model(&self, cx: &App) -> MainWindowViewModel {
+        let active_nav = self.sidebar.read(cx).active_item;
+
+        let content = if active_nav == HISTORY_NAV_INDEX {
+            MainContentViewModel::History
+        } else {
+            let downloads = self.downloads.read(cx);
+            let (active, finished, queued) = downloads.status_counts();
+
+            MainContentViewModel::Downloads(StatsBarViewModel {
+                download_samples: downloads.speed_samples_mbs(),
+                upload_samples: Vec::new(),
+                download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
+                upload_speed: 0.0,
+                active_count: active,
+                finished_count: finished,
+                queued_count: queued,
+            })
+        };
+
+        MainWindowViewModel { content }
+    }
 }
 
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_nav = self.sidebar.read(cx).active_item;
+        let view_model = self.view_model(cx);
 
         div()
             .flex()
@@ -99,7 +122,7 @@ impl Render for MainWindow {
                                 .overflow_y_scroll()
                                 .px(px(Spacing::CONTENT_PADDING_X))
                                 .py(px(Spacing::CONTENT_PADDING_Y))
-                                .child(self.render_content(active_nav, cx)),
+                                .child(self.render_content(view_model, cx)),
                         ),
                     ),
             )
@@ -119,26 +142,45 @@ impl MainWindow {
         }
     }
 
-    fn render_content(&self, active_nav: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        if active_nav == HISTORY_NAV_INDEX {
-            return self.history_view.clone().into_any_element();
+    fn render_content(
+        &self,
+        view_model: MainWindowViewModel,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match view_model.content {
+            MainContentViewModel::History => self.history_view.clone().into_any_element(),
+            MainContentViewModel::Downloads(stats) => v_flex()
+                .gap(px(Spacing::CARD_GAP))
+                .child(StatsBar {
+                    download_samples: stats.download_samples,
+                    upload_samples: stats.upload_samples,
+                    download_speed: stats.download_speed,
+                    upload_speed: stats.upload_speed,
+                    active_count: stats.active_count,
+                    finished_count: stats.finished_count,
+                    queued_count: stats.queued_count,
+                })
+                .child(self.download_list.clone())
+                .into_any_element(),
         }
-
-        let downloads = self.downloads.read(cx);
-        let (active, finished, queued) = downloads.status_counts();
-
-        v_flex()
-            .gap(px(Spacing::CARD_GAP))
-            .child(StatsBar {
-                download_samples: downloads.speed_samples_mbs(),
-                upload_samples: Vec::new(),
-                download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
-                upload_speed: 0.0,
-                active_count: active,
-                finished_count: finished,
-                queued_count: queued,
-            })
-            .child(self.download_list.clone())
-            .into_any_element()
     }
+}
+
+struct MainWindowViewModel {
+    content: MainContentViewModel,
+}
+
+enum MainContentViewModel {
+    History,
+    Downloads(StatsBarViewModel),
+}
+
+struct StatsBarViewModel {
+    download_samples: Vec<f32>,
+    upload_samples: Vec<f32>,
+    download_speed: f32,
+    upload_speed: f32,
+    active_count: usize,
+    finished_count: usize,
+    queued_count: usize,
 }

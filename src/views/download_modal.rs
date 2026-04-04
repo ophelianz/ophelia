@@ -257,11 +257,11 @@ impl Render for DownloadModal {
             })
             .child(
                 div()
-                    .w(px(520.0))
-                    .p(px(28.0))
+                    .w(px(Chrome::DOWNLOAD_MODAL_WIDTH))
+                    .p(px(Chrome::MODAL_PADDING))
                     .flex()
                     .flex_col()
-                    .gap(px(20.0))
+                    .gap(px(Chrome::MODAL_STACK_GAP))
                     .child(
                         div()
                             .text_xl()
@@ -273,7 +273,7 @@ impl Render for DownloadModal {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(8.0))
+                            .gap(px(Spacing::LIST_GAP))
                             .child(
                                 div()
                                     .text_sm()
@@ -284,7 +284,7 @@ impl Render for DownloadModal {
                             .child(
                                 div()
                                     .flex()
-                                    .gap(px(8.0))
+                                    .gap(px(Spacing::LIST_GAP))
                                     .child(div().flex_1().child(self.url_input.clone()))
                                     .child(
                                         div()
@@ -293,7 +293,7 @@ impl Render for DownloadModal {
                                             .items_center()
                                             .px(px(12.0))
                                             .py(px(10.0))
-                                            .rounded(px(8.0))
+                                            .rounded(px(Chrome::BUTTON_RADIUS))
                                             .border_1()
                                             .border_color(Colors::border())
                                             .bg(Colors::background())
@@ -312,7 +312,7 @@ impl Render for DownloadModal {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(8.0))
+                            .gap(px(Spacing::LIST_GAP))
                             .child(
                                 div()
                                     .text_sm()
@@ -326,13 +326,13 @@ impl Render for DownloadModal {
                         div()
                             .flex()
                             .justify_end()
-                            .gap(px(10.0))
+                            .gap(px(Spacing::CONTROL_GAP))
                             .child(
                                 div()
                                     .id("cancel-btn")
                                     .px(px(18.0))
                                     .py(px(10.0))
-                                    .rounded(px(8.0))
+                                    .rounded(px(Chrome::BUTTON_RADIUS))
                                     .border_1()
                                     .border_color(Colors::border())
                                     .text_sm()
@@ -349,7 +349,7 @@ impl Render for DownloadModal {
                                     .id("confirm-btn")
                                     .px(px(18.0))
                                     .py(px(10.0))
-                                    .rounded(px(8.0))
+                                    .rounded(px(Chrome::BUTTON_RADIUS))
                                     .bg(if can_confirm {
                                         Colors::active()
                                     } else {

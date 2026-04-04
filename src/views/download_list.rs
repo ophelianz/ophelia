@@ -16,20 +16,19 @@ impl DownloadList {
         cx.observe(&downloads, |_, _, cx| cx.notify()).detach();
         Self { downloads }
     }
-}
 
-impl Render for DownloadList {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn view_model(&self, cx: &App) -> DownloadListViewModel {
         let entity = self.downloads.clone();
-        let d = self.downloads.read(cx);
-        let rows: Vec<DownloadRow> = (0..d.len())
+        let downloads = self.downloads.read(cx);
+
+        let rows = (0..downloads.len())
             .map(|i| {
-                let id = d.ids[i];
-                let progress = match d.total_bytes[i] {
-                    Some(total) if total > 0 => d.downloaded_bytes[i] as f32 / total as f32,
+                let id = downloads.ids[i];
+                let progress = match downloads.total_bytes[i] {
+                    Some(total) if total > 0 => downloads.downloaded_bytes[i] as f32 / total as f32,
                     _ => 0.0,
                 };
-                let state = match d.statuses[i] {
+                let state = match downloads.statuses[i] {
                     DownloadStatus::Downloading => DownloadState::Active,
                     DownloadStatus::Paused => DownloadState::Paused,
                     DownloadStatus::Finished => DownloadState::Finished,
@@ -40,33 +39,33 @@ impl Render for DownloadList {
                 let on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>> =
                     match state {
                         DownloadState::Active | DownloadState::Queued => {
-                            let e = entity.clone();
-                            Some(Box::new(move |_w, cx| {
-                                e.update(cx, |dl, cx| dl.pause(id, cx));
+                            let entity = entity.clone();
+                            Some(Box::new(move |_, cx| {
+                                entity.update(cx, |downloads, cx| downloads.pause(id, cx));
                             }))
                         }
                         DownloadState::Paused => {
-                            let e = entity.clone();
-                            Some(Box::new(move |_w, cx| {
-                                e.update(cx, |dl, cx| dl.resume(id, cx));
+                            let entity = entity.clone();
+                            Some(Box::new(move |_, cx| {
+                                entity.update(cx, |downloads, cx| downloads.resume(id, cx));
                             }))
                         }
-                        _ => None,
+                        DownloadState::Finished | DownloadState::Error => None,
                     };
 
                 let on_remove: Box<dyn Fn(&mut Window, &mut App) + 'static> = {
-                    let e = entity.clone();
-                    Box::new(move |_w, cx| {
-                        e.update(cx, |dl, cx| dl.remove(id, cx));
+                    let entity = entity.clone();
+                    Box::new(move |_, cx| {
+                        entity.update(cx, |downloads, cx| downloads.remove(id, cx));
                     })
                 };
 
                 DownloadRow {
                     id,
-                    filename: d.filenames[i].clone(),
-                    destination: d.destinations[i].clone(),
+                    filename: downloads.filenames[i].clone(),
+                    destination: downloads.destinations[i].clone(),
                     progress,
-                    speed: format_speed(d.speeds[i]).into(),
+                    speed: format_speed(downloads.speeds[i]).into(),
                     state,
                     on_pause_resume,
                     on_remove: Some(on_remove),
@@ -74,17 +73,33 @@ impl Render for DownloadList {
             })
             .collect();
 
+        DownloadListViewModel { rows }
+    }
+}
+
+impl Render for DownloadList {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view_model = self.view_model(cx);
+
         v_flex()
             .child(
                 div()
                     .text_sm()
                     .text_color(Colors::muted_foreground())
                     .font_weight(gpui::FontWeight::EXTRA_BOLD)
-                    .mb(px(14.0))
+                    .mb(px(Spacing::SECTION_LABEL_BOTTOM_MARGIN))
                     .child(t!("downloads.section_label").to_string()),
             )
-            .child(v_flex().gap(px(Spacing::LIST_GAP)).children(rows))
+            .child(
+                v_flex()
+                    .gap(px(Spacing::LIST_GAP))
+                    .children(view_model.rows),
+            )
     }
+}
+
+struct DownloadListViewModel {
+    rows: Vec<DownloadRow>,
 }
 
 fn format_speed(bytes_per_sec: u64) -> String {

@@ -41,7 +41,7 @@ impl Render for AppMenuBar {
         h_flex()
             .id("app-menu-bar")
             .items_center()
-            .gap(px(4.0))
+            .gap(px(Chrome::MENU_BAR_GAP))
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 cx.stop_propagation();
                 window.prevent_default();
@@ -50,9 +50,9 @@ impl Render for AppMenuBar {
                 let is_open = self.open_menu == Some(index);
                 let button = div()
                     .id(("menu-trigger", index))
-                    .rounded(px(6.0))
-                    .px(px(10.0))
-                    .py(px(6.0))
+                    .rounded(px(Chrome::CONTROL_RADIUS))
+                    .px(px(Chrome::MENU_TRIGGER_PADDING_X))
+                    .py(px(Chrome::MENU_TRIGGER_PADDING_Y))
                     .cursor_pointer()
                     .flex()
                     .items_center()
@@ -81,7 +81,7 @@ impl Render for AppMenuBar {
                     Some(
                         anchored()
                             .anchor(Corner::TopLeft)
-                            .offset(point(px(0.0), px(10.0)))
+                            .offset(point(px(0.0), px(Spacing::CONTROL_GAP)))
                             .child(deferred(render_menu_popup(index, menu, cx))),
                     )
                 } else {
@@ -101,16 +101,16 @@ fn render_menu_popup(
     div()
         .id(("menu-popup", index))
         .occlude()
-        .min_w(px(210.0))
-        .p(px(6.0))
-        .rounded(px(10.0))
+        .min_w(px(Chrome::MENU_POPUP_MIN_WIDTH))
+        .p(px(Chrome::MENU_POPUP_PADDING))
+        .rounded(px(Chrome::CARD_RADIUS))
         .border_1()
         .border_color(Colors::border())
         .bg(Colors::card())
         .shadow_lg()
         .flex()
         .flex_col()
-        .gap(px(2.0))
+        .gap(px(Chrome::MENU_POPUP_GAP))
         .on_click(cx.listener(|this, _, _, cx| {
             this.close_menu(cx);
         }))
@@ -139,10 +139,10 @@ fn render_menu_popup(
                             .id(("menu-item", index * 1000 + item_index))
                             .flex()
                             .items_center()
-                            .gap(px(10.0))
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(7.0))
+                            .gap(px(Spacing::CONTROL_GAP))
+                            .px(px(Chrome::MENU_ITEM_PADDING_X))
+                            .py(px(Chrome::MENU_ITEM_PADDING_Y))
+                            .rounded(px(Chrome::BUTTON_RADIUS))
                             .text_sm()
                             .text_color(if disabled {
                                 Colors::muted_foreground()
@@ -163,7 +163,7 @@ fn render_menu_popup(
                             })
                             .child(
                                 div()
-                                    .w(px(12.0))
+                                    .w(px(Chrome::MENU_ITEM_CHECK_WIDTH))
                                     .text_xs()
                                     .text_color(Colors::active())
                                     .child(if checked { "✓" } else { "" }),

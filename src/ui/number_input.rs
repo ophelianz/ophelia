@@ -113,7 +113,7 @@ impl Render for NumberInput {
             .key_context("NumberInput")
             .items_center()
             .overflow_hidden()
-            .rounded(px(8.0))
+            .rounded(px(Chrome::BUTTON_RADIUS))
             .border_1()
             .border_color(if focused {
                 Colors::ring()
@@ -156,8 +156,8 @@ fn sanitize_digits(text: &str) -> String {
 fn step_button(id: &'static str, label: &'static str) -> Stateful<gpui::Div> {
     div()
         .id(id)
-        .w(px(40.0))
-        .h(px(40.0))
+        .w(px(Chrome::SIDEBAR_BUTTON_SIZE))
+        .h(px(Chrome::SIDEBAR_BUTTON_SIZE))
         .flex()
         .items_center()
         .justify_center()
