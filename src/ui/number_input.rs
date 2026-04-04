@@ -1,3 +1,9 @@
+//! Number input adapted from the `NumberInput` component in
+//! [longbridge/gpui-component](https://github.com/longbridge/gpui-component),
+//! which is Apache-2.0 licensed. Ophelia keeps a local copy so it can tailor
+//! behavior and styling without taking a direct dependency on that component
+//! library.
+
 use gpui::{
     App, Context, Entity, IntoElement, KeyBinding, Render, SharedString, Stateful, Window, actions,
     div, prelude::*, px,
