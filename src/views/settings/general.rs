@@ -1,4 +1,5 @@
 use gpui::{Context, PathPromptOptions, div, prelude::*, px};
+use rust_i18n::t;
 
 use crate::ui::prelude::*;
 
@@ -44,8 +45,8 @@ pub(super) fn render(this: &SettingsWindow, cx: &mut Context<SettingsWindow>) ->
         .child(icon_sm(IconName::Folder, Colors::muted_foreground()));
 
     div().flex_col().gap(px(20.0)).child(super::setting_row(
-        "Download Folder",
-        "Where files are saved when no destination is specified",
+        t!("settings.general.download_folder_label").to_string(),
+        t!("settings.general.download_folder_description").to_string(),
         div()
             .flex()
             .items_center()

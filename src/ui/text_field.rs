@@ -75,6 +75,7 @@ pub struct TextField {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     scroll_offset: Pixels,
+    embedded: bool,
     is_selecting: bool,
 }
 
@@ -100,12 +101,27 @@ impl TextField {
             last_layout: None,
             last_bounds: None,
             scroll_offset: px(0.0),
+            embedded: false,
             is_selecting: false,
         }
     }
 
+    pub fn embedded(
+        initial_text: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut input = Self::new(initial_text, placeholder, cx);
+        input.embedded = true;
+        input
+    }
+
     pub fn text(&self) -> &str {
         self.text.as_ref()
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -752,13 +768,15 @@ impl Render for TextField {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(20.0))
             .text_size(px(14.0))
-            .bg(Colors::background())
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(if focused {
-                Colors::ring()
-            } else {
-                Colors::input_border()
+            .when(!self.embedded, |this| {
+                this.bg(Colors::background())
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if focused {
+                        Colors::ring()
+                    } else {
+                        Colors::input_border()
+                    })
             })
             .px(px(12.0))
             .py(px(10.0))
