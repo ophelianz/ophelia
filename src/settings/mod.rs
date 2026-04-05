@@ -12,9 +12,14 @@
 //! Writes are atomic: content goes to `settings.json.tmp` first, then
 //! renamed over the real file so a crash mid-write can't corrupt it.
 
-use std::path::{Path, PathBuf};
+mod destination_presets;
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+pub use destination_presets::default_destination_rules;
+use destination_presets::suggested_destination_rule_icon_name as suggested_icon_name;
 
 pub const DEFAULT_IPC_PORT: u16 = 7373;
 pub const DEFAULT_LANGUAGE: &str = "en";
@@ -38,136 +43,6 @@ pub struct DestinationRule {
     #[serde(default)]
     pub icon_name: Option<String>,
 }
-
-struct DestinationRulePreset {
-    id: &'static str,
-    label: &'static str,
-    folder_name: &'static str,
-    icon_name: &'static str,
-    extensions: &'static [&'static str],
-}
-
-const DEFAULT_DESTINATION_RULE_PRESETS: &[DestinationRulePreset] = &[
-    DestinationRulePreset {
-        id: "archive",
-        label: "Archives",
-        folder_name: "Archives",
-        icon_name: "archive",
-        extensions: &[".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz"],
-    },
-    DestinationRulePreset {
-        id: "audio",
-        label: "Music",
-        folder_name: "Music",
-        icon_name: "audio",
-        extensions: &[".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".opus"],
-    },
-    DestinationRulePreset {
-        id: "book",
-        label: "Books",
-        folder_name: "Books",
-        icon_name: "book",
-        extensions: &[".epub", ".mobi", ".azw3", ".fb2"],
-    },
-    DestinationRulePreset {
-        id: "code",
-        label: "Code",
-        folder_name: "Code",
-        icon_name: "code",
-        extensions: &[
-            ".rs", ".js", ".ts", ".tsx", ".jsx", ".py", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
-            ".json", ".yaml", ".yml", ".toml", ".sh", ".css",
-        ],
-    },
-    DestinationRulePreset {
-        id: "document",
-        label: "Documents",
-        folder_name: "Documents",
-        icon_name: "document",
-        extensions: &[".pdf", ".doc", ".docx", ".txt", ".rtf", ".md"],
-    },
-    DestinationRulePreset {
-        id: "executable",
-        label: "Executables",
-        folder_name: "Executables",
-        icon_name: "executable",
-        extensions: &[
-            ".exe",
-            ".msi",
-            ".dmg",
-            ".pkg",
-            ".appimage",
-            ".deb",
-            ".rpm",
-            ".apk",
-        ],
-    },
-    DestinationRulePreset {
-        id: "font",
-        label: "Fonts",
-        folder_name: "Fonts",
-        icon_name: "font",
-        extensions: &[".ttf", ".otf", ".woff", ".woff2"],
-    },
-    DestinationRulePreset {
-        id: "image",
-        label: "Images",
-        folder_name: "Images",
-        icon_name: "image",
-        extensions: &[
-            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".avif", ".bmp", ".tiff",
-        ],
-    },
-    DestinationRulePreset {
-        id: "key",
-        label: "Keys",
-        folder_name: "Keys",
-        icon_name: "key",
-        extensions: &[".pem", ".pub", ".p12", ".pfx", ".crt", ".cer", ".asc"],
-    },
-    DestinationRulePreset {
-        id: "mail",
-        label: "Mail",
-        folder_name: "Mail",
-        icon_name: "mail",
-        extensions: &[".eml", ".mbox", ".msg"],
-    },
-    DestinationRulePreset {
-        id: "presentation",
-        label: "Presentations",
-        folder_name: "Presentations",
-        icon_name: "presentation",
-        extensions: &[".ppt", ".pptx", ".odp"],
-    },
-    DestinationRulePreset {
-        id: "spreadsheet",
-        label: "Spreadsheets",
-        folder_name: "Spreadsheets",
-        icon_name: "spreadsheet",
-        extensions: &[".csv", ".tsv", ".xls", ".xlsx", ".ods"],
-    },
-    DestinationRulePreset {
-        id: "vector",
-        label: "Vectors",
-        folder_name: "Vectors",
-        icon_name: "vector",
-        extensions: &[".svg", ".ai", ".eps"],
-    },
-    DestinationRulePreset {
-        id: "video",
-        label: "Videos",
-        folder_name: "Videos",
-        icon_name: "video",
-        extensions: &[".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv"],
-    },
-    DestinationRulePreset {
-        id: "web",
-        label: "Web",
-        folder_name: "Web",
-        icon_name: "web",
-        extensions: &[".html", ".htm", ".mhtml", ".webloc", ".url"],
-    },
-];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -268,36 +143,7 @@ pub fn canonical_language(language: &str) -> &'static str {
 }
 
 pub fn suggested_destination_rule_icon_name(label: &str, extensions: &[String]) -> &'static str {
-    for extension in extensions
-        .iter()
-        .filter_map(|ext| normalize_rule_extension(ext))
-    {
-        if let Some(preset) = DEFAULT_DESTINATION_RULE_PRESETS.iter().find(|preset| {
-            preset
-                .extensions
-                .iter()
-                .filter_map(|candidate| normalize_rule_extension(candidate))
-                .any(|candidate| candidate == extension)
-        }) {
-            return preset.icon_name;
-        }
-    }
-
-    let normalized_label = label.trim().to_ascii_lowercase();
-    if normalized_label.is_empty() {
-        return "default";
-    }
-
-    DEFAULT_DESTINATION_RULE_PRESETS
-        .iter()
-        .find(|preset| {
-            normalized_label.contains(&preset.id.to_ascii_lowercase())
-                || normalized_label.contains(&preset.label.to_ascii_lowercase())
-                || normalized_label
-                    .contains(&preset.label.trim_end_matches('s').to_ascii_lowercase())
-        })
-        .map(|preset| preset.icon_name)
-        .unwrap_or("default")
+    suggested_icon_name(label, extensions)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,35 +197,6 @@ fn default_download_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn default_destination_rules(base_dir: &Path) -> Vec<DestinationRule> {
-    DEFAULT_DESTINATION_RULE_PRESETS
-        .iter()
-        .map(|preset| DestinationRule {
-            id: preset.id.to_string(),
-            label: preset.label.to_string(),
-            enabled: true,
-            target_dir: base_dir.join(preset.folder_name),
-            extensions: preset
-                .extensions
-                .iter()
-                .map(|ext| ext.to_string())
-                .collect(),
-            icon_name: Some(preset.icon_name.to_string()),
-        })
-        .collect()
-}
-
-fn normalize_rule_extension(extension: &str) -> Option<String> {
-    let trimmed = extension.trim();
-    if trimmed.is_empty() {
-        None
-    } else if trimmed.starts_with('.') {
-        Some(trimmed.to_ascii_lowercase())
-    } else {
-        Some(format!(".{}", trimmed.to_ascii_lowercase()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +210,12 @@ mod tests {
                 .destination_rules
                 .iter()
                 .any(|rule| rule.icon_name.as_deref() == Some("video"))
+        );
+        assert!(
+            !Settings::default()
+                .destination_rules
+                .iter()
+                .any(|rule| rule.id == "code")
         );
         assert!(!Settings::default().destination_rules.is_empty());
     }

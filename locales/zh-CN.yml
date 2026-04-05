@@ -15,3 +15,4 @@ settings:
     destinations:
         section: "目标位置"
         destination_rules_title: "目标位置"
+        destination_rules_restore_defaults: "恢复默认"

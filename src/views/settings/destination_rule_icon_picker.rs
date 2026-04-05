@@ -2,7 +2,6 @@ use gpui::{
     Context, Corner, IntoElement, ParentElement, Styled, anchored, deferred, div, point,
     prelude::*, px,
 };
-use rust_i18n::t;
 
 use crate::settings::suggested_destination_rule_icon_name;
 use crate::ui::prelude::*;
@@ -68,12 +67,12 @@ fn render_popup(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     let selected_icon_name = rule.icon_name.as_deref();
-    let auto_icon_name = auto_rule_icon_name(rule, cx).to_string();
+    let auto_preview_icon_name = auto_rule_icon_name(rule, cx).to_string();
 
     div()
         .id(format!("destination-rule-icon-popup-{index}"))
         .occlude()
-        .w(px(280.0))
+        .w(px(252.0))
         .p(px(12.0))
         .rounded(px(12.0))
         .border_1()
@@ -86,26 +85,23 @@ fn render_popup(
         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
             this.close_destination_rule_icon_picker(cx);
         }))
-        .child(option(
-            index,
-            None,
-            &auto_icon_name,
-            t!("settings.destinations.destination_rule_icon_auto").to_string(),
-            selected_icon_name.is_none(),
-            cx,
-        ))
-        .child(div().h(px(1.0)).bg(Colors::border()))
         .child(
             div()
                 .flex()
                 .flex_wrap()
                 .gap(px(8.0))
+                .child(icon_option(
+                    index,
+                    None,
+                    &auto_preview_icon_name,
+                    selected_icon_name.is_none(),
+                    cx,
+                ))
                 .children(FILE_TYPE_ICON_NAMES.iter().map(|icon_name| {
-                    option(
+                    icon_option(
                         index,
                         Some((*icon_name).to_string()),
                         icon_name,
-                        file_type_icon_label(icon_name),
                         selected_icon_name == Some(*icon_name),
                         cx,
                     )
@@ -114,11 +110,10 @@ fn render_popup(
         )
 }
 
-fn option(
+fn icon_option(
     index: usize,
     icon_override: Option<String>,
     icon_name: &str,
-    label: String,
     selected: bool,
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
@@ -130,9 +125,7 @@ fn option(
 
     div()
         .id(button_id)
-        .w(px(58.0))
-        .h(px(58.0))
-        .p(px(6.0))
+        .size(px(40.0))
         .rounded(px(10.0))
         .border_1()
         .border_color(if selected {
@@ -148,16 +141,9 @@ fn option(
         .cursor_pointer()
         .hover(|style| style.bg(Colors::muted()))
         .flex()
-        .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(4.0))
-        .text_xs()
-        .text_color(if selected {
-            Colors::foreground()
-        } else {
-            Colors::muted_foreground()
-        })
+        .relative()
         .on_click(move |_, _, app| {
             let icon_override = icon_override.clone();
             let _ = entity.update(app, |this, cx| {
@@ -165,39 +151,22 @@ fn option(
             });
         })
         .child(file_type_icon_sm(icon_name, Colors::foreground()))
-        .child(div().w_full().text_center().truncate().child(label))
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(3.0))
+                    .right(px(4.0))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(Colors::active())
+                    .child("•"),
+            )
+        })
 }
 
 fn auto_rule_icon_name(rule: &DestinationRuleEditor, cx: &Context<SettingsWindow>) -> &'static str {
     let label = rule.label_input.read(cx).text().to_string();
     let extensions = super::parse_extensions_input(rule.extensions_input.read(cx).text());
     suggested_destination_rule_icon_name(&label, &extensions)
-}
-
-fn file_type_icon_label(icon_name: &str) -> String {
-    match icon_name {
-        "archive" => t!("settings.destinations.destination_rule_icon_option_archive").to_string(),
-        "audio" => t!("settings.destinations.destination_rule_icon_option_audio").to_string(),
-        "book" => t!("settings.destinations.destination_rule_icon_option_book").to_string(),
-        "code" => t!("settings.destinations.destination_rule_icon_option_code").to_string(),
-        "default" => t!("settings.destinations.destination_rule_icon_option_default").to_string(),
-        "document" => t!("settings.destinations.destination_rule_icon_option_document").to_string(),
-        "executable" => {
-            t!("settings.destinations.destination_rule_icon_option_executable").to_string()
-        }
-        "font" => t!("settings.destinations.destination_rule_icon_option_font").to_string(),
-        "image" => t!("settings.destinations.destination_rule_icon_option_image").to_string(),
-        "key" => t!("settings.destinations.destination_rule_icon_option_key").to_string(),
-        "mail" => t!("settings.destinations.destination_rule_icon_option_mail").to_string(),
-        "presentation" => {
-            t!("settings.destinations.destination_rule_icon_option_presentation").to_string()
-        }
-        "spreadsheet" => {
-            t!("settings.destinations.destination_rule_icon_option_spreadsheet").to_string()
-        }
-        "vector" => t!("settings.destinations.destination_rule_icon_option_vector").to_string(),
-        "video" => t!("settings.destinations.destination_rule_icon_option_video").to_string(),
-        "web" => t!("settings.destinations.destination_rule_icon_option_web").to_string(),
-        _ => t!("settings.destinations.destination_rule_icon_option_default").to_string(),
-    }
 }

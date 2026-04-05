@@ -117,6 +117,8 @@ fn render_destination_rules_section(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     let entity = cx.entity();
+    let restore_entity = entity.clone();
+    let add_entity = entity.clone();
 
     div()
         .flex_col()
@@ -153,26 +155,33 @@ fn render_destination_rules_section(
                 )
                 .child(
                     div()
-                        .id("add-destination-rule")
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(Colors::input_border())
-                        .bg(Colors::background())
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::foreground())
-                        .cursor_pointer()
-                        .hover(|style| style.bg(Colors::muted()))
-                        .on_click(move |_, _, app| {
-                            let _ = entity.update(app, |this, cx| this.add_destination_rule(cx));
-                        })
-                        .child(icon_sm(IconName::Plus, Colors::muted_foreground()))
-                        .child(t!("settings.destinations.destination_rules_add").to_string()),
+                        .child(
+                            action_button(
+                                "restore-default-destination-rules",
+                                t!("settings.destinations.destination_rules_restore_defaults")
+                                    .to_string(),
+                                None,
+                            )
+                            .on_click(move |_, _, app| {
+                                let _ = restore_entity.update(app, |this, cx| {
+                                    this.restore_default_destination_rules(cx)
+                                });
+                            }),
+                        )
+                        .child(
+                            action_button(
+                                "add-destination-rule",
+                                t!("settings.destinations.destination_rules_add").to_string(),
+                                Some(IconName::Plus),
+                            )
+                            .on_click(move |_, _, app| {
+                                let _ = add_entity
+                                    .update(app, |this, cx| this.add_destination_rule(cx));
+                            }),
+                        ),
                 ),
         )
         .child(
@@ -217,6 +226,33 @@ fn render_destination_rules_section(
                         }),
                 ),
         )
+}
+
+fn action_button(
+    id: impl Into<gpui::ElementId>,
+    label: String,
+    icon_name: Option<IconName>,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(Colors::input_border())
+        .bg(Colors::background())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::foreground())
+        .cursor_pointer()
+        .hover(|style| style.bg(Colors::muted()))
+        .when_some(icon_name, |this, icon_name| {
+            this.child(icon_sm(icon_name, Colors::muted_foreground()))
+        })
+        .child(label)
 }
 
 fn render_destination_rule_row(

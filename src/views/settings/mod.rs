@@ -10,7 +10,9 @@ use std::path::Path;
 use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
 use rust_i18n::t;
 
-use crate::settings::{CollisionStrategy, DestinationRule, Settings, canonical_language};
+use crate::settings::{
+    CollisionStrategy, DestinationRule, Settings, canonical_language, default_destination_rules,
+};
 use crate::theme::APP_FONT_FAMILY;
 use crate::ui::prelude::*;
 
@@ -248,6 +250,20 @@ impl SettingsWindow {
         let target_dir = self.download_dir_input.read(cx).text(cx).to_string();
         self.destination_rule_editors
             .push(DestinationRuleEditor::empty(id, target_dir, cx));
+        cx.notify();
+    }
+
+    pub(super) fn restore_default_destination_rules(&mut self, cx: &mut Context<Self>) {
+        let fallback_download_dir =
+            parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref())
+                .unwrap_or_else(|| self.settings.download_dir());
+        let default_rules = default_destination_rules(&fallback_download_dir);
+        self.destination_rule_editors = default_rules
+            .iter()
+            .map(|rule| DestinationRuleEditor::from_rule(rule, cx))
+            .collect();
+        self.next_destination_rule_index = next_destination_rule_index(&default_rules);
+        self.open_icon_picker_rule = None;
         cx.notify();
     }
 

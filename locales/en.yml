@@ -100,6 +100,7 @@ settings:
         destination_rules_title: "Destinations"
         destination_rules_description: "Route automatic downloads by file extension. Manual download destinations still override these rules."
         destination_rules_add: "Add Rule"
+        destination_rules_restore_defaults: "Restore Defaults"
         destination_rules_empty: "No destination rules yet. Add rows like Videos (.mp4, .mkv) or Music (.mp3, .flac)."
         destination_rules_disabled_hint: "Rules are currently disabled globally, but you can still edit them here."
         destination_rule_icon_auto: "Auto"
