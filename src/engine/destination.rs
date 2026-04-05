@@ -344,6 +344,7 @@ mod tests {
                     enabled: true,
                     target_dir: root.path().join("Movies"),
                     extensions: vec![".mkv".into(), ".mp4".into()],
+                    icon_name: None,
                 },
                 DestinationRule {
                     id: "videos".into(),
@@ -351,6 +352,7 @@ mod tests {
                     enabled: true,
                     target_dir: root.path().join("Videos"),
                     extensions: vec!["MP4".into()],
+                    icon_name: None,
                 },
             ],
             ..Settings::default()
@@ -380,6 +382,7 @@ mod tests {
                 enabled: true,
                 target_dir: root.path().join("Music"),
                 extensions: vec![".flac".into()],
+                icon_name: None,
             }],
             ..Settings::default()
         };
