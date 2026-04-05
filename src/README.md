@@ -12,6 +12,7 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
   - also stores destination-policy settings such as collision strategy and extension-based routing rules
+  - persists to the platform's standard config directory rather than a single macOS-only path
 
 ## Frontend terms
 
