@@ -58,6 +58,7 @@ pub struct SettingsWindow {
     active: Section,
     pub(super) download_dir_input: Entity<DirectoryInput>,
     pub(super) global_speed_limit_input: Entity<NumberInput>,
+    pub(super) ipc_port_input: Entity<NumberInput>,
     pub(super) concurrent_downloads_input: Entity<NumberInput>,
     pub(super) connections_per_download_input: Entity<NumberInput>,
     pub(super) connections_per_server_input: Entity<NumberInput>,
@@ -84,6 +85,16 @@ impl SettingsWindow {
                     0,
                     1_000_000,
                     64,
+                    cx,
+                )
+            }),
+            ipc_port_input: cx.new(|cx| {
+                NumberInput::new(
+                    format!("{}", settings.ipc_port),
+                    t!("settings.network.ipc_port_placeholder").to_string(),
+                    1,
+                    u16::MAX as u64,
+                    1,
                     cx,
                 )
             }),
@@ -122,13 +133,15 @@ impl SettingsWindow {
         }
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    fn save(&mut self, cx: &mut Context<Self>) {
         self.settings.default_download_dir =
             parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref());
         self.settings.global_speed_limit_bps = parse_speed_limit_input(
             self.global_speed_limit_input.read(cx).text(),
             self.settings.global_speed_limit_bps,
         );
+        self.settings.ipc_port =
+            parse_port_input(self.ipc_port_input.read(cx).text(), self.settings.ipc_port);
         self.settings.max_concurrent_downloads = parse_bounded_usize_input(
             self.concurrent_downloads_input.read(cx).text(),
             self.settings.max_concurrent_downloads,
@@ -152,6 +165,11 @@ impl SettingsWindow {
             settings: self.settings.clone(),
         });
     }
+
+    fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx);
+        window.remove_window();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +185,13 @@ impl Render for SettingsWindow {
             .bg(Colors::background())
             .text_color(Colors::foreground())
             .font_family(APP_FONT_FAMILY)
-            .child(WindowHeader::new(t!("settings.title").to_string()))
+            .child(if cfg!(target_os = "macos") {
+                WindowHeader::new(t!("settings.title").to_string())
+                    .leading(div().w(px(24.0)))
+                    .into_any_element()
+            } else {
+                WindowHeader::new(t!("settings.title").to_string()).into_any_element()
+            })
             .child(
                 div()
                     .flex()
@@ -265,7 +289,7 @@ impl SettingsWindow {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(Colors::background())
                     .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.save_and_close(window, cx)))
                     .child(t!("settings.done").to_string()),
             )
     }
@@ -301,6 +325,15 @@ fn parse_bounded_usize_input(input: &str, fallback: usize, min: usize, max: usiz
         .trim()
         .parse::<usize>()
         .map(|value| value.clamp(min, max))
+        .unwrap_or(fallback)
+}
+
+fn parse_port_input(input: &str, fallback: u16) -> u16 {
+    input
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
         .unwrap_or(fallback)
 }
 
