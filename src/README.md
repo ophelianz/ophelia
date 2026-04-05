@@ -46,6 +46,7 @@ These names are intentional too:
     - `icon.rs`: icon rendering helpers and icon names
     - `logo.rs`: Ophelia logo element
 - `controls/`
+    - `dropdown_select.rs`: reusable anchored dropdown/select control
     - `text_field.rs`: custom text input
     - `number_input.rs`: numeric input control
     - `directory_input.rs`: directory-picker input control
@@ -66,7 +67,9 @@ These names are intentional too:
     - `stats_bar.rs`: throughput and status summary card
 - `settings/`
     - `mod.rs`: settings window entity
-    - `general.rs`: general settings section
+    - `general.rs`: general app settings section
+    - `destinations.rs`: fallback folder, collision policy, and destination-rule settings
+    - `destination_rule_icon_picker.rs`: destination-rule-specific icon picker composition
     - `network.rs`: network settings section
 - `overlays/`
     - `download_modal.rs`: add-download overlay

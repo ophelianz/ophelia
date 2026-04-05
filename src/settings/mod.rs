@@ -12,11 +12,13 @@
 //! Writes are atomic: content goes to `settings.json.tmp` first, then
 //! renamed over the real file so a crash mid-write can't corrupt it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_IPC_PORT: u16 = 7373;
+pub const DEFAULT_LANGUAGE: &str = "en";
+pub const SUPPORTED_LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("zh-CN", "简体中文")];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +35,139 @@ pub struct DestinationRule {
     pub enabled: bool,
     pub target_dir: PathBuf,
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub icon_name: Option<String>,
 }
+
+struct DestinationRulePreset {
+    id: &'static str,
+    label: &'static str,
+    folder_name: &'static str,
+    icon_name: &'static str,
+    extensions: &'static [&'static str],
+}
+
+const DEFAULT_DESTINATION_RULE_PRESETS: &[DestinationRulePreset] = &[
+    DestinationRulePreset {
+        id: "archive",
+        label: "Archives",
+        folder_name: "Archives",
+        icon_name: "archive",
+        extensions: &[".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz"],
+    },
+    DestinationRulePreset {
+        id: "audio",
+        label: "Music",
+        folder_name: "Music",
+        icon_name: "audio",
+        extensions: &[".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".opus"],
+    },
+    DestinationRulePreset {
+        id: "book",
+        label: "Books",
+        folder_name: "Books",
+        icon_name: "book",
+        extensions: &[".epub", ".mobi", ".azw3", ".fb2"],
+    },
+    DestinationRulePreset {
+        id: "code",
+        label: "Code",
+        folder_name: "Code",
+        icon_name: "code",
+        extensions: &[
+            ".rs", ".js", ".ts", ".tsx", ".jsx", ".py", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
+            ".json", ".yaml", ".yml", ".toml", ".sh", ".css",
+        ],
+    },
+    DestinationRulePreset {
+        id: "document",
+        label: "Documents",
+        folder_name: "Documents",
+        icon_name: "document",
+        extensions: &[".pdf", ".doc", ".docx", ".txt", ".rtf", ".md"],
+    },
+    DestinationRulePreset {
+        id: "executable",
+        label: "Executables",
+        folder_name: "Executables",
+        icon_name: "executable",
+        extensions: &[
+            ".exe",
+            ".msi",
+            ".dmg",
+            ".pkg",
+            ".appimage",
+            ".deb",
+            ".rpm",
+            ".apk",
+        ],
+    },
+    DestinationRulePreset {
+        id: "font",
+        label: "Fonts",
+        folder_name: "Fonts",
+        icon_name: "font",
+        extensions: &[".ttf", ".otf", ".woff", ".woff2"],
+    },
+    DestinationRulePreset {
+        id: "image",
+        label: "Images",
+        folder_name: "Images",
+        icon_name: "image",
+        extensions: &[
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".avif", ".bmp", ".tiff",
+        ],
+    },
+    DestinationRulePreset {
+        id: "key",
+        label: "Keys",
+        folder_name: "Keys",
+        icon_name: "key",
+        extensions: &[".pem", ".pub", ".p12", ".pfx", ".crt", ".cer", ".asc"],
+    },
+    DestinationRulePreset {
+        id: "mail",
+        label: "Mail",
+        folder_name: "Mail",
+        icon_name: "mail",
+        extensions: &[".eml", ".mbox", ".msg"],
+    },
+    DestinationRulePreset {
+        id: "presentation",
+        label: "Presentations",
+        folder_name: "Presentations",
+        icon_name: "presentation",
+        extensions: &[".ppt", ".pptx", ".odp"],
+    },
+    DestinationRulePreset {
+        id: "spreadsheet",
+        label: "Spreadsheets",
+        folder_name: "Spreadsheets",
+        icon_name: "spreadsheet",
+        extensions: &[".csv", ".tsv", ".xls", ".xlsx", ".ods"],
+    },
+    DestinationRulePreset {
+        id: "vector",
+        label: "Vectors",
+        folder_name: "Vectors",
+        icon_name: "vector",
+        extensions: &[".svg", ".ai", ".eps"],
+    },
+    DestinationRulePreset {
+        id: "video",
+        label: "Videos",
+        folder_name: "Videos",
+        icon_name: "video",
+        extensions: &[".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv"],
+    },
+    DestinationRulePreset {
+        id: "web",
+        label: "Web",
+        folder_name: "Web",
+        icon_name: "web",
+        extensions: &[".html", ".htm", ".mhtml", ".webloc", ".url"],
+    },
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +175,8 @@ pub struct Settings {
     pub max_connections_per_server: usize,
     pub max_connections_per_download: usize,
     pub max_concurrent_downloads: usize,
+    #[serde(default = "default_language")]
+    pub language: String,
     pub default_download_dir: Option<PathBuf>,
     /// Global bandwidth cap across all concurrent downloads. 0 = unlimited.
     pub global_speed_limit_bps: u64,
@@ -60,12 +196,13 @@ impl Default for Settings {
             max_connections_per_server: 4,
             max_connections_per_download: 8,
             max_concurrent_downloads: 3,
+            language: default_language(),
             default_download_dir: None,
             global_speed_limit_bps: 0,
             ipc_port: DEFAULT_IPC_PORT,
             collision_strategy: CollisionStrategy::Rename,
             destination_rules_enabled: false,
-            destination_rules: Vec::new(),
+            destination_rules: default_destination_rules(&default_download_root()),
         }
     }
 }
@@ -73,10 +210,12 @@ impl Default for Settings {
 impl Settings {
     /// Load from disk, returning defaults on any error.
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
+        let mut settings: Self = std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.language = canonical_language(settings.language.as_str()).to_string();
+        settings
     }
 
     /// Persist to disk atomically. Creates parent directories if needed.
@@ -97,9 +236,11 @@ impl Settings {
         if let Some(ref dir) = self.default_download_dir {
             return dir.clone();
         }
-        std::env::var("HOME")
-            .map(|h| PathBuf::from(h).join("Downloads"))
-            .unwrap_or_else(|_| PathBuf::from("."))
+        default_download_root()
+    }
+
+    pub fn resolved_language(&self) -> &str {
+        canonical_language(self.language.as_str())
     }
 
     fn path() -> PathBuf {
@@ -113,6 +254,50 @@ impl Settings {
         .join("Ophelia")
         .join("settings.json")
     }
+}
+
+fn default_language() -> String {
+    DEFAULT_LANGUAGE.to_string()
+}
+
+pub fn canonical_language(language: &str) -> &'static str {
+    SUPPORTED_LANGUAGES
+        .iter()
+        .find_map(|(code, _)| (*code == language).then_some(*code))
+        .unwrap_or(DEFAULT_LANGUAGE)
+}
+
+pub fn suggested_destination_rule_icon_name(label: &str, extensions: &[String]) -> &'static str {
+    for extension in extensions
+        .iter()
+        .filter_map(|ext| normalize_rule_extension(ext))
+    {
+        if let Some(preset) = DEFAULT_DESTINATION_RULE_PRESETS.iter().find(|preset| {
+            preset
+                .extensions
+                .iter()
+                .filter_map(|candidate| normalize_rule_extension(candidate))
+                .any(|candidate| candidate == extension)
+        }) {
+            return preset.icon_name;
+        }
+    }
+
+    let normalized_label = label.trim().to_ascii_lowercase();
+    if normalized_label.is_empty() {
+        return "default";
+    }
+
+    DEFAULT_DESTINATION_RULE_PRESETS
+        .iter()
+        .find(|preset| {
+            normalized_label.contains(&preset.id.to_ascii_lowercase())
+                || normalized_label.contains(&preset.label.to_ascii_lowercase())
+                || normalized_label
+                    .contains(&preset.label.trim_end_matches('s').to_ascii_lowercase())
+        })
+        .map(|preset| preset.icon_name)
+        .unwrap_or("default")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +345,41 @@ fn settings_base_dir(
     }
 }
 
+fn default_download_root() -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join("Downloads"))
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn default_destination_rules(base_dir: &Path) -> Vec<DestinationRule> {
+    DEFAULT_DESTINATION_RULE_PRESETS
+        .iter()
+        .map(|preset| DestinationRule {
+            id: preset.id.to_string(),
+            label: preset.label.to_string(),
+            enabled: true,
+            target_dir: base_dir.join(preset.folder_name),
+            extensions: preset
+                .extensions
+                .iter()
+                .map(|ext| ext.to_string())
+                .collect(),
+            icon_name: Some(preset.icon_name.to_string()),
+        })
+        .collect()
+}
+
+fn normalize_rule_extension(extension: &str) -> Option<String> {
+    let trimmed = extension.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.starts_with('.') {
+        Some(trimmed.to_ascii_lowercase())
+    } else {
+        Some(format!(".{}", trimmed.to_ascii_lowercase()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +387,14 @@ mod tests {
     #[test]
     fn default_settings_include_default_ipc_port() {
         assert_eq!(Settings::default().ipc_port, DEFAULT_IPC_PORT);
+        assert_eq!(Settings::default().language, DEFAULT_LANGUAGE);
+        assert!(
+            Settings::default()
+                .destination_rules
+                .iter()
+                .any(|rule| rule.icon_name.as_deref() == Some("video"))
+        );
+        assert!(!Settings::default().destination_rules.is_empty());
     }
 
     #[test]
@@ -183,10 +411,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.ipc_port, DEFAULT_IPC_PORT);
+        assert_eq!(settings.language, DEFAULT_LANGUAGE);
         assert_eq!(settings.max_connections_per_server, 6);
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
         assert!(!settings.destination_rules_enabled);
-        assert!(settings.destination_rules.is_empty());
+        assert!(!settings.destination_rules.is_empty());
     }
 
     #[test]
@@ -199,9 +428,44 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.ipc_port, 8123);
+        assert_eq!(settings.language, DEFAULT_LANGUAGE);
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
         assert!(!settings.destination_rules_enabled);
-        assert!(settings.destination_rules.is_empty());
+        assert!(!settings.destination_rules.is_empty());
+    }
+
+    #[test]
+    fn unsupported_language_falls_back_to_english() {
+        assert_eq!(canonical_language("fr"), DEFAULT_LANGUAGE);
+        assert_eq!(canonical_language("zh-CN"), "zh-CN");
+    }
+
+    #[test]
+    fn legacy_destination_rules_without_icon_name_deserialize() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "destination_rules": [
+                    {
+                        "id": "music",
+                        "label": "Music",
+                        "enabled": true,
+                        "target_dir": "/tmp/music",
+                        "extensions": [".mp3"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.destination_rules.len(), 1);
+        assert_eq!(settings.destination_rules[0].icon_name, None);
+    }
+
+    #[test]
+    fn suggested_icon_name_prefers_matching_extension() {
+        let icon = suggested_destination_rule_icon_name("Media", &[".mkv".into()]);
+
+        assert_eq!(icon, "video");
     }
 
     #[test]
