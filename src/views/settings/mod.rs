@@ -5,10 +5,12 @@
 //! `SettingsClosed` event is emitted so the main window can update its
 //! in-memory settings copy immediately.
 
+use std::path::Path;
+
 use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
 use rust_i18n::t;
 
-use crate::settings::Settings;
+use crate::settings::{CollisionStrategy, DestinationRule, Settings};
 use crate::theme::APP_FONT_FAMILY;
 use crate::ui::prelude::*;
 
@@ -57,11 +59,13 @@ pub struct SettingsWindow {
     pub settings: Settings,
     active: Section,
     pub(super) download_dir_input: Entity<DirectoryInput>,
+    pub(super) destination_rule_editors: Vec<DestinationRuleEditor>,
     pub(super) global_speed_limit_input: Entity<NumberInput>,
     pub(super) ipc_port_input: Entity<NumberInput>,
     pub(super) concurrent_downloads_input: Entity<NumberInput>,
     pub(super) connections_per_download_input: Entity<NumberInput>,
     pub(super) connections_per_server_input: Entity<NumberInput>,
+    next_destination_rule_index: usize,
 }
 
 impl EventEmitter<SettingsClosed> for SettingsWindow {}
@@ -69,15 +73,23 @@ impl EventEmitter<SettingsClosed> for SettingsWindow {}
 impl SettingsWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
+        let fallback_download_dir = settings.download_dir().to_string_lossy().to_string();
+        let destination_rule_editors = settings
+            .destination_rules
+            .iter()
+            .map(|rule| DestinationRuleEditor::from_rule(rule, cx))
+            .collect::<Vec<_>>();
+        let next_destination_rule_index = next_destination_rule_index(&settings.destination_rules);
 
         Self {
             download_dir_input: cx.new(|cx| {
                 DirectoryInput::new(
-                    settings.download_dir().to_string_lossy().to_string(),
+                    fallback_download_dir.clone(),
                     t!("settings.general.download_folder_placeholder").to_string(),
                     cx,
                 )
             }),
+            destination_rule_editors,
             global_speed_limit_input: cx.new(|cx| {
                 NumberInput::new(
                     format!("{}", settings.global_speed_limit_bps / 1024),
@@ -130,6 +142,7 @@ impl SettingsWindow {
             }),
             settings,
             active: Section::General,
+            next_destination_rule_index,
         }
     }
 
@@ -142,6 +155,13 @@ impl SettingsWindow {
         );
         self.settings.ipc_port =
             parse_port_input(self.ipc_port_input.read(cx).text(), self.settings.ipc_port);
+        let fallback_download_dir = self.settings.download_dir();
+        self.settings.destination_rules = self
+            .destination_rule_editors
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| rule.to_rule(index, &fallback_download_dir, cx))
+            .collect();
         self.settings.max_concurrent_downloads = parse_bounded_usize_input(
             self.concurrent_downloads_input.read(cx).text(),
             self.settings.max_concurrent_downloads,
@@ -169,6 +189,54 @@ impl SettingsWindow {
     fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save(cx);
         window.remove_window();
+    }
+
+    pub(super) fn set_collision_strategy(
+        &mut self,
+        strategy: CollisionStrategy,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.collision_strategy != strategy {
+            self.settings.collision_strategy = strategy;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_destination_rules_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.destination_rules_enabled != enabled {
+            self.settings.destination_rules_enabled = enabled;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_destination_rule_enabled(
+        &mut self,
+        index: usize,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rule) = self.destination_rule_editors.get_mut(index)
+            && rule.enabled != enabled
+        {
+            rule.enabled = enabled;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn add_destination_rule(&mut self, cx: &mut Context<Self>) {
+        let id = format!("destination-rule-{}", self.next_destination_rule_index);
+        self.next_destination_rule_index += 1;
+        let target_dir = self.download_dir_input.read(cx).text(cx).to_string();
+        self.destination_rule_editors
+            .push(DestinationRuleEditor::empty(id, target_dir, cx));
+        cx.notify();
+    }
+
+    pub(super) fn remove_destination_rule(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.destination_rule_editors.len() {
+            self.destination_rule_editors.remove(index);
+            cx.notify();
+        }
     }
 }
 
@@ -337,6 +405,125 @@ fn parse_port_input(input: &str, fallback: u16) -> u16 {
         .unwrap_or(fallback)
 }
 
+fn parse_extensions_input(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn format_extensions_input(extensions: &[String]) -> String {
+    extensions.join(", ")
+}
+
+fn next_destination_rule_index(rules: &[DestinationRule]) -> usize {
+    rules
+        .iter()
+        .filter_map(|rule| {
+            rule.id
+                .strip_prefix("destination-rule-")
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+        })
+        .max()
+        .map(|index| index + 1)
+        .unwrap_or_else(|| rules.len() + 1)
+}
+
+pub(super) struct DestinationRuleEditor {
+    pub(super) id: String,
+    pub(super) enabled: bool,
+    pub(super) label_input: Entity<TextField>,
+    pub(super) extensions_input: Entity<TextField>,
+    pub(super) target_dir_input: Entity<DirectoryInput>,
+}
+
+impl DestinationRuleEditor {
+    fn from_rule(rule: &DestinationRule, cx: &mut Context<SettingsWindow>) -> Self {
+        Self {
+            id: rule.id.clone(),
+            enabled: rule.enabled,
+            label_input: cx.new(|cx| {
+                TextField::new(
+                    rule.label.clone(),
+                    t!("settings.general.destination_rule_label_placeholder").to_string(),
+                    cx,
+                )
+            }),
+            extensions_input: cx.new(|cx| {
+                TextField::new(
+                    format_extensions_input(&rule.extensions),
+                    t!("settings.general.destination_rule_extensions_placeholder").to_string(),
+                    cx,
+                )
+            }),
+            target_dir_input: cx.new(|cx| {
+                DirectoryInput::new(
+                    rule.target_dir.to_string_lossy().to_string(),
+                    t!("settings.general.destination_rule_directory_placeholder").to_string(),
+                    cx,
+                )
+            }),
+        }
+    }
+
+    fn empty(
+        id: String,
+        fallback_target_dir: impl Into<SharedString>,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Self {
+        Self {
+            id,
+            enabled: true,
+            label_input: cx.new(|cx| {
+                TextField::new(
+                    "",
+                    t!("settings.general.destination_rule_label_placeholder").to_string(),
+                    cx,
+                )
+            }),
+            extensions_input: cx.new(|cx| {
+                TextField::new(
+                    "",
+                    t!("settings.general.destination_rule_extensions_placeholder").to_string(),
+                    cx,
+                )
+            }),
+            target_dir_input: cx.new(|cx| {
+                DirectoryInput::new(
+                    fallback_target_dir,
+                    t!("settings.general.destination_rule_directory_placeholder").to_string(),
+                    cx,
+                )
+            }),
+        }
+    }
+
+    fn to_rule(
+        &self,
+        index: usize,
+        fallback_target_dir: &Path,
+        cx: &Context<SettingsWindow>,
+    ) -> DestinationRule {
+        let label = self.label_input.read(cx).text().trim().to_string();
+        let target_dir = parse_path_input(self.target_dir_input.read(cx).text(cx).as_ref())
+            .unwrap_or_else(|| fallback_target_dir.to_path_buf());
+
+        DestinationRule {
+            id: self.id.clone(),
+            label: if label.is_empty() {
+                format!("Rule {}", index + 1)
+            } else {
+                label
+            },
+            enabled: self.enabled,
+            target_dir,
+            extensions: parse_extensions_input(self.extensions_input.read(cx).text()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared UI helpers - accessible to general and network submodules via super::
 // ---------------------------------------------------------------------------
@@ -374,4 +561,39 @@ fn setting_row(
                 ),
         )
         .child(div().flex_shrink_0().child(control))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_comma_separated_extensions() {
+        assert_eq!(
+            parse_extensions_input(".mp3, flac,  .wav "),
+            vec![".mp3", "flac", ".wav"]
+        );
+    }
+
+    #[test]
+    fn computes_next_destination_rule_index_from_existing_rules() {
+        let rules = vec![
+            DestinationRule {
+                id: "destination-rule-2".into(),
+                label: "Videos".into(),
+                enabled: true,
+                target_dir: std::path::PathBuf::from("/tmp/videos"),
+                extensions: vec![".mp4".into()],
+            },
+            DestinationRule {
+                id: "music".into(),
+                label: "Music".into(),
+                enabled: true,
+                target_dir: std::path::PathBuf::from("/tmp/music"),
+                extensions: vec![".mp3".into()],
+            },
+        ];
+
+        assert_eq!(next_destination_rule_index(&rules), 3);
+    }
 }
