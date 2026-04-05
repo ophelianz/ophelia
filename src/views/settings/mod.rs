@@ -10,10 +10,12 @@ use std::path::Path;
 use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
 use rust_i18n::t;
 
-use crate::settings::{CollisionStrategy, DestinationRule, Settings};
+use crate::settings::{CollisionStrategy, DestinationRule, Settings, canonical_language};
 use crate::theme::APP_FONT_FAMILY;
 use crate::ui::prelude::*;
 
+mod destination_rule_icon_picker;
+mod destinations;
 mod general;
 mod network;
 
@@ -32,6 +34,7 @@ pub struct SettingsClosed {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     General,
+    Destinations,
     Network,
 }
 
@@ -39,6 +42,7 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Section::General => IconName::GeneralSettings,
+            Section::Destinations => IconName::Folder,
             Section::Network => IconName::Network,
         }
     }
@@ -46,6 +50,7 @@ impl Section {
     fn icon_color(self) -> gpui::Rgba {
         match self {
             Section::General => Colors::muted_foreground(),
+            Section::Destinations => Colors::muted_foreground(),
             Section::Network => Colors::active(),
         }
     }
@@ -58,6 +63,7 @@ impl Section {
 pub struct SettingsWindow {
     pub settings: Settings,
     active: Section,
+    pub(super) language_select: Entity<DropdownSelect>,
     pub(super) download_dir_input: Entity<DirectoryInput>,
     pub(super) destination_rule_editors: Vec<DestinationRuleEditor>,
     pub(super) global_speed_limit_input: Entity<NumberInput>,
@@ -66,6 +72,7 @@ pub struct SettingsWindow {
     pub(super) connections_per_download_input: Entity<NumberInput>,
     pub(super) connections_per_server_input: Entity<NumberInput>,
     next_destination_rule_index: usize,
+    pub(super) open_icon_picker_rule: Option<usize>,
 }
 
 impl EventEmitter<SettingsClosed> for SettingsWindow {}
@@ -73,6 +80,7 @@ impl EventEmitter<SettingsClosed> for SettingsWindow {}
 impl SettingsWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
+        let selected_language = settings.resolved_language().to_string();
         let fallback_download_dir = settings.download_dir().to_string_lossy().to_string();
         let destination_rule_editors = settings
             .destination_rules
@@ -82,10 +90,18 @@ impl SettingsWindow {
         let next_destination_rule_index = next_destination_rule_index(&settings.destination_rules);
 
         Self {
+            language_select: cx.new(|cx| {
+                DropdownSelect::new(
+                    "settings-language",
+                    language_options(),
+                    selected_language.clone(),
+                    cx,
+                )
+            }),
             download_dir_input: cx.new(|cx| {
                 DirectoryInput::new(
                     fallback_download_dir.clone(),
-                    t!("settings.general.download_folder_placeholder").to_string(),
+                    t!("settings.destinations.download_folder_placeholder").to_string(),
                     cx,
                 )
             }),
@@ -143,10 +159,13 @@ impl SettingsWindow {
             settings,
             active: Section::General,
             next_destination_rule_index,
+            open_icon_picker_rule: None,
         }
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
+        self.settings.language =
+            canonical_language(self.language_select.read(cx).selected_value()).to_string();
         self.settings.default_download_dir =
             parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref());
         self.settings.global_speed_limit_bps = parse_speed_limit_input(
@@ -235,6 +254,43 @@ impl SettingsWindow {
     pub(super) fn remove_destination_rule(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.destination_rule_editors.len() {
             self.destination_rule_editors.remove(index);
+            self.open_icon_picker_rule = match self.open_icon_picker_rule {
+                Some(open_index) if open_index == index => None,
+                Some(open_index) if open_index > index => Some(open_index - 1),
+                current => current,
+            };
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_destination_rule_icon_picker(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_icon_picker_rule = if self.open_icon_picker_rule == Some(index) {
+            None
+        } else {
+            Some(index)
+        };
+        cx.notify();
+    }
+
+    pub(super) fn close_destination_rule_icon_picker(&mut self, cx: &mut Context<Self>) {
+        if self.open_icon_picker_rule.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_destination_rule_icon(
+        &mut self,
+        index: usize,
+        icon_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rule) = self.destination_rule_editors.get_mut(index) {
+            rule.icon_name = icon_name;
+            self.open_icon_picker_rule = None;
             cx.notify();
         }
     }
@@ -283,7 +339,8 @@ impl Render for SettingsWindow {
 impl SettingsWindow {
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.active {
-            Section::General => general::render(self, cx).into_any_element(),
+            Section::General => general::render(self).into_any_element(),
+            Section::Destinations => destinations::render(self, cx).into_any_element(),
             Section::Network => network::render(self).into_any_element(),
         }
     }
@@ -291,6 +348,10 @@ impl SettingsWindow {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sections = [
             (t!("settings.general.section").to_string(), Section::General),
+            (
+                t!("settings.destinations.section").to_string(),
+                Section::Destinations,
+            ),
             (t!("settings.network.section").to_string(), Section::Network),
         ];
         let nav_items = sections
@@ -367,6 +428,10 @@ pub(super) fn setting_directory_input(input: Entity<DirectoryInput>) -> gpui::Di
     div().w(px(220.0)).child(input)
 }
 
+pub(super) fn setting_dropdown_select(input: Entity<DropdownSelect>) -> gpui::Div {
+    div().w(px(220.0)).child(input)
+}
+
 pub(super) fn setting_number_input(input: Entity<NumberInput>) -> gpui::Div {
     div().w(px(220.0)).child(input)
 }
@@ -405,7 +470,20 @@ fn parse_port_input(input: &str, fallback: u16) -> u16 {
         .unwrap_or(fallback)
 }
 
-fn parse_extensions_input(input: &str) -> Vec<String> {
+fn language_options() -> Vec<DropdownOption> {
+    vec![
+        DropdownOption::new(
+            "en",
+            t!("settings.general.language_option_english").to_string(),
+        ),
+        DropdownOption::new(
+            "zh-CN",
+            t!("settings.general.language_option_simplified_chinese").to_string(),
+        ),
+    ]
+}
+
+pub(super) fn parse_extensions_input(input: &str) -> Vec<String> {
     input
         .split(',')
         .map(str::trim)
@@ -434,6 +512,7 @@ fn next_destination_rule_index(rules: &[DestinationRule]) -> usize {
 pub(super) struct DestinationRuleEditor {
     pub(super) id: String,
     pub(super) enabled: bool,
+    pub(super) icon_name: Option<String>,
     pub(super) label_input: Entity<TextField>,
     pub(super) extensions_input: Entity<TextField>,
     pub(super) target_dir_input: Entity<DirectoryInput>,
@@ -444,24 +523,25 @@ impl DestinationRuleEditor {
         Self {
             id: rule.id.clone(),
             enabled: rule.enabled,
+            icon_name: rule.icon_name.clone(),
             label_input: cx.new(|cx| {
                 TextField::new(
                     rule.label.clone(),
-                    t!("settings.general.destination_rule_label_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_label_placeholder").to_string(),
                     cx,
                 )
             }),
             extensions_input: cx.new(|cx| {
                 TextField::new(
                     format_extensions_input(&rule.extensions),
-                    t!("settings.general.destination_rule_extensions_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_extensions_placeholder").to_string(),
                     cx,
                 )
             }),
             target_dir_input: cx.new(|cx| {
                 DirectoryInput::new(
                     rule.target_dir.to_string_lossy().to_string(),
-                    t!("settings.general.destination_rule_directory_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_directory_placeholder").to_string(),
                     cx,
                 )
             }),
@@ -476,24 +556,25 @@ impl DestinationRuleEditor {
         Self {
             id,
             enabled: true,
+            icon_name: None,
             label_input: cx.new(|cx| {
                 TextField::new(
                     "",
-                    t!("settings.general.destination_rule_label_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_label_placeholder").to_string(),
                     cx,
                 )
             }),
             extensions_input: cx.new(|cx| {
                 TextField::new(
                     "",
-                    t!("settings.general.destination_rule_extensions_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_extensions_placeholder").to_string(),
                     cx,
                 )
             }),
             target_dir_input: cx.new(|cx| {
                 DirectoryInput::new(
                     fallback_target_dir,
-                    t!("settings.general.destination_rule_directory_placeholder").to_string(),
+                    t!("settings.destinations.destination_rule_directory_placeholder").to_string(),
                     cx,
                 )
             }),
@@ -520,6 +601,7 @@ impl DestinationRuleEditor {
             enabled: self.enabled,
             target_dir,
             extensions: parse_extensions_input(self.extensions_input.read(cx).text()),
+            icon_name: self.icon_name.clone(),
         }
     }
 }
@@ -584,6 +666,7 @@ mod tests {
                 enabled: true,
                 target_dir: std::path::PathBuf::from("/tmp/videos"),
                 extensions: vec![".mp4".into()],
+                icon_name: Some("video".into()),
             },
             DestinationRule {
                 id: "music".into(),
@@ -591,6 +674,7 @@ mod tests {
                 enabled: true,
                 target_dir: std::path::PathBuf::from("/tmp/music"),
                 extensions: vec![".mp3".into()],
+                icon_name: Some("audio".into()),
             },
         ];
 

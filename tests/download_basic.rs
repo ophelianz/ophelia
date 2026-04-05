@@ -254,6 +254,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
             enabled: true,
             target_dir: root.path().join("Movies"),
             extensions: vec![".mp4".into()],
+            icon_name: None,
         }],
         ..Settings::default()
     };

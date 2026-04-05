@@ -21,7 +21,8 @@ fn run() {
     Application::new()
         .with_assets(Assets::new())
         .run(|cx: &mut App| {
-            rust_i18n::set_locale("en");
+            let initial_settings = settings::Settings::load();
+            rust_i18n::set_locale(initial_settings.resolved_language());
 
             app_menu::init(cx);
             app_actions::init(cx);
@@ -48,7 +49,7 @@ fn run() {
 
             app_actions::set_main_window(main_window, cx);
 
-            cx.set_menus(app_menu::build_menus());
+            app_menu::refresh(cx);
 
             cx.activate(true);
         });

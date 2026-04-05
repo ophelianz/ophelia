@@ -67,6 +67,9 @@ impl MainWindow {
         self.downloads.update(cx, |downloads, cx| {
             downloads.apply_settings(settings.clone(), cx);
         });
+        self.menu_bar.update(cx, |menu_bar, cx| {
+            menu_bar.set_menus(app_menu::build_owned_menus(), cx);
+        });
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.download_dir = settings.download_dir();
             cx.notify();

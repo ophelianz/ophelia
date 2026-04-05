@@ -20,6 +20,17 @@ impl AppMenuBar {
         }
     }
 
+    pub fn set_menus(&mut self, menus: Vec<OwnedMenu>, cx: &mut Context<Self>) {
+        self.menus = menus;
+        if self
+            .open_menu
+            .is_some_and(|index| index >= self.menus.len())
+        {
+            self.open_menu = None;
+        }
+        cx.notify();
+    }
+
     fn toggle_menu(&mut self, index: usize, cx: &mut Context<Self>) {
         self.open_menu = if self.open_menu == Some(index) {
             None

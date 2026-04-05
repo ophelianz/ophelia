@@ -77,6 +77,10 @@ pub fn build_owned_menus() -> Vec<OwnedMenu> {
     build_menus().into_iter().map(Menu::owned).collect()
 }
 
+pub fn refresh(cx: &mut App) {
+    cx.set_menus(build_menus());
+}
+
 pub enum OwnedMenuItemLike<'a> {
     Separator,
     Action {

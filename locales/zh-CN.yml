@@ -1,0 +1,17 @@
+_version: 1
+app:
+    name: "Ophelia"
+menu:
+    settings: "设置"
+sidebar:
+    downloads: "传输"
+settings:
+    general:
+        section: "通用"
+        language_label: "语言"
+        language_description: "选择应用界面和菜单的显示语言。"
+        language_option_english: "English"
+        language_option_simplified_chinese: "简体中文"
+    destinations:
+        section: "目标位置"
+        destination_rules_title: "目标位置"

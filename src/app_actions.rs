@@ -68,6 +68,8 @@ fn open_settings(_: &app_menu::OpenSettings, cx: &mut App) {
 
     if let Ok(entity) = settings_window.entity(cx) {
         let subscription = cx.subscribe(&entity, move |_, event: &SettingsClosed, cx| {
+            rust_i18n::set_locale(event.settings.resolved_language());
+            app_menu::refresh(cx);
             let _ = main_window.update(cx, |this, _, cx| {
                 this.apply_settings(event.settings.clone(), cx);
             });
