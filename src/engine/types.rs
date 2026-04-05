@@ -74,6 +74,10 @@ pub enum DbEvent {
         source: PersistedDownloadSource,
         destination: PathBuf,
     },
+    DestinationChanged {
+        id: DownloadId,
+        destination: PathBuf,
+    },
     Queued {
         id: DownloadId,
     },
@@ -262,6 +266,10 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone)]
 pub enum EngineNotification {
     Update(ProgressUpdate),
+    DestinationChanged {
+        id: DownloadId,
+        destination: PathBuf,
+    },
     LiveTransferRemoved {
         id: DownloadId,
         action: LiveTransferRemovalAction,

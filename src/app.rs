@@ -19,9 +19,9 @@ use gpui::{Context, SharedString};
 
 use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddDownloadRequest, DownloadControlAction, DownloadEngine, DownloadId, DownloadStatus,
-    EngineNotification, HistoryFilter, HistoryRow, ProgressUpdate, RestoredDownload, SavedDownload,
-    TransferControlSupport,
+    AddDownloadRequest, DownloadControlAction, DownloadEngine, DownloadId, DownloadSpec,
+    DownloadStatus, EngineNotification, HistoryFilter, HistoryRow, ProgressUpdate,
+    RestoredDownload, SavedDownload, TransferControlSupport,
 };
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
@@ -113,8 +113,7 @@ impl Downloads {
                             model.apply_notification(notification, cx);
                         }
                         while let Some(req) = model.ipc.try_recv() {
-                            let destination = req.destination_in(&model.settings.download_dir());
-                            model.add_request(req, destination, cx);
+                            model.add_request(req, cx);
                         }
                         model.tick_speed();
                     })
@@ -128,16 +127,45 @@ impl Downloads {
         model
     }
 
-    pub fn add(&mut self, url: String, destination: PathBuf, cx: &mut Context<Self>) -> DownloadId {
-        self.add_request(AddDownloadRequest::from_url(url), destination, cx)
+    pub fn add(
+        &mut self,
+        url: String,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<DownloadId> {
+        let display_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("download")
+            .to_string();
+        let spec = match DownloadSpec::from_manual_input(url, destination, &self.settings) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.report_add_failure(display_name, error, cx);
+                return None;
+            }
+        };
+        Some(self.push_spec(spec, cx))
     }
 
     pub fn add_request(
         &mut self,
         request: AddDownloadRequest,
-        destination: PathBuf,
         cx: &mut Context<Self>,
-    ) -> DownloadId {
+    ) -> Option<DownloadId> {
+        let display_name = request.display_filename_hint();
+        let spec = match request.into_spec(&self.settings) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.report_add_failure(display_name, error, cx);
+                return None;
+            }
+        };
+        Some(self.push_spec(spec, cx))
+    }
+
+    fn push_spec(&mut self, spec: DownloadSpec, cx: &mut Context<Self>) -> DownloadId {
+        let destination = spec.destination().to_path_buf();
         let filename: SharedString = destination
             .file_name()
             .and_then(|n| n.to_str())
@@ -146,7 +174,6 @@ impl Downloads {
             .into();
         let dest_str: SharedString = destination.to_string_lossy().to_string().into();
 
-        let spec = request.into_spec(destination, &self.settings);
         let provider_kind: SharedString = spec.provider_kind().to_string().into();
         let source_label: SharedString = spec.source_label().to_string().into();
         let control_support = spec.control_support();
@@ -163,6 +190,20 @@ impl Downloads {
         self.speeds.push(0);
         cx.notify();
         id
+    }
+
+    fn report_add_failure(
+        &self,
+        display_name: impl Into<SharedString>,
+        error: std::io::Error,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::warn!("failed to resolve download destination: {error}");
+        crate::views::overlays::notification::show(
+            cx,
+            display_name.into(),
+            crate::views::overlays::notification::NotificationKind::Error,
+        );
     }
 
     pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
@@ -330,6 +371,18 @@ impl Downloads {
     fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
+            EngineNotification::DestinationChanged { id, destination } => {
+                if let Some(idx) = self.ids.iter().position(|&download_id| download_id == id) {
+                    self.filenames[idx] = destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                        .into();
+                    self.destinations[idx] = destination.to_string_lossy().to_string().into();
+                    cx.notify();
+                }
+            }
             EngineNotification::LiveTransferRemoved {
                 id,
                 action,

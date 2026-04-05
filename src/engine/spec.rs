@@ -3,8 +3,12 @@
 //! Ophelia currently supports only HTTP, but the top-level engine API should not
 //! have to grow a new method or command variant for every provider.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::engine::destination::{
+    DestinationPolicy, fallback_filename_from_url, preview_auto_destination,
+};
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
     DownloadId, PersistedDownloadSource, ProviderResumeData, SavedDownload, TransferControlSupport,
@@ -40,20 +44,22 @@ impl AddDownloadRequest {
         self.source.url()
     }
 
-    pub fn destination_in(&self, download_dir: &Path) -> PathBuf {
-        let filename = self
-            .suggested_filename
-            .clone()
-            .unwrap_or_else(|| fallback_filename_from_url(self.url()).to_string());
-        download_dir.join(filename)
+    pub fn preview_destination(&self, settings: &Settings) -> PathBuf {
+        preview_auto_destination(self.url(), self.suggested_filename.as_deref(), settings)
     }
 
-    pub fn into_spec(self, destination: PathBuf, settings: &Settings) -> DownloadSpec {
+    pub fn into_spec(self, settings: &Settings) -> io::Result<DownloadSpec> {
         match self.source {
             AddDownloadSource::Url(url) => {
-                DownloadSpec::from_user_input(url, destination, settings)
+                DownloadSpec::from_auto_request(url, self.suggested_filename, settings)
             }
         }
+    }
+
+    pub fn display_filename_hint(&self) -> String {
+        self.suggested_filename
+            .clone()
+            .unwrap_or_else(|| fallback_filename_from_url(self.url()))
     }
 }
 
@@ -74,29 +80,71 @@ impl AddDownloadSource {
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     pub destination: PathBuf,
+    destination_policy: DestinationPolicy,
     pub source: DownloadSource,
 }
 
 impl DownloadSpec {
-    pub fn http(url: String, destination: PathBuf, config: HttpDownloadConfig) -> Self {
+    pub fn http(
+        url: String,
+        destination: PathBuf,
+        destination_policy: DestinationPolicy,
+        config: HttpDownloadConfig,
+    ) -> Self {
         Self {
             destination,
+            destination_policy,
             source: DownloadSource::Http { url, config },
         }
     }
 
-    pub fn from_user_input(url: String, destination: PathBuf, settings: &Settings) -> Self {
+    pub fn from_auto_request(
+        url: String,
+        suggested_filename: Option<String>,
+        settings: &Settings,
+    ) -> io::Result<Self> {
         // Future protocols can branch here on scheme or a richer add request.
         let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
-        Self::http(
+        let destination_policy = DestinationPolicy::automatic(settings);
+        let destination = destination_policy
+            .resolve_checked(&url, Path::new(""), suggested_filename.as_deref())?
+            .destination;
+        Ok(Self::http(
             url,
             destination,
+            destination_policy,
             HttpDownloadConfig::from_settings(settings),
-        )
+        ))
+    }
+
+    pub fn from_manual_input(
+        url: String,
+        destination: PathBuf,
+        settings: &Settings,
+    ) -> io::Result<Self> {
+        let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
+        let destination_policy = DestinationPolicy::manual();
+        let destination = destination_policy
+            .resolve_checked(&url, &destination, None)?
+            .destination;
+        Ok(Self::http(
+            url,
+            destination,
+            destination_policy,
+            HttpDownloadConfig::from_settings(settings),
+        ))
     }
 
     pub fn destination(&self) -> &Path {
         &self.destination
+    }
+
+    pub fn destination_policy(&self) -> &DestinationPolicy {
+        &self.destination_policy
+    }
+
+    pub fn update_destination(&mut self, destination: PathBuf) {
+        self.destination = destination;
     }
 
     pub fn url(&self) -> &str {
@@ -168,7 +216,7 @@ impl RestoredDownload {
     ) -> Self {
         Self {
             id,
-            spec: DownloadSpec::http(url, destination, config),
+            spec: DownloadSpec::http(url, destination, DestinationPolicy::manual(), config),
             resume_data,
         }
     }
@@ -195,31 +243,24 @@ fn normalize_suggested_filename(filename: String) -> Option<String> {
     }
 }
 
-fn fallback_filename_from_url(url: &str) -> &str {
-    url.rsplit('/')
-        .next()
-        .and_then(|segment| segment.split('?').next())
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or("download")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::types::PersistedDownloadSource;
 
     #[test]
-    fn from_user_input_uses_settings_for_http_defaults() {
+    fn from_auto_request_uses_settings_for_http_defaults() {
         let settings = Settings {
             max_connections_per_download: 3,
             ..Settings::default()
         };
 
-        let spec = DownloadSpec::from_user_input(
+        let spec = DownloadSpec::from_auto_request(
             "https://example.com/file.bin".to_string(),
-            PathBuf::from("/tmp/file.bin"),
+            None,
             &settings,
-        );
+        )
+        .unwrap();
 
         match spec.source {
             DownloadSource::Http { url, config } => {
@@ -234,6 +275,7 @@ mod tests {
         let spec = DownloadSpec::http(
             "https://example.com/file.bin".to_string(),
             PathBuf::from("/tmp/file.bin"),
+            DestinationPolicy::manual(),
             HttpDownloadConfig::default(),
         );
 
@@ -290,13 +332,17 @@ mod tests {
     }
 
     #[test]
-    fn add_request_destination_prefers_suggested_filename() {
+    fn add_request_preview_destination_prefers_suggested_filename() {
         let request = AddDownloadRequest::from_url_with_suggested_filename(
             "https://example.com/file.bin".to_string(),
             Some("browser-name.zip".to_string()),
         );
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            ..Settings::default()
+        };
 
-        let destination = request.destination_in(Path::new("/tmp/downloads"));
+        let destination = request.preview_destination(&settings);
         assert_eq!(
             destination,
             PathBuf::from("/tmp/downloads/browser-name.zip")
@@ -304,11 +350,25 @@ mod tests {
     }
 
     #[test]
-    fn add_request_destination_falls_back_to_url_filename() {
+    fn add_request_preview_destination_falls_back_to_url_filename() {
         let request =
             AddDownloadRequest::from_url("https://example.com/path/file.bin?token=abc".to_string());
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            ..Settings::default()
+        };
 
-        let destination = request.destination_in(Path::new("/tmp/downloads"));
+        let destination = request.preview_destination(&settings);
         assert_eq!(destination, PathBuf::from("/tmp/downloads/file.bin"));
+    }
+
+    #[test]
+    fn add_request_display_filename_hint_prefers_suggested_filename() {
+        let request = AddDownloadRequest::from_url_with_suggested_filename(
+            "https://example.com/file.bin".to_string(),
+            Some("browser-name.zip".to_string()),
+        );
+
+        assert_eq!(request.display_filename_hint(), "browser-name.zip");
     }
 }

@@ -26,7 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::http::TokenBucket;
 use crate::engine::provider::{
-    self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDone, TaskPauseSink,
+    self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskDone,
+    TaskPauseSink,
 };
 use crate::engine::{
     ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
@@ -72,6 +73,8 @@ struct TaskEntry {
     pause_token: CancellationToken,
     /// Written by the task on pause; read by the engine after awaiting the handle.
     pause_sink: TaskPauseSink,
+    /// Updated by the task if a probe refines the destination/filename at runtime.
+    destination_sink: TaskDestinationSink,
     /// Kept for re-spawning on resume.
     spec: DownloadSpec,
 }
@@ -295,7 +298,11 @@ impl EngineActor {
         resume_data: Option<ProviderResumeData>,
     ) {
         let pause_token = CancellationToken::new();
-        let SpawnedTask { handle, pause_sink } = provider::spawn_task(
+        let SpawnedTask {
+            handle,
+            pause_sink,
+            destination_sink,
+        } = provider::spawn_task(
             id,
             &spec,
             self.progress_tx.clone(),
@@ -314,6 +321,7 @@ impl EngineActor {
                 handle,
                 pause_token,
                 pause_sink,
+                destination_sink,
                 spec,
             },
         );
@@ -374,6 +382,8 @@ impl EngineActor {
             // Task exits quickly: the biased select! in download_chunk fires on the
             // next loop iteration, flushes its write buffer, and returns.
             let _ = entry.handle.await;
+            let mut spec = entry.spec;
+            self.sync_runtime_destination(id, &mut spec, &entry.destination_sink);
             let resume_data = provider::take_resume_data(entry.pause_sink);
             if let Some(resume_data) = resume_data {
                 let downloaded_bytes = resume_data.downloaded_bytes();
@@ -385,7 +395,7 @@ impl EngineActor {
                 self.paused.insert(
                     id,
                     PausedTask {
-                        spec: entry.spec,
+                        spec,
                         resume_data: Some(resume_data),
                     },
                 );
@@ -455,12 +465,7 @@ impl EngineActor {
     }
 
     fn handle_cancel(&mut self, id: DownloadId) {
-        let Some((supports_cancel, destination)) = self.cancel_target_spec(id).map(|spec| {
-            (
-                provider::supports_control_action(spec, DownloadControlAction::Cancel),
-                spec.destination().to_path_buf(),
-            )
-        }) else {
+        let Some((supports_cancel, destination)) = self.cancel_target(id) else {
             return;
         };
         if !supports_cancel {
@@ -498,6 +503,9 @@ impl EngineActor {
     }
 
     fn handle_delete_artifact(&mut self, id: DownloadId, destination: &Path) {
+        let resolved_destination = self
+            .known_destination(id)
+            .unwrap_or_else(|| destination.to_path_buf());
         let was_active = self.tasks.remove(&id).map(|entry| {
             entry.handle.abort();
         });
@@ -514,7 +522,7 @@ impl EngineActor {
         if removed_runtime_state {
             let _ = self.db_tx.send(DbEvent::Cancelled { id });
         }
-        let artifact_state = delete_artifact_files(destination);
+        let artifact_state = delete_artifact_files(&resolved_destination);
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
@@ -542,9 +550,12 @@ impl EngineActor {
     }
 
     fn handle_task_done(&mut self, done: TaskDone) {
-        let removed_active = self.tasks.remove(&done.id).is_some();
-        if !removed_active && !self.paused.contains_key(&done.id) {
+        let active_entry = self.tasks.remove(&done.id);
+        if active_entry.is_none() && !self.paused.contains_key(&done.id) {
             return;
+        }
+        if let Some(mut entry) = active_entry {
+            self.sync_runtime_destination(done.id, &mut entry.spec, &entry.destination_sink);
         }
 
         match done.final_state.status {
@@ -654,17 +665,69 @@ impl EngineActor {
         self.paused.get(&id).map(|task| &task.spec)
     }
 
-    fn cancel_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
+    fn cancel_target(&self, id: DownloadId) -> Option<(bool, PathBuf)> {
+        if let Some(entry) = self.tasks.get(&id) {
+            return Some((
+                provider::supports_control_action(&entry.spec, DownloadControlAction::Cancel),
+                self.runtime_destination(entry),
+            ));
+        }
+        if let Some(task) = self.paused.get(&id) {
+            return Some((
+                provider::supports_control_action(&task.spec, DownloadControlAction::Cancel),
+                task.spec.destination().to_path_buf(),
+            ));
+        }
+        self.queue.iter().find(|task| task.id == id).map(|task| {
+            (
+                provider::supports_control_action(&task.spec, DownloadControlAction::Cancel),
+                task.spec.destination().to_path_buf(),
+            )
+        })
+    }
+
+    fn known_destination(&self, id: DownloadId) -> Option<PathBuf> {
         self.tasks
             .get(&id)
-            .map(|entry| &entry.spec)
-            .or_else(|| self.paused.get(&id).map(|task| &task.spec))
+            .map(|entry| self.runtime_destination(entry))
+            .or_else(|| {
+                self.paused
+                    .get(&id)
+                    .map(|task| task.spec.destination().to_path_buf())
+            })
             .or_else(|| {
                 self.queue
                     .iter()
                     .find(|task| task.id == id)
-                    .map(|task| &task.spec)
+                    .map(|task| task.spec.destination().to_path_buf())
             })
+    }
+
+    fn runtime_destination(&self, entry: &TaskEntry) -> PathBuf {
+        provider::current_destination(&entry.destination_sink)
+            .unwrap_or_else(|| entry.spec.destination().to_path_buf())
+    }
+
+    fn sync_runtime_destination(
+        &self,
+        id: DownloadId,
+        spec: &mut DownloadSpec,
+        destination_sink: &TaskDestinationSink,
+    ) {
+        let Some(destination) = provider::current_destination(destination_sink) else {
+            return;
+        };
+        if destination == spec.destination() {
+            return;
+        }
+        spec.update_destination(destination.clone());
+        let _ = self.db_tx.send(DbEvent::DestinationChanged {
+            id,
+            destination: destination.clone(),
+        });
+        let _ = self
+            .notification_tx
+            .send(EngineNotification::DestinationChanged { id, destination });
     }
 }
 

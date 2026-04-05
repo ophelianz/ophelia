@@ -2,13 +2,13 @@
 //! don't send Content-Length.
 //! Just stream to disk
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::engine::destination::{ResolvedDestination, finalize_part_file};
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
 
@@ -33,12 +33,16 @@ pub async fn single_download(
     id: DownloadId,
     client: Arc<reqwest::Client>,
     url: String,
-    part_path: PathBuf,
-    destination: PathBuf,
+    resolved_destination: ResolvedDestination,
     stall_timeout_secs: u64,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     throttle: Arc<Throttle>,
 ) -> TaskFinalState {
+    let ResolvedDestination {
+        part_path,
+        destination,
+        finalize_strategy,
+    } = resolved_destination;
     let stall_timeout = Duration::from_secs(stall_timeout_secs);
 
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
@@ -116,7 +120,7 @@ pub async fn single_download(
     }
 
     drop(file);
-    match std::fs::rename(&part_path, &destination) {
+    match finalize_part_file(&part_path, &destination, finalize_strategy) {
         Ok(()) => {
             send(DownloadStatus::Finished, downloaded, None, 0);
             task_state(DownloadStatus::Finished, downloaded, None)

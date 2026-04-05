@@ -7,6 +7,7 @@ use rust_i18n::t;
 
 use crate::app::Downloads;
 use crate::engine::AddDownloadRequest;
+use crate::settings::Settings;
 use crate::ui::prelude::*;
 
 pub struct DownloadConfirmed {
@@ -20,18 +21,21 @@ pub struct DownloadModal {
     url_input: Entity<TextField>,
     destination_input: Entity<TextField>,
     destination_edited: bool,
+    settings: Settings,
 }
 
 impl EventEmitter<DownloadConfirmed> for DownloadModal {}
 impl EventEmitter<DownloadCancelled> for DownloadModal {}
 
 impl DownloadModal {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: Settings, cx: &mut Context<Self>) -> Self {
         let url = Self::clipboard_url(cx).unwrap_or_default();
         let destination = if url.is_empty() {
             String::new()
         } else {
-            Self::destination_for(&url).to_string_lossy().to_string()
+            Self::destination_for(&url, &settings)
+                .to_string_lossy()
+                .to_string()
         };
 
         let url_input = cx.new(|cx| {
@@ -62,7 +66,9 @@ impl DownloadModal {
                     if url.is_empty() {
                         String::new()
                     } else {
-                        Self::destination_for(&url).to_string_lossy().to_string()
+                        Self::destination_for(&url, &this.settings)
+                            .to_string_lossy()
+                            .to_string()
                     }
                 };
 
@@ -82,7 +88,9 @@ impl DownloadModal {
                     if url.is_empty() {
                         String::new()
                     } else {
-                        Self::destination_for(&url).to_string_lossy().to_string()
+                        Self::destination_for(&url, &this.settings)
+                            .to_string_lossy()
+                            .to_string()
                     }
                 };
 
@@ -112,6 +120,7 @@ impl DownloadModal {
             url_input,
             destination_input,
             destination_edited: false,
+            settings,
         }
     }
 
@@ -130,10 +139,8 @@ impl DownloadModal {
         cx.notify();
     }
 
-    fn destination_for(url: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        AddDownloadRequest::from_url(url.to_string())
-            .destination_in(&PathBuf::from(home).join("Downloads"))
+    fn destination_for(url: &str, settings: &Settings) -> PathBuf {
+        AddDownloadRequest::from_url(url.to_string()).preview_destination(settings)
     }
 
     fn is_valid_url(url: &str) -> bool {
@@ -201,7 +208,8 @@ impl DownloadModalLayer {
     }
 
     fn mount_modal(&mut self, cx: &mut Context<Self>) {
-        let modal = cx.new(|cx| DownloadModal::new(cx));
+        let settings = self.downloads.read(cx).settings.clone();
+        let modal = cx.new(|cx| DownloadModal::new(settings, cx));
 
         cx.subscribe(
             &modal,

@@ -4,6 +4,7 @@ use common::*;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ophelia::engine::destination::DestinationPolicy;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
@@ -47,10 +48,12 @@ async fn pause_and_resume_completes_correctly() {
                 DownloadId(0),
                 url,
                 dest,
+                DestinationPolicy::manual(),
                 HttpDownloadConfig::default(),
                 tx1,
                 token,
                 sink,
+                Arc::new(Mutex::new(None)),
                 None,
                 unlimited_semaphore(),
                 unlimited_throttle(),
@@ -77,9 +80,11 @@ async fn pause_and_resume_completes_correctly() {
         DownloadId(0),
         url,
         dest.clone(),
+        DestinationPolicy::manual(),
         HttpDownloadConfig::default(),
         tx2,
         CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
         Some(snapshots),
         unlimited_semaphore(),

@@ -5,7 +5,9 @@ use std::{
 
 use crate::app_menu;
 use crate::ui::prelude::*;
-use gpui::{App, Context, Hsla, Render, RenderOnce, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{
+    App, Context, Hsla, Render, RenderOnce, SharedString, Window, div, prelude::*, px, relative,
+};
 use rust_i18n::t;
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;

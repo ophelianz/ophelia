@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::{
     ArtifactState, DownloadEngine, DownloadSpec, DownloadStatus, EngineNotification,
@@ -35,6 +36,7 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
+        DestinationPolicy::manual(),
         HttpDownloadConfig::default(),
     ));
 
@@ -77,6 +79,7 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
+        DestinationPolicy::manual(),
         HttpDownloadConfig::default(),
     ));
     std::fs::write(&destination, b"partial").unwrap();

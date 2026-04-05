@@ -3,6 +3,7 @@
 //! This keeps provider-specific task spawning, pause-state extraction, and
 //! persisted-source mapping out of the generic scheduler loop in `engine.rs`.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Semaphore, mpsc};
@@ -24,6 +25,7 @@ pub(super) struct TaskDone {
 pub(super) struct SpawnedTask {
     pub(super) handle: JoinHandle<()>,
     pub(super) pause_sink: TaskPauseSink,
+    pub(super) destination_sink: TaskDestinationSink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,6 +49,10 @@ pub(super) struct ProviderRuntimeContext {
 
 pub(super) enum TaskPauseSink {
     Http(Arc<Mutex<Option<Vec<ChunkSnapshot>>>>),
+}
+
+pub(super) enum TaskDestinationSink {
+    Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
 pub(super) fn capabilities(spec: &DownloadSpec, settings: &Settings) -> ProviderCapabilities {
@@ -88,6 +94,7 @@ pub(super) fn spawn_task(
     match &spec.source {
         DownloadSource::Http { url, config } => {
             let pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>> = Arc::new(Mutex::new(None));
+            let destination_sink: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
             let resume_from = resume_data
                 .as_ref()
                 .and_then(ProviderResumeData::as_http)
@@ -98,19 +105,23 @@ pub(super) fn spawn_task(
             let handle = tokio::spawn({
                 let url_ = url.clone();
                 let dest_ = spec.destination.clone();
+                let destination_policy_ = spec.destination_policy().clone();
                 let cfg_ = config.clone();
                 let pt_ = pause_token.clone();
                 let ps_ = Arc::clone(&pause_sink);
+                let ds_ = Arc::clone(&destination_sink);
                 let gt_ = Arc::clone(&runtime.global_throttle);
                 async move {
                     let final_state = download_task(
                         id,
                         url_,
                         dest_,
+                        destination_policy_,
                         cfg_,
                         progress_tx,
                         pt_,
                         ps_,
+                        ds_,
                         resume_from,
                         shared_scheduler_semaphore,
                         gt_,
@@ -122,6 +133,7 @@ pub(super) fn spawn_task(
             SpawnedTask {
                 handle,
                 pause_sink: TaskPauseSink::Http(pause_sink),
+                destination_sink: TaskDestinationSink::Http(destination_sink),
             }
         }
     }
@@ -135,6 +147,12 @@ pub(super) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResu
             .take()
             .map(HttpResumeData::new)
             .map(ProviderResumeData::Http),
+    }
+}
+
+pub(super) fn current_destination(destination_sink: &TaskDestinationSink) -> Option<PathBuf> {
+    match destination_sink {
+        TaskDestinationSink::Http(sink) => sink.lock().unwrap().clone(),
     }
 }
 
@@ -157,6 +175,7 @@ fn host_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::destination::DestinationPolicy;
     use crate::engine::http::HttpDownloadConfig;
     use std::path::PathBuf;
 
@@ -165,6 +184,7 @@ mod tests {
         let spec = DownloadSpec::http(
             "https://example.com/archive.zip".to_string(),
             PathBuf::from("/tmp/archive.zip"),
+            DestinationPolicy::manual(),
             HttpDownloadConfig::default(),
         );
 
@@ -182,6 +202,7 @@ mod tests {
         let spec = DownloadSpec::http(
             "https://user:pass@EXAMPLE.com:443/archive.zip".to_string(),
             PathBuf::from("/tmp/archive.zip"),
+            DestinationPolicy::manual(),
             HttpDownloadConfig::default(),
         );
 
@@ -199,6 +220,7 @@ mod tests {
         let spec = DownloadSpec::http(
             "https://example.com/archive.zip".to_string(),
             PathBuf::from("/tmp/archive.zip"),
+            DestinationPolicy::manual(),
             HttpDownloadConfig::default(),
         );
 

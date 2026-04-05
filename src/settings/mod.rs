@@ -13,6 +13,23 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_IPC_PORT: u16 = 7373;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CollisionStrategy {
+    #[default]
+    Rename,
+    Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DestinationRule {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub target_dir: PathBuf,
+    pub extensions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -24,6 +41,12 @@ pub struct Settings {
     pub global_speed_limit_bps: u64,
     /// Localhost port used by the browser-extension IPC server.
     pub ipc_port: u16,
+    /// How automatically-routed downloads behave when the destination already exists.
+    pub collision_strategy: CollisionStrategy,
+    /// Master switch for extension-based destination routing.
+    pub destination_rules_enabled: bool,
+    /// First-match-wins routing rules for automatically chosen destinations.
+    pub destination_rules: Vec<DestinationRule>,
 }
 
 impl Default for Settings {
@@ -35,6 +58,9 @@ impl Default for Settings {
             default_download_dir: None,
             global_speed_limit_bps: 0,
             ipc_port: DEFAULT_IPC_PORT,
+            collision_strategy: CollisionStrategy::Rename,
+            destination_rules_enabled: false,
+            destination_rules: Vec::new(),
         }
     }
 }
@@ -106,5 +132,23 @@ mod tests {
 
         assert_eq!(settings.ipc_port, DEFAULT_IPC_PORT);
         assert_eq!(settings.max_connections_per_server, 6);
+        assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
+        assert!(!settings.destination_rules_enabled);
+        assert!(settings.destination_rules.is_empty());
+    }
+
+    #[test]
+    fn missing_destination_rule_fields_deserialize_to_safe_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "ipc_port": 8123
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.ipc_port, 8123);
+        assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
+        assert!(!settings.destination_rules_enabled);
+        assert!(settings.destination_rules.is_empty());
     }
 }

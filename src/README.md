@@ -11,6 +11,7 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `engine/`: download engine, persistence, and provider-specific backend logic
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
+  - also stores destination-policy settings such as collision strategy and extension-based routing rules
 
 ## Frontend terms
 
@@ -34,6 +35,7 @@ These names are intentional too:
 - `artifact state`: whether a transfer's bytes are still present on disk, tracked separately from transfer outcome/history
 - `live transfer metadata`: provider kind, source label, and control support cached next to live rows so workflow-shaped views can mirror backend semantics cheaply
 - `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
+- `destination policy`: backend-owned resolution of automatic destination folders, collision behavior, and final-file commit semantics
 
 ## Directory map
 
@@ -82,8 +84,9 @@ These names are intentional too:
   - `mod.rs`: persisted settings model and atomic load/save
 - `engine/`
   - `engine.rs`: `DownloadEngine` handle and `EngineActor`
+  - `destination.rs`: shared destination resolution, collision handling, and final-file commit helpers
   - `provider.rs`: internal provider dispatch, provider lifecycle capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
-  - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config mapping
+  - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config plus destination-policy mapping
   - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
   - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
   - `http/`: HTTP-specific executor pipeline
@@ -100,6 +103,7 @@ When adding a new file:
 For backend code:
 
 - Put provider-neutral orchestration and shared engine types in `engine/`.
+- Put shared destination/path policy in `engine/destination.rs`, not in `app.rs`, IPC handlers, or provider-specific task files.
 - Put protocol/tool-specific download logic in a dedicated provider submodule such as `engine/http/`.
 - Put persistence and history access in `engine/state/`, not in provider modules.
 - Put transport-specific ingress in modules like `ipc.rs`, not inside provider implementations or the engine actor.
@@ -108,5 +112,5 @@ For backend code:
 For deeper backend notes:
 
 - See `docs/architecture.md` for the as-built backend architecture, current gaps, and incremental direction.
-- See `tests/` plus local `engine/provider.rs`, `ipc.rs`, `engine/state/db.rs`, and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, provider glue, engine notifications, provider-kind persistence migration, history queries, IPC ingress normalization, and DB worker event flow.
+- See `tests/` plus local `engine/destination.rs`, `engine/provider.rs`, `ipc.rs`, `engine/state/db.rs`, and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, destination-policy behavior, provider glue, engine notifications, provider-kind persistence migration, history queries, IPC ingress normalization, and DB worker event flow.
 - Backend history now keeps transfer outcome and artifact presence separate, which is the basis for "delete file but keep history" behavior.

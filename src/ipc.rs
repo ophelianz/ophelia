@@ -104,8 +104,9 @@ async fn add_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
     use serde_json::json;
-    use std::path::Path;
+    use std::path::PathBuf;
 
     async fn spawn_test_server(
         tx: mpsc::UnboundedSender<AddDownloadRequest>,
@@ -162,8 +163,11 @@ mod tests {
             Some("browser-name.mp4")
         );
         assert_eq!(
-            request.destination_in(Path::new("/tmp/downloads")),
-            Path::new("/tmp/downloads/browser-name.mp4")
+            request.preview_destination(&Settings {
+                default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+                ..Settings::default()
+            }),
+            PathBuf::from("/tmp/downloads/browser-name.mp4")
         );
     }
 

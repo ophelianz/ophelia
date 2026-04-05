@@ -21,6 +21,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::alloc::preallocate;
 use crate::engine::chunk;
+use crate::engine::destination::{
+    DestinationPolicy, FinalizeStrategy, ResolvedDestination, finalize_part_file, part_path_for,
+};
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::http::throttle::{Throttle, TokenBucket};
 use crate::engine::types::{ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate};
@@ -68,6 +71,7 @@ struct ResolvedChunks {
     file: std::fs::File,
     part_path: PathBuf,
     destination: PathBuf,
+    finalize_strategy: FinalizeStrategy,
 }
 
 async fn resolve_chunks(
@@ -76,9 +80,11 @@ async fn resolve_chunks(
     chunk_client: &Arc<reqwest::Client>,
     url: &str,
     destination: PathBuf,
+    destination_policy: &DestinationPolicy,
     config: &HttpDownloadConfig,
     id: DownloadId,
     progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
+    destination_sink: &Arc<Mutex<Option<PathBuf>>>,
     throttle: Arc<Throttle>,
 ) -> Result<ResolvedChunks, TaskFinalState> {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
@@ -117,6 +123,7 @@ async fn resolve_chunks(
                     return Err(task_state(DownloadStatus::Error, 0, Some(total)));
                 }
             };
+            *destination_sink.lock().unwrap() = Some(destination.clone());
             tracing::info!(
                 total_bytes = total,
                 chunks = cl.len(),
@@ -128,6 +135,7 @@ async fn resolve_chunks(
                 file,
                 part_path,
                 destination,
+                finalize_strategy: destination_policy.finalize_strategy(),
             })
         }
         None => {
@@ -145,16 +153,27 @@ async fn resolve_chunks(
                 "probe complete"
             );
 
-            // Prefer the server's Content-Disposition filename over the URL-derived one.
-            let destination = match probe_result.filename {
-                Some(ref name) => {
-                    let mut d = destination;
-                    d.set_file_name(name);
-                    d
+            let resolved_destination = match destination_policy.resolve_checked(
+                url,
+                &destination,
+                probe_result.filename.as_deref(),
+            ) {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    send(DownloadStatus::Error, 0, probe_result.content_length);
+                    return Err(task_state(
+                        DownloadStatus::Error,
+                        0,
+                        probe_result.content_length,
+                    ));
                 }
-                None => destination,
             };
-            let part_path = part_path_for(&destination);
+            let ResolvedDestination {
+                part_path,
+                destination,
+                finalize_strategy,
+            } = resolved_destination;
+            *destination_sink.lock().unwrap() = Some(destination.clone());
 
             let total_bytes = match probe_result.content_length {
                 Some(len) => len,
@@ -164,8 +183,11 @@ async fn resolve_chunks(
                         id,
                         Arc::clone(chunk_client),
                         url.to_owned(),
-                        part_path,
-                        destination,
+                        ResolvedDestination {
+                            part_path,
+                            destination,
+                            finalize_strategy,
+                        },
                         config.stall_timeout_secs,
                         progress_tx.clone(),
                         throttle,
@@ -212,20 +234,10 @@ async fn resolve_chunks(
                 file,
                 part_path,
                 destination,
+                finalize_strategy,
             })
         }
     }
-}
-
-/// Derives the `.ophelia_part` staging path from the final destination.
-fn part_path_for(destination: &std::path::Path) -> PathBuf {
-    let mut p = destination.to_path_buf();
-    let name = p
-        .file_name()
-        .map(|n| format!("{}.ophelia_part", n.to_string_lossy()))
-        .unwrap_or_else(|| "download.ophelia_part".into());
-    p.set_file_name(name);
-    p
 }
 
 /// Shared atomic arrays that back every slot (initial + steal/hedge budget).
@@ -298,6 +310,7 @@ fn finalize_download(
     slots: &SlotArrays,
     part_path: &std::path::Path,
     destination: &std::path::Path,
+    finalize_strategy: FinalizeStrategy,
     total_bytes: u64,
     pause_sink: &Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
     send: &dyn Fn(DownloadStatus, u64, Option<u64>, u64),
@@ -326,7 +339,7 @@ fn finalize_download(
         );
         task_state(DownloadStatus::Paused, total_downloaded, Some(total_bytes))
     } else if all_ok {
-        match std::fs::rename(part_path, destination) {
+        match finalize_part_file(part_path, destination, finalize_strategy) {
             Ok(()) => {
                 tracing::info!(total_bytes, "download finished");
                 send(DownloadStatus::Finished, total_bytes, Some(total_bytes), 0);
@@ -466,17 +479,19 @@ async fn chunk_retry_loop(
 /// previously paused download.
 #[tracing::instrument(
     name = "download",
-    skip(config, progress_tx, pause_token, pause_sink, resume_from),
+    skip(config, progress_tx, pause_token, pause_sink, destination_sink, resume_from),
     fields(id = id.0, %url)
 )]
 pub async fn download_task(
     id: DownloadId,
     url: String,
     destination: PathBuf,
+    destination_policy: DestinationPolicy,
     config: HttpDownloadConfig,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     pause_token: CancellationToken,
     pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
+    destination_sink: Arc<Mutex<Option<PathBuf>>>,
     resume_from: Option<Vec<ChunkSnapshot>>,
     server_semaphore: Arc<Semaphore>,
     global_throttle: Arc<TokenBucket>,
@@ -520,9 +535,11 @@ pub async fn download_task(
         &chunk_client,
         &url,
         destination,
+        &destination_policy,
         &config,
         id,
         &progress_tx,
+        &destination_sink,
         Arc::clone(&throttle),
     )
     .await
@@ -536,6 +553,7 @@ pub async fn download_task(
         file,
         part_path,
         destination,
+        finalize_strategy,
     } = resolved;
 
     let file = Arc::new(file);
@@ -743,6 +761,7 @@ pub async fn download_task(
         &slots,
         &part_path,
         &destination,
+        finalize_strategy,
         total_bytes,
         &pause_sink,
         &send,

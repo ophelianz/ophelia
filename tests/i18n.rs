@@ -6,6 +6,6 @@ use rust_i18n::t;
 fn english_translations_resolve() {
     rust_i18n::set_locale("en");
 
-    assert_eq!(t!("sidebar.downloads").to_string(), "Downloads");
+    assert_eq!(t!("sidebar.downloads").to_string(), "Transfers");
     assert_eq!(t!("menu.settings").to_string(), "Settings");
 }

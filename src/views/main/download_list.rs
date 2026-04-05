@@ -27,7 +27,10 @@ impl TransferFilter {
     fn matches(self, status: DownloadStatus) -> bool {
         match self {
             Self::All => true,
-            Self::Active => matches!(status, DownloadStatus::Downloading | DownloadStatus::Pending),
+            Self::Active => matches!(
+                status,
+                DownloadStatus::Downloading | DownloadStatus::Pending
+            ),
             Self::Finished => status == DownloadStatus::Finished,
             Self::Paused => status == DownloadStatus::Paused,
             Self::Failed => matches!(status, DownloadStatus::Error | DownloadStatus::Cancelled),

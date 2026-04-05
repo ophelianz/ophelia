@@ -235,6 +235,12 @@ impl Db {
                     ],
                 )?;
             }
+            DbEvent::DestinationChanged { id, destination } => {
+                self.conn.execute(
+                    "UPDATE downloads SET destination = ?1 WHERE id = ?2",
+                    params![destination.to_string_lossy().as_ref(), id.0 as i64],
+                )?;
+            }
             DbEvent::Queued { id } => {
                 self.conn.execute(
                     "UPDATE downloads SET status = 'pending' WHERE id = ?1",
@@ -558,6 +564,47 @@ mod tests {
         let (downloads, max_id) = db.load_for_restore().unwrap();
         assert_eq!(max_id, 1);
         assert!(downloads.is_empty());
+    }
+
+    #[test]
+    fn destination_changed_updates_restore_and_history_views() {
+        let (_dir, db_path) = temp_db_path();
+        let db = Db::open_at(&db_path).unwrap();
+
+        db.handle(DbEvent::Added {
+            id: DownloadId(11),
+            source: PersistedDownloadSource::Http {
+                url: "https://example.com/download".to_string(),
+            },
+            destination: PathBuf::from("/tmp/download"),
+        })
+        .unwrap();
+        db.handle(DbEvent::DestinationChanged {
+            id: DownloadId(11),
+            destination: PathBuf::from("/tmp/Movies/movie.mp4"),
+        })
+        .unwrap();
+        db.handle(DbEvent::Paused {
+            id: DownloadId(11),
+            downloaded_bytes: 10,
+            resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
+                ChunkSnapshot {
+                    start: 0,
+                    end: 100,
+                    downloaded: 10,
+                },
+            ]))),
+        })
+        .unwrap();
+
+        let history = HistoryReader::open_at(&db_path).unwrap();
+        let rows = history.load(HistoryFilter::Paused, "").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].destination, "/tmp/Movies/movie.mp4");
+
+        let (saved, _) = db.load_for_restore().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].destination, PathBuf::from("/tmp/Movies/movie.mp4"));
     }
 
     #[test]
