@@ -1,3 +1,18 @@
+/***************************************************
+** This file is part of Ophelia, distributed under the
+** terms of the GPL License, version 3 or later.
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs, do no evil and behave plz )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 //! Internal provider dispatch helpers used by the engine actor.
 //!
 //! This keeps provider-specific task spawning, pause-state extraction, and

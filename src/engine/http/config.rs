@@ -1,3 +1,18 @@
+/***************************************************
+** This file is part of Ophelia, distributed under the
+** terms of the GPL License, version 3 or later.
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs, do no evil and behave plz )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 //! Per-download configuration for HTTP/HTTPS downloads.
 //! Fields here are intentionally HTTP-specific: connection count, stall detection,
 //! and retry behavior are concepts that don't apply to all protocols.

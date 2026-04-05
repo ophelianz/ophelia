@@ -1,3 +1,18 @@
+/***************************************************
+** This file is part of Ophelia, distributed under the
+** terms of the GPL License, version 3 or later.
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs, do no evil and behave plz )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 //! Work stealing and hedging - the two forms of work redistribution.
 //!
 //! `try_steal` splits the largest active chunk when a worker goes idle.
