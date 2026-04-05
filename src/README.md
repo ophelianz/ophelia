@@ -11,8 +11,8 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `engine/`: download engine, persistence, and provider-specific backend logic
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
-  - also stores destination-policy settings such as collision strategy and extension-based routing rules
-  - persists to the platform's standard config directory rather than a single macOS-only path
+    - also stores destination-policy settings such as collision strategy and extension-based routing rules
+    - persists to the platform's standard config directory
 
 ## Frontend terms
 
@@ -43,54 +43,54 @@ These names are intentional too:
 ### `ui/`
 
 - `primitives/`
-  - `icon.rs`: icon rendering helpers and icon names
-  - `logo.rs`: Ophelia logo element
+    - `icon.rs`: icon rendering helpers and icon names
+    - `logo.rs`: Ophelia logo element
 - `controls/`
-  - `text_field.rs`: custom text input
-  - `number_input.rs`: numeric input control
-  - `directory_input.rs`: directory-picker input control
+    - `text_field.rs`: custom text input
+    - `number_input.rs`: numeric input control
+    - `directory_input.rs`: directory-picker input control
 - `chrome/`
-  - `window_header.rs`: shared titlebar/header chrome
-  - `app_menu_bar.rs`: Linux/Windows client-side app menu bar
-  - `modal.rs`: reusable modal shell
+    - `window_header.rs`: shared titlebar/header chrome
+    - `app_menu_bar.rs`: Linux/Windows client-side app menu bar
+    - `modal.rs`: reusable modal shell
 - `prelude.rs`: shared UI imports for GPUI-heavy files
 
 ### `views/`
 
 - `main/`
-  - `main_window.rs`: root application window
-  - `sidebar.rs`: top-level `Transfers` / `History` navigation
-  - `download_list.rs`: live transfers surface with internal status filters
-  - `download_row.rs`: individual download row pieces
-  - `history.rs`: global history view and filter chips
-  - `stats_bar.rs`: throughput and status summary card
+    - `main_window.rs`: root application window
+    - `sidebar.rs`: top-level `Transfers` / `History` navigation
+    - `download_list.rs`: live transfers surface with internal status filters
+    - `download_row.rs`: individual download row pieces
+    - `history.rs`: global history view and filter chips
+    - `stats_bar.rs`: throughput and status summary card
 - `settings/`
-  - `mod.rs`: settings window entity
-  - `general.rs`: general settings section
-  - `network.rs`: network settings section
+    - `mod.rs`: settings window entity
+    - `general.rs`: general settings section
+    - `network.rs`: network settings section
 - `overlays/`
-  - `download_modal.rs`: add-download overlay
-  - `about_modal.rs`: about overlay
-  - `notification.rs`: transient notification popup
+    - `download_modal.rs`: add-download overlay
+    - `about_modal.rs`: about overlay
+    - `notification.rs`: transient notification popup
 
 ### Backend-adjacent root
 
 - `app.rs`: GPUI-facing download model, backend service owner, progress polling, and history bridge
-  - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
-  - also caches provider kind, source label, and control support for each live row
-  - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
-  - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
+    - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
+    - also caches provider kind, source label, and control support for each live row
+    - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
+    - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
 - `ipc.rs`: local Axum server plus app-owned IPC ingress handle
 - `settings/`
-  - `mod.rs`: persisted settings model and atomic load/save
+    - `mod.rs`: persisted settings model and atomic load/save
 - `engine/`
-  - `engine.rs`: `DownloadEngine` handle and `EngineActor`
-  - `destination.rs`: shared destination resolution, collision handling, and final-file commit helpers
-  - `provider.rs`: internal provider dispatch, provider lifecycle capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
-  - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config plus destination-policy mapping
-  - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
-  - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
-  - `http/`: HTTP-specific executor pipeline
+    - `engine.rs`: `DownloadEngine` handle and `EngineActor`
+    - `destination.rs`: shared destination resolution, collision handling, and final-file commit helpers
+    - `provider.rs`: internal provider dispatch, provider lifecycle capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
+    - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config plus destination-policy mapping
+    - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
+    - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
+    - `http/`: HTTP-specific executor pipeline
 
 ## Placement rules
 
