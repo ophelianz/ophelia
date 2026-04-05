@@ -9,7 +9,7 @@ use super::{DestinationRuleEditor, SettingsWindow};
 pub(super) fn render(this: &SettingsWindow, cx: &mut Context<SettingsWindow>) -> gpui::Div {
     div()
         .flex_col()
-        .gap(px(24.0))
+        .gap(px(Spacing::SETTINGS_SECTION_GAP))
         .child(super::setting_row(
             t!("settings.destinations.download_folder_label").to_string(),
             t!("settings.destinations.download_folder_description").to_string(),
@@ -33,7 +33,7 @@ fn render_collision_strategy(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     h_flex()
-        .gap(px(8.0))
+        .gap(px(Spacing::SETTINGS_INLINE_GAP))
         .child(collision_strategy_button(
             this,
             CollisionStrategy::Rename,
@@ -64,9 +64,9 @@ fn collision_strategy_button(
 
     div()
         .id(id)
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(8.0))
+        .px(px(Chrome::MENU_ITEM_PADDING_X))
+        .py(px(Chrome::MENU_ITEM_PADDING_Y))
+        .rounded(px(Chrome::BUTTON_RADIUS))
         .border_1()
         .border_color(if selected {
             Colors::ring()
@@ -122,13 +122,13 @@ fn render_destination_rules_section(
 
     div()
         .flex_col()
-        .gap(px(12.0))
+        .gap(px(Spacing::SETTINGS_PANEL_GAP))
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(16.0))
+                .gap(px(Spacing::SECTION_GAP))
                 .child(
                     div()
                         .flex_1()
@@ -157,7 +157,7 @@ fn render_destination_rules_section(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(Spacing::SETTINGS_INLINE_GAP))
                         .child(
                             action_button(
                                 "restore-default-destination-rules",
@@ -187,9 +187,9 @@ fn render_destination_rules_section(
         .child(
             div()
                 .flex_col()
-                .gap(px(12.0))
-                .p(px(16.0))
-                .rounded(px(12.0))
+                .gap(px(Spacing::SETTINGS_PANEL_GAP))
+                .p(px(Chrome::SETTINGS_SECTION_PANEL_PADDING))
+                .rounded(px(Chrome::PANEL_RADIUS))
                 .border_1()
                 .border_color(Colors::border())
                 .bg(if this.settings.destination_rules_enabled {
@@ -200,7 +200,7 @@ fn render_destination_rules_section(
                 .when(this.destination_rule_editors.is_empty(), |this| {
                     this.child(
                         div()
-                            .py(px(12.0))
+                            .py(px(Chrome::MENU_ITEM_PADDING_Y))
                             .text_sm()
                             .text_color(Colors::muted_foreground())
                             .child(t!("settings.destinations.destination_rules_empty").to_string()),
@@ -235,15 +235,15 @@ fn action_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(8.0))
+        .px(px(Chrome::MENU_ITEM_PADDING_X))
+        .py(px(Chrome::MENU_ITEM_PADDING_Y))
+        .rounded(px(Chrome::BUTTON_RADIUS))
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::background())
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(Spacing::SETTINGS_INLINE_GAP))
         .text_sm()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::foreground())
@@ -267,9 +267,9 @@ fn render_destination_rule_row(
 
     div()
         .flex_col()
-        .gap(px(12.0))
-        .p(px(14.0))
-        .rounded(px(10.0))
+        .gap(px(Spacing::SETTINGS_PANEL_GAP))
+        .p(px(Chrome::SETTINGS_RULE_CARD_PADDING))
+        .rounded(px(Chrome::CARD_RADIUS))
         .border_1()
         .border_color(if rule.enabled {
             Colors::border()
@@ -281,7 +281,7 @@ fn render_destination_rule_row(
             div()
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(Spacing::SETTINGS_PANEL_GAP))
                 .child(super::destination_rule_icon_picker::render(
                     this, index, rule, cx,
                 ))

@@ -345,7 +345,7 @@ impl Render for SettingsWindow {
                             .id("settings-content")
                             .flex_1()
                             .overflow_y_scroll()
-                            .p(px(32.0))
+                            .p(px(Spacing::SETTINGS_CONTENT_PADDING))
                             .child(self.render_content(cx)),
                     ),
             )
@@ -410,7 +410,7 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
 
         div()
-            .w(px(160.0))
+            .w(px(Spacing::SETTINGS_SIDEBAR_WIDTH))
             .flex_shrink_0()
             .border_r_1()
             .border_color(Colors::border())
@@ -441,15 +441,15 @@ impl SettingsWindow {
 }
 
 pub(super) fn setting_directory_input(input: Entity<DirectoryInput>) -> gpui::Div {
-    div().w(px(220.0)).child(input)
+    div().w(px(Spacing::SETTINGS_CONTROL_WIDTH)).child(input)
 }
 
 pub(super) fn setting_dropdown_select(input: Entity<DropdownSelect>) -> gpui::Div {
-    div().w(px(220.0)).child(input)
+    div().w(px(Spacing::SETTINGS_CONTROL_WIDTH)).child(input)
 }
 
 pub(super) fn setting_number_input(input: Entity<NumberInput>) -> gpui::Div {
-    div().w(px(220.0)).child(input)
+    div().w(px(Spacing::SETTINGS_CONTROL_WIDTH)).child(input)
 }
 
 fn parse_path_input(input: &str) -> Option<std::path::PathBuf> {

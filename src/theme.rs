@@ -84,6 +84,14 @@ impl Spacing {
     pub const ROW_PADDING_X: f32 = 20.0;
     pub const ROW_PADDING_Y: f32 = 14.0;
     pub const SECTION_LABEL_BOTTOM_MARGIN: f32 = 14.0;
+
+    pub const SETTINGS_SECTION_GAP: f32 = 24.0;
+    pub const SETTINGS_GROUP_GAP: f32 = 20.0;
+    pub const SETTINGS_PANEL_GAP: f32 = 12.0;
+    pub const SETTINGS_INLINE_GAP: f32 = 8.0;
+    pub const SETTINGS_CONTENT_PADDING: f32 = 32.0;
+    pub const SETTINGS_CONTROL_WIDTH: f32 = 220.0;
+    pub const SETTINGS_SIDEBAR_WIDTH: f32 = 160.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +127,13 @@ impl Chrome {
     pub const MENU_ITEM_PADDING_X: f32 = 10.0;
     pub const MENU_ITEM_PADDING_Y: f32 = 8.0;
     pub const MENU_ITEM_CHECK_WIDTH: f32 = 12.0;
+
+    pub const SETTINGS_RULE_CARD_PADDING: f32 = 14.0;
+    pub const SETTINGS_SECTION_PANEL_PADDING: f32 = 16.0;
+    pub const SETTINGS_ICON_TRIGGER_SIZE: f32 = 36.0;
+    pub const SETTINGS_ICON_PICKER_WIDTH: f32 = 252.0;
+    pub const SETTINGS_ICON_PICKER_PADDING: f32 = 12.0;
+    pub const SETTINGS_ICON_TILE_SIZE: f32 = 40.0;
 
     pub const MODAL_PADDING: f32 = 28.0;
     pub const MODAL_STACK_GAP: f32 = 18.0;

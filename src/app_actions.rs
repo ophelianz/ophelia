@@ -59,7 +59,7 @@ fn open_settings(_: &app_menu::OpenSettings, cx: &mut App) {
         return;
     };
 
-    let bounds = Bounds::centered(None, size(px(960.), px(600.)), cx);
+    let bounds = Bounds::centered(None, size(px(1280.), px(600.)), cx);
     let Ok(settings_window) = cx.open_window(platform::window_options(bounds), |_, cx| {
         cx.new(|cx| SettingsWindow::new(cx))
     }) else {

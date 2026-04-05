@@ -1,12 +1,14 @@
 use gpui::{ParentElement, Styled, div, px};
 use rust_i18n::t;
 
+use crate::theme::Spacing;
+
 use super::SettingsWindow;
 
 pub(super) fn render(this: &SettingsWindow) -> gpui::Div {
     div()
         .flex_col()
-        .gap(px(20.0))
+        .gap(px(Spacing::SETTINGS_GROUP_GAP))
         .child(super::setting_row(
             t!("settings.network.ipc_port_label").to_string(),
             t!("settings.network.ipc_port_description").to_string(),

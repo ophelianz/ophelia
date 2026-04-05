@@ -22,8 +22,8 @@ pub(super) fn render(
 
     let button = div()
         .id(format!("destination-rule-icon-trigger-{index}"))
-        .size(px(36.0))
-        .rounded(px(10.0))
+        .size(px(Chrome::SETTINGS_ICON_TRIGGER_SIZE))
+        .rounded(px(Chrome::CARD_RADIUS))
         .border_1()
         .border_color(if is_open {
             Colors::ring()
@@ -72,16 +72,16 @@ fn render_popup(
     div()
         .id(format!("destination-rule-icon-popup-{index}"))
         .occlude()
-        .w(px(252.0))
-        .p(px(12.0))
-        .rounded(px(12.0))
+        .w(px(Chrome::SETTINGS_ICON_PICKER_WIDTH))
+        .p(px(Chrome::SETTINGS_ICON_PICKER_PADDING))
+        .rounded(px(Chrome::PANEL_RADIUS))
         .border_1()
         .border_color(Colors::border())
         .bg(Colors::card())
         .shadow_lg()
         .flex()
         .flex_col()
-        .gap(px(12.0))
+        .gap(px(Spacing::SETTINGS_PANEL_GAP))
         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
             this.close_destination_rule_icon_picker(cx);
         }))
@@ -89,7 +89,7 @@ fn render_popup(
             div()
                 .flex()
                 .flex_wrap()
-                .gap(px(8.0))
+                .gap(px(Spacing::SETTINGS_INLINE_GAP))
                 .child(icon_option(
                     index,
                     None,
@@ -125,8 +125,8 @@ fn icon_option(
 
     div()
         .id(button_id)
-        .size(px(40.0))
-        .rounded(px(10.0))
+        .size(px(Chrome::SETTINGS_ICON_TILE_SIZE))
+        .rounded(px(Chrome::CARD_RADIUS))
         .border_1()
         .border_color(if selected {
             Colors::ring()

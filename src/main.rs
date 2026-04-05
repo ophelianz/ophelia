@@ -40,7 +40,7 @@ fn run() {
                 )])
                 .unwrap();
 
-            let bounds = Bounds::centered(None, size(px(1280.), px(780.)), cx);
+            let bounds = Bounds::centered(None, size(px(1280.), px(720.)), cx);
             let main_window = cx
                 .open_window(platform::window_options(bounds), |_, cx| {
                     cx.new(|cx| MainWindow::new(cx))
