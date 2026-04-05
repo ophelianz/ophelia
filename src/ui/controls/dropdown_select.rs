@@ -32,6 +32,10 @@ pub struct DropdownSelect {
     open: bool,
 }
 
+pub struct DropdownSelectChanged;
+
+impl gpui::EventEmitter<DropdownSelectChanged> for DropdownSelect {}
+
 impl DropdownSelect {
     pub fn new(
         id: impl Into<ElementId>,
@@ -73,8 +77,12 @@ impl DropdownSelect {
     }
 
     fn select(&mut self, value: SharedString, cx: &mut Context<Self>) {
+        let changed = self.selected_value != value;
         self.selected_value = value;
         self.open = false;
+        if changed {
+            cx.emit(DropdownSelectChanged);
+        }
         cx.notify();
     }
 

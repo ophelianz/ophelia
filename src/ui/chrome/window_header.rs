@@ -10,6 +10,7 @@ use crate::ui::prelude::*;
 pub struct WindowHeader {
     title: Option<SharedString>,
     leading: Option<AnyElement>,
+    trailing: Option<AnyElement>,
     show_window_controls: bool,
 }
 
@@ -18,6 +19,7 @@ impl WindowHeader {
         Self {
             title: Some(title.into()),
             leading: None,
+            trailing: None,
             show_window_controls: !cfg!(target_os = "macos"),
         }
     }
@@ -26,12 +28,18 @@ impl WindowHeader {
         Self {
             title: None,
             leading: None,
+            trailing: None,
             show_window_controls: !cfg!(target_os = "macos"),
         }
     }
 
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self
+    }
+
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
         self
     }
 }
@@ -114,6 +122,7 @@ impl RenderOnce for WindowHeader {
                                     )
                                 }),
                         )
+                        .when_some(self.trailing.take(), |this, trailing| this.child(trailing))
                         .when(self.show_window_controls, |this| {
                             this.child(window_controls())
                         }),

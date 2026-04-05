@@ -63,6 +63,7 @@ impl Section {
 // ---------------------------------------------------------------------------
 
 pub struct SettingsWindow {
+    initial_settings: Settings,
     pub settings: Settings,
     active: Section,
     pub(super) language_select: Entity<DropdownSelect>,
@@ -82,6 +83,7 @@ impl EventEmitter<SettingsClosed> for SettingsWindow {}
 impl SettingsWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
+        let initial_settings = settings.clone();
         let selected_language = settings.resolved_language().to_string();
         let fallback_download_dir = settings.download_dir().to_string_lossy().to_string();
         let destination_rule_editors = settings
@@ -90,16 +92,26 @@ impl SettingsWindow {
             .map(|rule| DestinationRuleEditor::from_rule(rule, cx))
             .collect::<Vec<_>>();
         let next_destination_rule_index = next_destination_rule_index(&settings.destination_rules);
+        let language_select = cx.new(|cx| {
+            DropdownSelect::new(
+                "settings-language",
+                language_options(),
+                selected_language.clone(),
+                cx,
+            )
+        });
+
+        cx.subscribe(
+            &language_select,
+            |_this: &mut Self, _, _: &DropdownSelectChanged, cx| {
+                cx.notify();
+            },
+        )
+        .detach();
 
         Self {
-            language_select: cx.new(|cx| {
-                DropdownSelect::new(
-                    "settings-language",
-                    language_options(),
-                    selected_language.clone(),
-                    cx,
-                )
-            }),
+            initial_settings,
+            language_select,
             download_dir_input: cx.new(|cx| {
                 DirectoryInput::new(
                     fallback_download_dir.clone(),
@@ -165,42 +177,53 @@ impl SettingsWindow {
         }
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
-        self.settings.language =
+    fn draft_settings(&self, cx: &mut Context<Self>) -> Settings {
+        let mut settings = self.settings.clone();
+        settings.language =
             canonical_language(self.language_select.read(cx).selected_value()).to_string();
-        self.settings.default_download_dir =
+        settings.default_download_dir =
             parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref());
-        self.settings.global_speed_limit_bps = parse_speed_limit_input(
+        settings.global_speed_limit_bps = parse_speed_limit_input(
             self.global_speed_limit_input.read(cx).text(),
-            self.settings.global_speed_limit_bps,
+            settings.global_speed_limit_bps,
         );
-        self.settings.ipc_port =
-            parse_port_input(self.ipc_port_input.read(cx).text(), self.settings.ipc_port);
-        let fallback_download_dir = self.settings.download_dir();
-        self.settings.destination_rules = self
+        settings.ipc_port =
+            parse_port_input(self.ipc_port_input.read(cx).text(), settings.ipc_port);
+        let fallback_download_dir = settings.download_dir();
+        settings.destination_rules = self
             .destination_rule_editors
             .iter()
             .enumerate()
             .map(|(index, rule)| rule.to_rule(index, &fallback_download_dir, cx))
             .collect();
-        self.settings.max_concurrent_downloads = parse_bounded_usize_input(
+        settings.max_concurrent_downloads = parse_bounded_usize_input(
             self.concurrent_downloads_input.read(cx).text(),
-            self.settings.max_concurrent_downloads,
+            settings.max_concurrent_downloads,
             1,
             10,
         );
-        self.settings.max_connections_per_download = parse_bounded_usize_input(
+        settings.max_connections_per_download = parse_bounded_usize_input(
             self.connections_per_download_input.read(cx).text(),
-            self.settings.max_connections_per_download,
+            settings.max_connections_per_download,
             1,
             16,
         );
-        self.settings.max_connections_per_server = parse_bounded_usize_input(
+        settings.max_connections_per_server = parse_bounded_usize_input(
             self.connections_per_server_input.read(cx).text(),
-            self.settings.max_connections_per_server,
+            settings.max_connections_per_server,
             1,
             16,
         );
+        settings
+    }
+
+    fn needs_restart(&self, cx: &mut Context<Self>) -> bool {
+        let draft = self.draft_settings(cx);
+        draft.resolved_language() != self.initial_settings.resolved_language()
+    }
+
+    fn save(&mut self, cx: &mut Context<Self>) {
+        self.settings = self.draft_settings(cx);
         let _ = self.settings.save();
         cx.emit(SettingsClosed {
             settings: self.settings.clone(),
@@ -210,6 +233,11 @@ impl SettingsWindow {
     fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save(cx);
         window.remove_window();
+    }
+
+    fn save_and_restart(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx);
+        cx.restart();
     }
 
     pub(super) fn set_collision_strategy(
@@ -318,6 +346,19 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let needs_restart = self.needs_restart(cx);
+        let header = if cfg!(target_os = "macos") {
+            WindowHeader::new(t!("settings.title").to_string())
+                .leading(div().w(px(24.0)))
+                .when(needs_restart, |this| {
+                    this.trailing(self.restart_required_indicator(cx))
+                })
+        } else {
+            WindowHeader::new(t!("settings.title").to_string()).when(needs_restart, |this| {
+                this.trailing(self.restart_required_indicator(cx))
+            })
+        };
+
         div()
             .flex()
             .flex_col()
@@ -325,13 +366,7 @@ impl Render for SettingsWindow {
             .bg(Colors::background())
             .text_color(Colors::foreground())
             .font_family(APP_FONT_FAMILY)
-            .child(if cfg!(target_os = "macos") {
-                WindowHeader::new(t!("settings.title").to_string())
-                    .leading(div().w(px(24.0)))
-                    .into_any_element()
-            } else {
-                WindowHeader::new(t!("settings.title").to_string()).into_any_element()
-            })
+            .child(header)
             .child(
                 div()
                     .flex()
@@ -348,6 +383,30 @@ impl Render for SettingsWindow {
                             .p(px(Spacing::SETTINGS_CONTENT_PADDING))
                             .child(self.render_content(cx)),
                     ),
+            )
+    }
+}
+
+impl SettingsWindow {
+    fn restart_required_indicator(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .items_center()
+            .gap(px(Spacing::SETTINGS_INLINE_GAP))
+            .child(
+                Button::new(
+                    "settings-restart-required",
+                    t!("settings.restart_required_button").to_string(),
+                )
+                .compact()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.save_and_restart(window, cx);
+                })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(Colors::muted_foreground())
+                    .child(t!("settings.restart_required_suffix").to_string()),
             )
     }
 }

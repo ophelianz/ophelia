@@ -103,6 +103,9 @@ pub struct Chrome;
 impl Chrome {
     pub const CONTROL_RADIUS: f32 = 6.0;
     pub const BUTTON_RADIUS: f32 = 8.0;
+    pub const BUTTON_HEIGHT: f32 = 32.0;
+    pub const BUTTON_PADDING_X: f32 = 14.0;
+    pub const BUTTON_COMPACT_PADDING_X: f32 = 10.0;
     pub const CARD_RADIUS: f32 = 10.0;
     pub const PANEL_RADIUS: f32 = 12.0;
     pub const MODAL_RADIUS: f32 = 14.0;

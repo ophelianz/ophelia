@@ -4,6 +4,7 @@ pub use crate::theme::*;
 pub use crate::ui::chrome::app_menu_bar::*;
 pub use crate::ui::chrome::modal::*;
 pub use crate::ui::chrome::window_header::*;
+pub use crate::ui::controls::button::*;
 pub use crate::ui::controls::directory_input::*;
 pub use crate::ui::controls::dropdown_select::*;
 pub use crate::ui::controls::number_input::*;

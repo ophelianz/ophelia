@@ -83,9 +83,11 @@ settings:
     general:
         section: "General"
         language_label: "Language"
-        language_description: "Choose the display language for the app interface and menus. Applies immediately."
+        language_description: "Choose the display language for the app interface and menus."
         language_option_english: "English"
         language_option_simplified_chinese: "Simplified Chinese"
+    restart_required_button: "Restart"
+    restart_required_suffix: "required to apply settings"
     destinations:
         section: "Destinations"
         download_folder_label: "Fallback Download Folder"
@@ -126,13 +128,13 @@ settings:
     network:
         section: "Network"
         ipc_port_label: "IPC Port"
-        ipc_port_description: "Localhost port used by the browser extension and other local IPC clients. Applies immediately."
+        ipc_port_description: "Localhost port used by the browser extension and other local IPC clients."
         ipc_port_placeholder: "7373"
         global_speed_limit_label: "Global Speed Limit"
         global_speed_limit_description: "Caps total download bandwidth across active and future downloads. Enter KB/s, or 0 for unlimited."
         global_speed_limit_placeholder: "0"
         concurrent_downloads_label: "Concurrent Downloads"
-        concurrent_downloads_description: "Maximum number of downloads running at the same time. Applies immediately to queue scheduling."
+        concurrent_downloads_description: "Maximum number of downloads running at the same time."
         concurrent_downloads_placeholder: "3"
         connections_per_download_label: "Connections per Download"
         connections_per_download_description: "Parallel chunk connections used for newly started or resumed downloads."
