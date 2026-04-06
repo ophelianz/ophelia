@@ -1,3 +1,18 @@
+/***************************************************
+** This file is part of Ophelia, distributed under the
+** terms of the GPL License, version 3 or later.
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( tests, plz pass )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 mod common;
 use common::*;
 

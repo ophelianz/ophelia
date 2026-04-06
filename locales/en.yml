@@ -27,11 +27,9 @@ download_modal:
     title: "Add Download"
     url_label: "URL"
     url_placeholder: "https://example.com/file.zip"
-downloads:
-    empty_state: "No downloads yet"
-    speed: "%{speed}"
-    section_label: "RECENT"
 transfers:
+    empty_state: "No transfers yet"
+    speed: "%{speed}"
     section_label: "TRANSFERS"
     filter_all: "All"
     filter_active: "Active"
@@ -39,13 +37,9 @@ transfers:
     filter_paused: "Paused"
     filter_failed: "Failed"
 sidebar:
-    active: "Active"
     add_download: "Add Download"
-    downloads: "Transfers"
-    finished: "Finished"
-    history: "History"
-    paused: "Paused"
     transfers: "Transfers"
+    history: "History"
     storage: "Storage"
     storage_used: "used"
 notifications:
@@ -58,7 +52,7 @@ history:
     filter_finished: "Finished"
     filter_failed: "Failed"
     filter_paused: "Paused"
-    empty: "No downloads in history"
+    empty: "No transfers in history"
     artifact:
         present: "File present"
         deleted: "Deleted"

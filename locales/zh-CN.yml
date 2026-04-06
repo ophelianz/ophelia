@@ -4,7 +4,7 @@ app:
 menu:
     settings: "设置"
 sidebar:
-    downloads: "传输"
+    transfers: "传输"
 settings:
     general:
         section: "通用"
