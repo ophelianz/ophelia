@@ -1,6 +1,7 @@
 # Contributing to Ophelia
 
-![NOTE](This doc is a work in progress and subject to change)
+> [!NOTE]
+> This doc is a work in progress and subject to change
 
 First off, **all PRs are welcome**!
 
@@ -10,7 +11,7 @@ That said, unfortunately for you, I'm a bit of a perfectionist (or add/autistic,
 
 Ophelia is being built with a pretty deliberate architecture. The goal is not just to make features work today. The goal is to make future features, providers, and extensions fit into the codebase cleanly without the project turning into a pile of special cases. I won't bash you with insults Linus-style if you submit a bad PR but I WILL look at you like this
 
-[!very mad guy](https://100r.co/media/interface/travel.png)
+![very mad guy](https://100r.co/media/interface/travel.png)
 
 This guide is **frontend-focused for now**. I'll add more backend-specific stuff later
 
