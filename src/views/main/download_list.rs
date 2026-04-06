@@ -287,7 +287,7 @@ impl RenderOnce for DownloadListEmptyState {
             .justify_center()
             .text_sm()
             .text_color(Colors::muted_foreground())
-            .child(t!("downloads.empty_state").to_string())
+            .child(t!("transfers.empty_state").to_string())
     }
 }
 
