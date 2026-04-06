@@ -47,7 +47,7 @@ use crate::engine::provider::{
 use crate::engine::{
     ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
     EngineNotification, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
-    RestoredDownload,
+    RestoredDownload, TaskRuntimeUpdate, TransferControlSupport,
 };
 use crate::settings::Settings;
 
@@ -90,6 +90,8 @@ struct TaskEntry {
     pause_sink: TaskPauseSink,
     /// Updated by the task if a probe refines the destination/filename at runtime.
     destination_sink: TaskDestinationSink,
+    /// Runtime support can narrow after the task starts (for example single-stream fallback).
+    control_support: TransferControlSupport,
     /// Kept for re-spawning on resume.
     spec: DownloadSpec,
 }
@@ -130,10 +132,18 @@ impl DownloadEngine {
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (notification_tx, notification_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = mpsc::unbounded_channel::<TaskDone>();
+        let (runtime_update_tx, runtime_update_rx) = mpsc::unbounded_channel::<TaskRuntimeUpdate>();
 
         runtime.spawn(
-            EngineActor::new(progress_tx, notification_tx, settings, db_tx, done_tx)
-                .run(cmd_rx, done_rx),
+            EngineActor::new(
+                progress_tx,
+                notification_tx,
+                settings,
+                db_tx,
+                done_tx,
+                runtime_update_tx,
+            )
+            .run(cmd_rx, done_rx, runtime_update_rx),
         );
 
         Self {
@@ -211,6 +221,7 @@ struct EngineActor {
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     /// Global bandwidth cap shared across all active download tasks.
     global_throttle: Arc<TokenBucket>,
+    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
 }
 
 impl EngineActor {
@@ -220,6 +231,7 @@ impl EngineActor {
         settings: Settings,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         done_tx: mpsc::UnboundedSender<TaskDone>,
+        runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
     ) -> Self {
         let max_concurrent = settings.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(settings.global_speed_limit_bps));
@@ -235,6 +247,7 @@ impl EngineActor {
             shared_schedulers: HashMap::new(),
             db_tx,
             global_throttle,
+            runtime_update_tx,
         }
     }
 
@@ -252,6 +265,7 @@ impl EngineActor {
         mut self,
         mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
         mut done_rx: mpsc::UnboundedReceiver<TaskDone>,
+        mut runtime_update_rx: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
     ) {
         loop {
             tokio::select! {
@@ -302,6 +316,9 @@ impl EngineActor {
                 Some(done) = done_rx.recv() => {
                     self.handle_task_done(done);
                 }
+                Some(update) = runtime_update_rx.recv() => {
+                    self.handle_runtime_update(update);
+                }
             }
         }
     }
@@ -327,6 +344,7 @@ impl EngineActor {
             ProviderRuntimeContext {
                 shared_scheduler_semaphore: self.shared_scheduler_semaphore(&spec),
                 global_throttle: Arc::clone(&self.global_throttle),
+                runtime_update_tx: self.runtime_update_tx.clone(),
             },
         );
 
@@ -337,6 +355,7 @@ impl EngineActor {
                 pause_token,
                 pause_sink,
                 destination_sink,
+                control_support: spec.control_support(),
                 spec,
             },
         );
@@ -614,6 +633,39 @@ impl EngineActor {
         }
     }
 
+    fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
+        match update {
+            TaskRuntimeUpdate::DestinationChanged { id, destination } => {
+                let Some(entry) = self.tasks.get_mut(&id) else {
+                    return;
+                };
+                if destination == entry.spec.destination() {
+                    return;
+                }
+                entry.spec.update_destination(destination.clone());
+                let _ = self.db_tx.send(DbEvent::DestinationChanged {
+                    id,
+                    destination: destination.clone(),
+                });
+                let _ = self
+                    .notification_tx
+                    .send(EngineNotification::DestinationChanged { id, destination });
+            }
+            TaskRuntimeUpdate::ControlSupportChanged { id, support } => {
+                let Some(entry) = self.tasks.get_mut(&id) else {
+                    return;
+                };
+                if entry.control_support == support {
+                    return;
+                }
+                entry.control_support = support;
+                let _ = self
+                    .notification_tx
+                    .send(EngineNotification::ControlSupportChanged { id, support });
+            }
+        }
+    }
+
     fn adjust_shared_scheduler_limits(&mut self, old_settings: &Settings, new_settings: &Settings) {
         for (key, semaphore) in &self.shared_schedulers {
             let Some(old_limit) = provider::shared_scheduler_limit(key, old_settings) else {
@@ -668,12 +720,20 @@ impl EngineActor {
     }
 
     fn pause_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
-        self.tasks.get(&id).map(|entry| &entry.spec).or_else(|| {
-            self.queue
-                .iter()
-                .find(|task| task.id == id)
-                .map(|task| &task.spec)
-        })
+        self.tasks
+            .get(&id)
+            .and_then(|entry| {
+                entry
+                    .control_support
+                    .supports(DownloadControlAction::Pause)
+                    .then_some(&entry.spec)
+            })
+            .or_else(|| {
+                self.queue
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map(|task| &task.spec)
+            })
     }
 
     fn resume_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
@@ -683,7 +743,7 @@ impl EngineActor {
     fn cancel_target(&self, id: DownloadId) -> Option<(bool, PathBuf)> {
         if let Some(entry) = self.tasks.get(&id) {
             return Some((
-                provider::supports_control_action(&entry.spec, DownloadControlAction::Cancel),
+                entry.control_support.can_cancel,
                 self.runtime_destination(entry),
             ));
         }

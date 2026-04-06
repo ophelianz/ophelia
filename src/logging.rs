@@ -26,13 +26,13 @@
 //!
 //! Default level is INFO. Set RUST_LOG=debug for chunk-level detail.
 
-use std::path::PathBuf;
-
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::platform::paths::app_log_dir;
+
 pub fn init() -> WorkerGuard {
-    let log_dir = log_directory();
+    let log_dir = app_log_dir();
     std::fs::create_dir_all(&log_dir).ok();
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "ophelia.log");
@@ -49,39 +49,4 @@ pub fn init() -> WorkerGuard {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Ophelia starting");
 
     guard
-}
-
-fn log_directory() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("Library/Logs/Ophelia")
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| PathBuf::from(h).join(".local/share"))
-                    .unwrap_or_else(|_| PathBuf::from("."))
-            })
-            .join("ophelia/logs")
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("Ophelia\\Logs")
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("logs")
-    }
 }

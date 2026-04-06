@@ -13,6 +13,7 @@
 **       じしf_,)ノ
 **************************************************/
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
@@ -22,6 +23,7 @@ use crate::engine::types::{
     ArtifactState, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
     PersistedDownloadSource, ProviderResumeData, SavedDownload,
 };
+use crate::platform::paths::{app_data_dir, legacy_app_support_dir};
 
 #[cfg(test)]
 const HTTP_PROVIDER_KIND: &str = "http";
@@ -32,7 +34,14 @@ pub struct Db {
 
 impl Db {
     pub fn open() -> rusqlite::Result<Self> {
-        Self::open_at(db_path())
+        let path = db_path();
+        if let Err(error) = ensure_canonical_db_path(&path) {
+            tracing::warn!(
+                destination = %path.display(),
+                "failed to migrate legacy database location: {error}"
+            );
+        }
+        Self::open_at(path)
     }
 
     pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
@@ -333,13 +342,68 @@ impl Db {
 }
 
 pub fn db_path() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("Library")
-        .join("Application Support")
+    app_data_dir().join("Ophelia").join("downloads.db")
+}
+
+fn ensure_canonical_db_path(canonical_path: &Path) -> io::Result<()> {
+    migrate_legacy_db_files(&legacy_db_path(), canonical_path)
+}
+
+fn legacy_db_path() -> PathBuf {
+    legacy_app_support_dir()
         .join("Ophelia")
         .join("downloads.db")
+}
+
+fn migrate_legacy_db_files(legacy_path: &Path, canonical_path: &Path) -> io::Result<()> {
+    if legacy_path == canonical_path || !legacy_path.exists() {
+        return Ok(());
+    }
+
+    if canonical_path.exists() {
+        tracing::warn!(
+            legacy = %legacy_path.display(),
+            canonical = %canonical_path.display(),
+            "legacy database path still exists, keeping canonical database and skipping migration"
+        );
+        return Ok(());
+    }
+
+    if let Some(parent) = canonical_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    move_or_copy_file(legacy_path, canonical_path)?;
+    move_sidecar_if_present(legacy_path, canonical_path, "-wal")?;
+    move_sidecar_if_present(legacy_path, canonical_path, "-shm")?;
+    Ok(())
+}
+
+fn move_sidecar_if_present(
+    legacy_base: &Path,
+    canonical_base: &Path,
+    suffix: &str,
+) -> io::Result<()> {
+    let legacy = sqlite_sidecar_path(legacy_base, suffix);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    let canonical = sqlite_sidecar_path(canonical_base, suffix);
+    move_or_copy_file(&legacy, &canonical)
+}
+
+fn sqlite_sidecar_path(base: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{}", base.display(), suffix))
+}
+
+fn move_or_copy_file(from: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)
+        }
+    }
 }
 
 // --- read-only history queries -------------------------------------------
@@ -456,6 +520,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("downloads.db");
         (dir, path)
+    }
+
+    #[test]
+    fn migrates_legacy_database_and_sidecars_to_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy").join("downloads.db");
+        let canonical = dir.path().join("data").join("downloads.db");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"db").unwrap();
+        std::fs::write(sqlite_sidecar_path(&legacy, "-wal"), b"wal").unwrap();
+        std::fs::write(sqlite_sidecar_path(&legacy, "-shm"), b"shm").unwrap();
+
+        migrate_legacy_db_files(&legacy, &canonical).unwrap();
+
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(sqlite_sidecar_path(&canonical, "-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(sqlite_sidecar_path(&canonical, "-shm")).unwrap(),
+            b"shm"
+        );
+        assert!(!legacy.exists());
+        assert!(!sqlite_sidecar_path(&legacy, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&legacy, "-shm").exists());
+    }
+
+    #[test]
+    fn keeps_canonical_database_when_both_paths_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy").join("downloads.db");
+        let canonical = dir.path().join("data").join("downloads.db");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"legacy").unwrap();
+        std::fs::write(&canonical, b"canonical").unwrap();
+
+        migrate_legacy_db_files(&legacy, &canonical).unwrap();
+
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"canonical");
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy");
     }
 
     #[test]

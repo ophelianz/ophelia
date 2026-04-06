@@ -33,6 +33,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::paths::{app_config_dir, default_download_dir};
+
 pub use destination_presets::default_destination_rules;
 use destination_presets::suggested_destination_rule_icon_name as suggested_icon_name;
 
@@ -134,15 +136,7 @@ impl Settings {
     }
 
     fn path() -> PathBuf {
-        settings_base_dir(
-            current_platform(),
-            std::env::var_os("HOME").map(PathBuf::from),
-            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            std::env::var_os("APPDATA").map(PathBuf::from),
-            std::env::var_os("USERPROFILE").map(PathBuf::from),
-        )
-        .join("Ophelia")
-        .join("settings.json")
+        app_config_dir().join("Ophelia").join("settings.json")
     }
 }
 
@@ -161,55 +155,8 @@ pub fn suggested_destination_rule_icon_name(label: &str, extensions: &[String]) 
     suggested_icon_name(label, extensions)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // target-specific variants are exercised by tests even when not built on this host OS
-enum SettingsPlatform {
-    MacOs,
-    Linux,
-    Windows,
-}
-
-fn current_platform() -> SettingsPlatform {
-    #[cfg(target_os = "macos")]
-    {
-        SettingsPlatform::MacOs
-    }
-    #[cfg(target_os = "windows")]
-    {
-        SettingsPlatform::Windows
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        SettingsPlatform::Linux
-    }
-}
-
-fn settings_base_dir(
-    platform: SettingsPlatform,
-    home: Option<PathBuf>,
-    xdg_config_home: Option<PathBuf>,
-    appdata: Option<PathBuf>,
-    userprofile: Option<PathBuf>,
-) -> PathBuf {
-    match platform {
-        SettingsPlatform::MacOs => home
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Library")
-            .join("Application Support"),
-        SettingsPlatform::Linux => xdg_config_home.unwrap_or_else(|| {
-            home.map(|home| home.join(".config"))
-                .unwrap_or_else(|| PathBuf::from("."))
-        }),
-        SettingsPlatform::Windows => appdata
-            .or_else(|| userprofile.map(|profile| profile.join("AppData").join("Roaming")))
-            .unwrap_or_else(|| PathBuf::from(".")),
-    }
-}
-
 fn default_download_root() -> PathBuf {
-    std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join("Downloads"))
-        .unwrap_or_else(|_| PathBuf::from("."))
+    default_download_dir()
 }
 
 #[cfg(test)]
@@ -304,101 +251,5 @@ mod tests {
         let icon = suggested_destination_rule_icon_name("Media", &[".mkv".into()]);
 
         assert_eq!(icon, "video");
-    }
-
-    #[test]
-    fn macos_settings_path_uses_application_support() {
-        let path = settings_base_dir(
-            SettingsPlatform::MacOs,
-            Some(PathBuf::from("/Users/alex")),
-            None,
-            None,
-            None,
-        )
-        .join("Ophelia")
-        .join("settings.json");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/Users/alex/Library/Application Support/Ophelia/settings.json")
-        );
-    }
-
-    #[test]
-    fn linux_settings_path_prefers_xdg_config_home() {
-        let path = settings_base_dir(
-            SettingsPlatform::Linux,
-            Some(PathBuf::from("/home/alex")),
-            Some(PathBuf::from("/home/alex/.local/config")),
-            None,
-            None,
-        )
-        .join("Ophelia")
-        .join("settings.json");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/alex/.local/config/Ophelia/settings.json")
-        );
-    }
-
-    #[test]
-    fn linux_settings_path_falls_back_to_home_dot_config() {
-        let path = settings_base_dir(
-            SettingsPlatform::Linux,
-            Some(PathBuf::from("/home/alex")),
-            None,
-            None,
-            None,
-        )
-        .join("Ophelia")
-        .join("settings.json");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/alex/.config/Ophelia/settings.json")
-        );
-    }
-
-    #[test]
-    fn windows_settings_path_prefers_appdata() {
-        let path = settings_base_dir(
-            SettingsPlatform::Windows,
-            None,
-            None,
-            Some(PathBuf::from(r"C:\Users\Alex\AppData\Roaming")),
-            Some(PathBuf::from(r"C:\Users\Alex")),
-        )
-        .join("Ophelia")
-        .join("settings.json");
-
-        assert_eq!(
-            path,
-            PathBuf::from(r"C:\Users\Alex\AppData\Roaming")
-                .join("Ophelia")
-                .join("settings.json")
-        );
-    }
-
-    #[test]
-    fn windows_settings_path_falls_back_to_userprofile_roaming() {
-        let path = settings_base_dir(
-            SettingsPlatform::Windows,
-            None,
-            None,
-            None,
-            Some(PathBuf::from(r"C:\Users\Alex")),
-        )
-        .join("Ophelia")
-        .join("settings.json");
-
-        assert_eq!(
-            path,
-            PathBuf::from(r"C:\Users\Alex")
-                .join("AppData")
-                .join("Roaming")
-                .join("Ophelia")
-                .join("settings.json")
-        );
     }
 }

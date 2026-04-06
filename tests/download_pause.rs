@@ -57,6 +57,7 @@ async fn pause_and_resume_completes_correctly() {
         let dest = dest.clone();
         let sink = Arc::clone(&pause_sink);
         let token = pause_token.clone();
+        let (runtime_tx, _runtime_rx) = runtime_updates_channel();
         tokio::spawn(async move {
             download_task(
                 DownloadId(0),
@@ -71,6 +72,7 @@ async fn pause_and_resume_completes_correctly() {
                 None,
                 unlimited_semaphore(),
                 unlimited_throttle(),
+                runtime_tx,
             )
             .await;
         })
@@ -90,6 +92,7 @@ async fn pause_and_resume_completes_correctly() {
 
     // — Pass 2: resume from snapshots, run to completion —
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -103,6 +106,7 @@ async fn pause_and_resume_completes_correctly() {
         Some(snapshots),
         unlimited_semaphore(),
         unlimited_throttle(),
+        runtime_tx,
     )
     .await;
 

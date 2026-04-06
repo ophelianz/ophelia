@@ -15,6 +15,8 @@
 
 use gpui::{Bounds, Pixels, Size, WindowOptions};
 
+pub(crate) mod paths;
+
 #[derive(Clone, Copy)]
 pub struct WindowChrome {
     pub height: f32,

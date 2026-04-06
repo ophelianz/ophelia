@@ -41,7 +41,10 @@ use crate::engine::destination::{
 };
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::http::throttle::{Throttle, TokenBucket};
-use crate::engine::types::{ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate};
+use crate::engine::types::{
+    ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
+    TransferControlSupport,
+};
 
 use super::error::{ChunkError, ChunkOutcome};
 use super::health::{activation_now, spawn_health_monitor};
@@ -99,6 +102,7 @@ async fn resolve_chunks(
     config: &HttpDownloadConfig,
     id: DownloadId,
     progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
+    runtime_update_tx: &mpsc::UnboundedSender<TaskRuntimeUpdate>,
     destination_sink: &Arc<Mutex<Option<PathBuf>>>,
     throttle: Arc<Throttle>,
 ) -> Result<ResolvedChunks, TaskFinalState> {
@@ -154,6 +158,7 @@ async fn resolve_chunks(
             })
         }
         None => {
+            let initial_destination = destination;
             let probe_result = match probe(probe_client, url).await {
                 Ok(p) => p,
                 Err(_) => {
@@ -186,11 +191,21 @@ async fn resolve_chunks(
                 finalize_strategy,
             } = resolved_destination;
             *destination_sink.lock().unwrap() = Some(destination.clone());
+            if destination != initial_destination {
+                let _ = runtime_update_tx.send(TaskRuntimeUpdate::DestinationChanged {
+                    id,
+                    destination: destination.clone(),
+                });
+            }
 
             let total_bytes = match probe_result.content_length {
                 Some(len) => len,
                 None => {
                     tracing::info!("no content-length, falling back to single stream");
+                    let _ = runtime_update_tx.send(TaskRuntimeUpdate::ControlSupportChanged {
+                        id,
+                        support: single_stream_control_support(),
+                    });
                     return Err(single_download(
                         id,
                         Arc::clone(chunk_client),
@@ -507,6 +522,7 @@ pub async fn download_task(
     resume_from: Option<Vec<ChunkSnapshot>>,
     server_semaphore: Arc<Semaphore>,
     global_throttle: Arc<TokenBucket>,
+    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
 ) -> TaskFinalState {
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
         let _ = progress_tx.send(ProgressUpdate {
@@ -551,6 +567,7 @@ pub async fn download_task(
         &config,
         id,
         &progress_tx,
+        &runtime_update_tx,
         &destination_sink,
         Arc::clone(&throttle),
     )
@@ -778,4 +795,13 @@ pub async fn download_task(
         &pause_sink,
         &send,
     )
+}
+
+fn single_stream_control_support() -> TransferControlSupport {
+    TransferControlSupport {
+        can_pause: false,
+        can_resume: false,
+        can_cancel: true,
+        can_restore: false,
+    }
 }

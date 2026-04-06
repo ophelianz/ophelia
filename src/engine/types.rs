@@ -285,6 +285,10 @@ pub enum EngineNotification {
         id: DownloadId,
         destination: PathBuf,
     },
+    ControlSupportChanged {
+        id: DownloadId,
+        support: TransferControlSupport,
+    },
     LiveTransferRemoved {
         id: DownloadId,
         action: LiveTransferRemovalAction,
@@ -301,4 +305,21 @@ pub enum EngineNotification {
 pub enum LiveTransferRemovalAction {
     Cancelled,
     DeleteArtifact,
+}
+
+/// Internal task-to-engine runtime updates.
+///
+/// This is public because the direct HTTP task tests call `download_task`
+/// directly, but it is not intended as a stable external extension surface.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub enum TaskRuntimeUpdate {
+    DestinationChanged {
+        id: DownloadId,
+        destination: PathBuf,
+    },
+    ControlSupportChanged {
+        id: DownloadId,
+        support: TransferControlSupport,
+    },
 }

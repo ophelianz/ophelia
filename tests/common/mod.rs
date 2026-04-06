@@ -21,7 +21,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::TokenBucket;
-use ophelia::engine::types::{DownloadStatus, ProgressUpdate};
+use ophelia::engine::types::{DownloadStatus, ProgressUpdate, TaskRuntimeUpdate};
 use ophelia::settings::Settings;
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
@@ -34,6 +34,13 @@ pub fn unlimited_throttle() -> Arc<TokenBucket> {
 
 pub fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
     DestinationPolicy::for_resolved_destination(&Settings::default(), destination)
+}
+
+pub fn runtime_updates_channel() -> (
+    mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+) {
+    mpsc::unbounded_channel()
 }
 
 pub fn test_data(size: usize) -> Vec<u8> {

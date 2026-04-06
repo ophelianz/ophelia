@@ -26,7 +26,7 @@
 //!   4. Create DownloadEngine with db_tx and initial_next_id > DB max.
 //!   5. Restore saved downloads into the engine's paused map and SoA vecs.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ pub struct Downloads {
     pub settings: Settings,
 
     pub ids: Vec<DownloadId>,
+    row_by_id: HashMap<DownloadId, usize>,
     /// Provider identifier per live transfer, kept app-side so future workflow
     /// views do not have to infer it from engine internals.
     pub provider_kinds: Vec<SharedString>,
@@ -246,6 +247,7 @@ impl Downloads {
             ipc,
             settings,
             ids: Vec::new(),
+            row_by_id: HashMap::new(),
             provider_kinds: Vec::new(),
             source_labels: Vec::new(),
             filenames: Vec::new(),
@@ -359,6 +361,7 @@ impl Downloads {
         self.downloaded_bytes.push(0);
         self.total_bytes.push(None);
         self.speeds.push(0);
+        self.row_by_id.insert(id, self.ids.len() - 1);
         cx.notify();
         id
     }
@@ -405,7 +408,7 @@ impl Downloads {
 
     /// Delete the artifact for a live transfer. History is preserved separately.
     pub fn delete_artifact(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        let Some(idx) = self.ids.iter().position(|&download_id| download_id == id) else {
+        let Some(idx) = self.index_of(id) else {
             return;
         };
         let destination = PathBuf::from(self.destinations[idx].as_ref());
@@ -525,10 +528,11 @@ impl Downloads {
         self.downloaded_bytes.push(saved.downloaded_bytes);
         self.total_bytes.push(saved.total_bytes);
         self.speeds.push(0);
+        self.row_by_id.insert(saved.id, self.ids.len() - 1);
     }
 
     fn apply_progress(&mut self, update: ProgressUpdate, cx: &mut Context<Self>) {
-        if let Some(idx) = self.ids.iter().position(|&id| id == update.id) {
+        if let Some(idx) = self.index_of(update.id) {
             let prev = self.statuses[idx];
             self.statuses[idx] = update.status;
             self.downloaded_bytes[idx] = update.downloaded_bytes;
@@ -560,7 +564,7 @@ impl Downloads {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
             EngineNotification::DestinationChanged { id, destination } => {
-                if let Some(idx) = self.ids.iter().position(|&download_id| download_id == id) {
+                if let Some(idx) = self.index_of(id) {
                     self.filenames[idx] = destination
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -568,6 +572,12 @@ impl Downloads {
                         .to_string()
                         .into();
                     self.destinations[idx] = destination.to_string_lossy().to_string().into();
+                    cx.notify();
+                }
+            }
+            EngineNotification::ControlSupportChanged { id, support } => {
+                if let Some(idx) = self.index_of(id) {
+                    self.control_supports[idx] = support;
                     cx.notify();
                 }
             }
@@ -596,8 +606,9 @@ impl Downloads {
     }
 
     fn remove_row(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        if let Some(idx) = self.ids.iter().position(|&d| d == id) {
+        if let Some(idx) = self.index_of(id) {
             self.ids.remove(idx);
+            self.row_by_id.remove(&id);
             self.provider_kinds.remove(idx);
             self.source_labels.remove(idx);
             self.filenames.remove(idx);
@@ -607,8 +618,17 @@ impl Downloads {
             self.downloaded_bytes.remove(idx);
             self.total_bytes.remove(idx);
             self.speeds.remove(idx);
+            self.rebuild_row_index();
             cx.notify();
         }
+    }
+
+    fn index_of(&self, id: DownloadId) -> Option<usize> {
+        self.row_by_id.get(&id).copied()
+    }
+
+    fn rebuild_row_index(&mut self) {
+        self.row_by_id = build_row_index(&self.ids);
     }
 }
 
@@ -649,6 +669,14 @@ fn source_summary(provider_kind: &str, source_label: &str) -> String {
 fn storage_summary_for_path(path: &Path) -> SidebarStorageSummary {
     let (used_bytes, total_bytes) = query_disk(path);
     SidebarStorageSummary::from_usage(used_bytes, total_bytes)
+}
+
+fn build_row_index(ids: &[DownloadId]) -> HashMap<DownloadId, usize> {
+    ids.iter()
+        .copied()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect()
 }
 
 fn query_disk(path: &Path) -> (u64, u64) {
@@ -759,5 +787,14 @@ mod tests {
             source_summary("ftp", "ftp://example.com/file.zip"),
             "ftp: ftp://example.com/file.zip"
         );
+    }
+
+    #[test]
+    fn build_row_index_tracks_current_positions() {
+        let map = build_row_index(&[DownloadId(7), DownloadId(11), DownloadId(3)]);
+
+        assert_eq!(map.get(&DownloadId(7)), Some(&0));
+        assert_eq!(map.get(&DownloadId(11)), Some(&1));
+        assert_eq!(map.get(&DownloadId(3)), Some(&2));
     }
 }

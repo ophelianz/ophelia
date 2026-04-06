@@ -8,11 +8,12 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `app.rs`: app-layer bridge between GPUI and the backend engine
 - `app_menu.rs` / `app_actions.rs`: app-level actions, shortcuts, and menu wiring
 - `platform/`: platform-specific window/chrome integration
+- `platform/`: shared OS integration such as window chrome and app path policy
 - `engine/`: download engine, persistence, and provider-specific backend logic
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
     - also stores destination-policy settings such as collision strategy and extension-based routing rules
-    - persists to the platform's standard config directory
+    - persists through the shared platform path policy
 
 ## Frontend terms
 
@@ -35,6 +36,7 @@ These names are intentional too:
 - `ingress`: transport for getting external requests into the app, such as local IPC
 - `artifact state`: whether a transfer's bytes are still present on disk, tracked separately from transfer outcome/history
 - `live transfer metadata`: provider kind, source label, and control support cached next to live rows so workflow-shaped views can mirror backend semantics cheaply
+- `runtime control support`: active transfers can narrow their available controls once runtime facts are known, such as HTTP falling back to single-stream mode
 - `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
 - `destination policy`: backend-owned resolution of destination folders, collision behavior, and final-file commit semantics
 
@@ -81,10 +83,13 @@ These names are intentional too:
 
 - `app.rs`: GPUI-facing download model, backend service owner, progress polling, and history bridge
     - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
-    - also caches provider kind, source label, and control support for each live row
+    - also caches provider kind, source label, control support, and an `id -> index` side map for each live row
     - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
     - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
 - `ipc.rs`: local Axum server plus app-owned IPC ingress handle
+- `platform/`
+    - `mod.rs`: platform module root and window-chrome entry points
+    - `paths.rs`: shared app config/data/log/download directory policy plus legacy path helpers
 - `settings/`
     - `mod.rs`: persisted settings model and atomic load/save
 - `engine/`

@@ -28,7 +28,8 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::http::{TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
-    PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TransferControlSupport,
+    PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TaskRuntimeUpdate,
+    TransferControlSupport,
 };
 use crate::settings::Settings;
 
@@ -60,6 +61,7 @@ pub(super) struct ProviderCapabilities {
 pub(super) struct ProviderRuntimeContext {
     pub(super) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
     pub(super) global_throttle: Arc<TokenBucket>,
+    pub(super) runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
 }
 
 pub(super) enum TaskPauseSink {
@@ -106,6 +108,11 @@ pub(super) fn spawn_task(
     resume_data: Option<ProviderResumeData>,
     runtime: ProviderRuntimeContext,
 ) -> SpawnedTask {
+    let ProviderRuntimeContext {
+        shared_scheduler_semaphore,
+        global_throttle,
+        runtime_update_tx,
+    } = runtime;
     match &spec.source {
         DownloadSource::Http { url, config } => {
             let pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>> = Arc::new(Mutex::new(None));
@@ -114,8 +121,7 @@ pub(super) fn spawn_task(
                 .as_ref()
                 .and_then(ProviderResumeData::as_http)
                 .map(|data| data.chunks.clone());
-            let shared_scheduler_semaphore = runtime
-                .shared_scheduler_semaphore
+            let shared_scheduler_semaphore = shared_scheduler_semaphore
                 .expect("http downloads require a shared scheduler semaphore");
             let handle = tokio::spawn({
                 let url_ = url.clone();
@@ -125,7 +131,8 @@ pub(super) fn spawn_task(
                 let pt_ = pause_token.clone();
                 let ps_ = Arc::clone(&pause_sink);
                 let ds_ = Arc::clone(&destination_sink);
-                let gt_ = Arc::clone(&runtime.global_throttle);
+                let gt_ = Arc::clone(&global_throttle);
+                let ru_ = runtime_update_tx.clone();
                 async move {
                     let final_state = download_task(
                         id,
@@ -140,6 +147,7 @@ pub(super) fn spawn_task(
                         resume_from,
                         shared_scheduler_semaphore,
                         gt_,
+                        ru_,
                     )
                     .await;
                     let _ = done_tx.send(TaskDone { id, final_state });

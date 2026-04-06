@@ -45,6 +45,7 @@ async fn work_stealing_produces_correct_output() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 4,
         min_steal_bytes: 4 * 1024,
@@ -63,6 +64,7 @@ async fn work_stealing_produces_correct_output() {
         None,
         unlimited_semaphore(),
         unlimited_throttle(),
+        runtime_tx,
     )
     .await;
 
@@ -97,6 +99,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 1,
         max_connections: 1,
@@ -116,6 +119,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         None,
         unlimited_semaphore(),
         unlimited_throttle(),
+        runtime_tx,
     )
     .await;
 
