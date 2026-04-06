@@ -196,10 +196,11 @@ mod tests {
 
     #[test]
     fn persisted_source_maps_http_specs() {
+        let destination = PathBuf::from("/tmp/archive.zip");
         let spec = DownloadSpec::http(
             "https://example.com/archive.zip".to_string(),
-            PathBuf::from("/tmp/archive.zip"),
-            DestinationPolicy::manual(),
+            destination.clone(),
+            DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
             HttpDownloadConfig::default(),
         );
 
@@ -214,10 +215,11 @@ mod tests {
             max_connections_per_server: 6,
             ..Settings::default()
         };
+        let destination = PathBuf::from("/tmp/archive.zip");
         let spec = DownloadSpec::http(
             "https://user:pass@EXAMPLE.com:443/archive.zip".to_string(),
-            PathBuf::from("/tmp/archive.zip"),
-            DestinationPolicy::manual(),
+            destination.clone(),
+            DestinationPolicy::for_resolved_destination(&settings, &destination),
             HttpDownloadConfig::default(),
         );
 
@@ -232,10 +234,11 @@ mod tests {
 
     #[test]
     fn lifecycle_support_is_explicit_for_http_controls() {
+        let destination = PathBuf::from("/tmp/archive.zip");
         let spec = DownloadSpec::http(
             "https://example.com/archive.zip".to_string(),
-            PathBuf::from("/tmp/archive.zip"),
-            DestinationPolicy::manual(),
+            destination.clone(),
+            DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
             HttpDownloadConfig::default(),
         );
 

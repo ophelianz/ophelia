@@ -22,7 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::engine::destination::{
-    DestinationPolicy, fallback_filename_from_url, preview_auto_destination,
+    DestinationOverrides, DestinationPolicy, fallback_filename_from_url, preview_auto_destination,
 };
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
@@ -122,7 +122,7 @@ impl DownloadSpec {
         let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
         let destination_policy = DestinationPolicy::automatic(settings);
         let destination = destination_policy
-            .resolve_checked(&url, Path::new(""), suggested_filename.as_deref())?
+            .resolve_checked(&url, suggested_filename.as_deref())?
             .destination;
         Ok(Self::http(
             url,
@@ -132,16 +132,17 @@ impl DownloadSpec {
         ))
     }
 
-    pub fn from_manual_input(
+    pub fn from_user_input(
         url: String,
-        destination: PathBuf,
+        typed_destination: PathBuf,
         settings: &Settings,
     ) -> io::Result<Self> {
         let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
-        let destination_policy = DestinationPolicy::manual();
-        let destination = destination_policy
-            .resolve_checked(&url, &destination, None)?
-            .destination;
+        let auto_preview = preview_auto_destination(&url, None, settings);
+        let overrides =
+            DestinationOverrides::from_user_destination(&typed_destination, &auto_preview)?;
+        let destination_policy = DestinationPolicy::with_overrides(settings, overrides);
+        let destination = destination_policy.resolve_checked(&url, None)?.destination;
         Ok(Self::http(
             url,
             destination,
@@ -226,12 +227,18 @@ impl RestoredDownload {
         id: DownloadId,
         url: String,
         destination: PathBuf,
+        settings: &Settings,
         config: HttpDownloadConfig,
         resume_data: Option<ProviderResumeData>,
     ) -> Self {
         Self {
             id,
-            spec: DownloadSpec::http(url, destination, DestinationPolicy::manual(), config),
+            spec: DownloadSpec::http(
+                url,
+                destination.clone(),
+                DestinationPolicy::for_resolved_destination(settings, &destination),
+                config,
+            ),
             resume_data,
         }
     }
@@ -242,6 +249,7 @@ impl RestoredDownload {
                 saved.id,
                 url.clone(),
                 saved.destination.clone(),
+                settings,
                 HttpDownloadConfig::from_settings(settings),
                 saved.resume_data.clone(),
             ),
@@ -290,7 +298,10 @@ mod tests {
         let spec = DownloadSpec::http(
             "https://example.com/file.bin".to_string(),
             PathBuf::from("/tmp/file.bin"),
-            DestinationPolicy::manual(),
+            DestinationPolicy::for_resolved_destination(
+                &Settings::default(),
+                Path::new("/tmp/file.bin"),
+            ),
             HttpDownloadConfig::default(),
         );
 
@@ -323,12 +334,13 @@ mod tests {
         let restored = RestoredDownload::from_saved(&saved, &settings);
 
         assert_eq!(restored.id, DownloadId(42));
-        match restored.spec.source {
+        match &restored.spec.source {
             DownloadSource::Http { url, config } => {
                 assert_eq!(url, "https://example.com/archive.zip");
                 assert_eq!(config.max_connections, 5);
             }
         }
+        assert_eq!(restored.spec.destination(), Path::new("/tmp/archive.zip"));
     }
 
     #[test]
@@ -385,5 +397,70 @@ mod tests {
         );
 
         assert_eq!(request.display_filename_hint(), "browser-name.zip");
+    }
+
+    #[test]
+    fn from_user_input_changing_only_filename_reroutes_directory_by_extension() {
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/Downloads")),
+            destination_rules_enabled: true,
+            destination_rules: vec![
+                crate::settings::DestinationRule {
+                    id: "music".into(),
+                    label: "Music".into(),
+                    enabled: true,
+                    target_dir: PathBuf::from("/tmp/Music"),
+                    extensions: vec![".mp3".into()],
+                    icon_name: None,
+                },
+                crate::settings::DestinationRule {
+                    id: "videos".into(),
+                    label: "Videos".into(),
+                    enabled: true,
+                    target_dir: PathBuf::from("/tmp/Videos"),
+                    extensions: vec![".mkv".into()],
+                    icon_name: None,
+                },
+            ],
+            ..Settings::default()
+        };
+
+        let spec = DownloadSpec::from_user_input(
+            "https://example.com/song.mp3".to_string(),
+            PathBuf::from("/tmp/Music/movie.mkv"),
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(spec.destination(), Path::new("/tmp/Videos/movie.mkv"));
+    }
+
+    #[test]
+    fn from_user_input_changing_only_directory_keeps_filename_automatic() {
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/Downloads")),
+            ..Settings::default()
+        };
+
+        let spec = DownloadSpec::from_user_input(
+            "https://example.com/song.mp3".to_string(),
+            PathBuf::from("/tmp/Custom/song.mp3"),
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(spec.destination(), Path::new("/tmp/Custom/song.mp3"));
+    }
+
+    #[test]
+    fn from_user_input_rejects_empty_destination() {
+        let error = DownloadSpec::from_user_input(
+            "https://example.com/song.mp3".to_string(),
+            PathBuf::new(),
+            &Settings::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

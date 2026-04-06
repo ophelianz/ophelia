@@ -168,21 +168,18 @@ async fn resolve_chunks(
                 "probe complete"
             );
 
-            let resolved_destination = match destination_policy.resolve_checked(
-                url,
-                &destination,
-                probe_result.filename.as_deref(),
-            ) {
-                Ok(resolved) => resolved,
-                Err(_) => {
-                    send(DownloadStatus::Error, 0, probe_result.content_length);
-                    return Err(task_state(
-                        DownloadStatus::Error,
-                        0,
-                        probe_result.content_length,
-                    ));
-                }
-            };
+            let resolved_destination =
+                match destination_policy.resolve_checked(url, probe_result.filename.as_deref()) {
+                    Ok(resolved) => resolved,
+                    Err(_) => {
+                        send(DownloadStatus::Error, 0, probe_result.content_length);
+                        return Err(task_state(
+                            DownloadStatus::Error,
+                            0,
+                            probe_result.content_length,
+                        ));
+                    }
+                };
             let ResolvedDestination {
                 part_path,
                 destination,

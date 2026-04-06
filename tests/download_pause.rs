@@ -19,7 +19,6 @@ use common::*;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ophelia::engine::destination::DestinationPolicy;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
@@ -62,8 +61,8 @@ async fn pause_and_resume_completes_correctly() {
             download_task(
                 DownloadId(0),
                 url,
-                dest,
-                DestinationPolicy::manual(),
+                dest.clone(),
+                exact_destination_policy(&dest),
                 HttpDownloadConfig::default(),
                 tx1,
                 token,
@@ -95,7 +94,7 @@ async fn pause_and_resume_completes_correctly() {
         DownloadId(0),
         url,
         dest.clone(),
-        DestinationPolicy::manual(),
+        exact_destination_policy(&dest),
         HttpDownloadConfig::default(),
         tx2,
         CancellationToken::new(),

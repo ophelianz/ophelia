@@ -15,20 +15,18 @@
 
 //! Shared destination resolution and final-file commit behavior.
 //!
-//! Automatic/browser-driven downloads use extension-based destination rules and
-//! collision handling from `Settings`. Manual destinations are preserved as-is.
+//! All downloads resolve through the same settings-driven policy. Entry points
+//! can optionally provide explicit directory and/or filename overrides, but
+//! folder rules and collision handling still live here.
 
 use std::ffi::OsStr;
-use std::io::{self, ErrorKind};
+use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use crate::settings::{CollisionStrategy, DestinationRule, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStrategy {
-    /// Preserve the exact chosen path, even if that means using platform-native
-    /// rename behavior for an existing destination.
-    Move,
     /// Move into a path that was pre-resolved to be unique; fail instead of
     /// clobbering if that path unexpectedly appears before commit.
     MoveNoReplace,
@@ -44,81 +42,102 @@ pub struct ResolvedDestination {
     pub finalize_strategy: FinalizeStrategy,
 }
 
-#[derive(Debug, Clone)]
-pub enum DestinationPolicy {
-    Manual,
-    Automatic(AutoDestinationPolicy),
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DestinationOverrides {
+    pub explicit_directory: Option<PathBuf>,
+    pub explicit_filename: Option<String>,
+}
+
+impl DestinationOverrides {
+    pub fn from_user_destination(
+        typed_destination: &Path,
+        auto_destination: &Path,
+    ) -> io::Result<Self> {
+        let typed_filename = usable_filename(typed_destination).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "destination path '{}' must include a filename",
+                    typed_destination.display()
+                ),
+            )
+        })?;
+        let auto_filename = usable_filename(auto_destination).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "auto destination '{}' must include a filename",
+                    auto_destination.display()
+                ),
+            )
+        })?;
+
+        let typed_parent = meaningful_parent(typed_destination);
+        let auto_parent = meaningful_parent(auto_destination);
+
+        Ok(Self {
+            explicit_directory: match typed_parent {
+                Some(parent) if auto_parent.as_deref() != Some(parent.as_path()) => Some(parent),
+                _ => None,
+            },
+            explicit_filename: (typed_filename != auto_filename)
+                .then(|| typed_filename.to_string()),
+        })
+    }
+
+    pub fn for_resolved_destination(destination: &Path) -> Self {
+        Self {
+            explicit_directory: Some(raw_parent(destination)),
+            explicit_filename: usable_filename(destination).map(ToOwned::to_owned),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct AutoDestinationPolicy {
+pub struct DestinationPolicy {
     default_download_dir: PathBuf,
     collision_strategy: CollisionStrategy,
     rules_enabled: bool,
     rules: Vec<DestinationRule>,
+    overrides: DestinationOverrides,
 }
 
 impl DestinationPolicy {
-    pub fn manual() -> Self {
-        Self::Manual
-    }
-
     pub fn automatic(settings: &Settings) -> Self {
-        Self::Automatic(AutoDestinationPolicy::from_settings(settings))
+        Self::with_overrides(settings, DestinationOverrides::default())
     }
 
-    pub fn resolve(
-        &self,
-        url: &str,
-        current_destination: &Path,
-        preferred_filename: Option<&str>,
-    ) -> ResolvedDestination {
-        match self {
-            Self::Manual => resolved_manual_destination(current_destination.to_path_buf()),
-            Self::Automatic(policy) => policy.resolve(url, preferred_filename),
-        }
-    }
-
-    pub fn resolve_checked(
-        &self,
-        url: &str,
-        current_destination: &Path,
-        preferred_filename: Option<&str>,
-    ) -> io::Result<ResolvedDestination> {
-        let resolved = self.resolve(url, current_destination, preferred_filename);
-        prepare_resolved_destination(&resolved)?;
-        Ok(resolved)
-    }
-
-    pub fn finalize_strategy(&self) -> FinalizeStrategy {
-        match self {
-            Self::Manual => FinalizeStrategy::Move,
-            Self::Automatic(policy) => match policy.collision_strategy {
-                CollisionStrategy::Rename => FinalizeStrategy::MoveNoReplace,
-                CollisionStrategy::Replace => FinalizeStrategy::ReplaceExisting,
-            },
-        }
-    }
-}
-
-impl AutoDestinationPolicy {
-    pub fn from_settings(settings: &Settings) -> Self {
+    pub fn with_overrides(settings: &Settings, overrides: DestinationOverrides) -> Self {
         Self {
             default_download_dir: settings.download_dir(),
             collision_strategy: settings.collision_strategy,
             rules_enabled: settings.destination_rules_enabled,
             rules: settings.destination_rules.clone(),
+            overrides,
         }
     }
 
-    fn resolve(&self, url: &str, preferred_filename: Option<&str>) -> ResolvedDestination {
-        let filename = preferred_filename
+    pub fn for_resolved_destination(settings: &Settings, destination: &Path) -> Self {
+        Self::with_overrides(
+            settings,
+            DestinationOverrides::for_resolved_destination(destination),
+        )
+    }
+
+    pub fn resolve(&self, url: &str, preferred_filename: Option<&str>) -> ResolvedDestination {
+        let filename = self
+            .overrides
+            .explicit_filename
+            .as_deref()
             .and_then(normalize_filename)
+            .or_else(|| preferred_filename.and_then(normalize_filename))
             .unwrap_or_else(|| fallback_filename_from_url(url));
         let target_dir = self.target_dir_for(&filename);
         let destination = match self.collision_strategy {
-            CollisionStrategy::Rename => unique_destination(target_dir.join(&filename)),
-            CollisionStrategy::Replace => target_dir.join(&filename),
+            CollisionStrategy::Rename => {
+                unique_destination(join_destination(&target_dir, &filename))
+            }
+            CollisionStrategy::Replace => join_destination(&target_dir, &filename),
         };
         let finalize_strategy = match self.collision_strategy {
             CollisionStrategy::Rename => FinalizeStrategy::MoveNoReplace,
@@ -131,7 +150,28 @@ impl AutoDestinationPolicy {
         }
     }
 
+    pub fn resolve_checked(
+        &self,
+        url: &str,
+        preferred_filename: Option<&str>,
+    ) -> io::Result<ResolvedDestination> {
+        let resolved = self.resolve(url, preferred_filename);
+        prepare_resolved_destination(&resolved)?;
+        Ok(resolved)
+    }
+
+    pub fn finalize_strategy(&self) -> FinalizeStrategy {
+        match self.collision_strategy {
+            CollisionStrategy::Rename => FinalizeStrategy::MoveNoReplace,
+            CollisionStrategy::Replace => FinalizeStrategy::ReplaceExisting,
+        }
+    }
+
     fn target_dir_for(&self, filename: &str) -> PathBuf {
+        if let Some(explicit_directory) = &self.overrides.explicit_directory {
+            return explicit_directory.clone();
+        }
+
         if self.rules_enabled {
             if let Some(dir) = self
                 .rules
@@ -142,6 +182,7 @@ impl AutoDestinationPolicy {
                 return dir;
             }
         }
+
         self.default_download_dir.clone()
     }
 }
@@ -152,7 +193,7 @@ pub fn preview_auto_destination(
     settings: &Settings,
 ) -> PathBuf {
     DestinationPolicy::automatic(settings)
-        .resolve(url, Path::new(""), suggested_filename)
+        .resolve(url, suggested_filename)
         .destination
 }
 
@@ -199,7 +240,6 @@ pub fn finalize_part_file(
     strategy: FinalizeStrategy,
 ) -> io::Result<()> {
     match strategy {
-        FinalizeStrategy::Move => std::fs::rename(part_path, destination),
         FinalizeStrategy::MoveNoReplace => {
             if destination.exists() {
                 return Err(io::Error::new(
@@ -210,14 +250,6 @@ pub fn finalize_part_file(
             std::fs::rename(part_path, destination)
         }
         FinalizeStrategy::ReplaceExisting => replace_existing_file(part_path, destination),
-    }
-}
-
-fn resolved_manual_destination(destination: PathBuf) -> ResolvedDestination {
-    ResolvedDestination {
-        part_path: part_path_for(&destination),
-        destination,
-        finalize_strategy: FinalizeStrategy::Move,
     }
 }
 
@@ -255,6 +287,29 @@ fn normalize_rule_extension(extension: &str) -> Option<String> {
         Some(trimmed.to_ascii_lowercase())
     } else {
         Some(format!(".{}", trimmed.to_ascii_lowercase()))
+    }
+}
+
+fn usable_filename(path: &Path) -> Option<&str> {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+}
+
+fn meaningful_parent(path: &Path) -> Option<PathBuf> {
+    let parent = raw_parent(path);
+    (!parent.as_os_str().is_empty() && parent != Path::new(".")).then_some(parent)
+}
+
+fn raw_parent(path: &Path) -> PathBuf {
+    path.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+fn join_destination(directory: &Path, filename: &str) -> PathBuf {
+    if directory.as_os_str().is_empty() {
+        PathBuf::from(filename)
+    } else {
+        directory.join(filename)
     }
 }
 
@@ -373,11 +428,8 @@ mod tests {
             ..Settings::default()
         };
 
-        let resolved = DestinationPolicy::automatic(&settings).resolve(
-            "https://example.com/trailer.mp4",
-            Path::new(""),
-            Some("Trailer.MP4"),
-        );
+        let resolved = DestinationPolicy::automatic(&settings)
+            .resolve("https://example.com/trailer.mp4", Some("Trailer.MP4"));
 
         assert_eq!(
             resolved.destination,
@@ -402,11 +454,8 @@ mod tests {
             ..Settings::default()
         };
 
-        let resolved = DestinationPolicy::automatic(&settings).resolve(
-            "https://example.com/archive.zip",
-            Path::new(""),
-            None,
-        );
+        let resolved = DestinationPolicy::automatic(&settings)
+            .resolve("https://example.com/archive.zip", None);
 
         assert_eq!(
             resolved.destination,
@@ -415,19 +464,91 @@ mod tests {
     }
 
     #[test]
-    fn manual_destination_bypasses_rules_and_collision_resolution() {
+    fn user_overrides_only_filename_and_keeps_directory_automatic() {
         let root = temp_dir();
-        let destination = root.path().join("Exact Name.mp4");
-        std::fs::write(&destination, b"existing").unwrap();
+        let settings = Settings {
+            default_download_dir: Some(root.path().join("Downloads")),
+            destination_rules_enabled: true,
+            destination_rules: vec![
+                DestinationRule {
+                    id: "music".into(),
+                    label: "Music".into(),
+                    enabled: true,
+                    target_dir: root.path().join("Music"),
+                    extensions: vec![".mp3".into()],
+                    icon_name: None,
+                },
+                DestinationRule {
+                    id: "videos".into(),
+                    label: "Videos".into(),
+                    enabled: true,
+                    target_dir: root.path().join("Videos"),
+                    extensions: vec![".mkv".into()],
+                    icon_name: None,
+                },
+            ],
+            ..Settings::default()
+        };
+        let auto_destination =
+            preview_auto_destination("https://example.com/song.mp3", None, &settings);
 
-        let resolved = DestinationPolicy::manual().resolve(
-            "https://example.com/video.mp4",
-            &destination,
+        let overrides = DestinationOverrides::from_user_destination(
+            &root.path().join("Music").join("movie.mkv"),
+            &auto_destination,
+        )
+        .unwrap();
+        let resolved = DestinationPolicy::with_overrides(&settings, overrides)
+            .resolve("https://example.com/song.mp3", None);
+
+        assert_eq!(
+            resolved.destination,
+            root.path().join("Videos").join("movie.mkv")
+        );
+        assert_eq!(resolved.finalize_strategy, FinalizeStrategy::MoveNoReplace);
+    }
+
+    #[test]
+    fn user_overrides_only_directory_and_keeps_filename_backend_driven() {
+        let root = temp_dir();
+        let settings = settings_for(&root.path().join("Downloads"));
+        let auto_destination =
+            preview_auto_destination("https://example.com/song.mp3", None, &settings);
+
+        let overrides = DestinationOverrides::from_user_destination(
+            &root.path().join("Custom").join("song.mp3"),
+            &auto_destination,
+        )
+        .unwrap();
+        let resolved = DestinationPolicy::with_overrides(&settings, overrides)
+            .resolve("https://example.com/song.mp3", Some("renamed.flac"));
+
+        assert_eq!(
+            resolved.destination,
+            root.path().join("Custom").join("renamed.flac")
+        );
+    }
+
+    #[test]
+    fn user_destination_without_filename_is_rejected() {
+        let auto_destination = PathBuf::from("/tmp/Downloads/song.mp3");
+        let error = DestinationOverrides::from_user_destination(Path::new(""), &auto_destination)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn preview_does_not_create_target_directories() {
+        let root = temp_dir();
+        let downloads = root.path().join("Downloads");
+        let preview = preview_auto_destination(
+            "https://example.com/file.bin",
             None,
+            &settings_for(&downloads),
         );
 
-        assert_eq!(resolved.destination, destination);
-        assert_eq!(resolved.finalize_strategy, FinalizeStrategy::Move);
+        assert_eq!(preview, downloads.join("file.bin"));
+        assert!(!downloads.exists());
     }
 
     #[test]
@@ -437,11 +558,8 @@ mod tests {
         std::fs::create_dir_all(&downloads).unwrap();
         std::fs::write(downloads.join("movie.mkv"), b"old").unwrap();
 
-        let resolved = DestinationPolicy::automatic(&settings_for(&downloads)).resolve(
-            "https://example.com/movie.mkv",
-            Path::new(""),
-            None,
-        );
+        let resolved = DestinationPolicy::automatic(&settings_for(&downloads))
+            .resolve("https://example.com/movie.mkv", None);
 
         assert_eq!(resolved.destination, downloads.join("movie (1).mkv"));
         assert_eq!(resolved.finalize_strategy, FinalizeStrategy::MoveNoReplace);
@@ -452,11 +570,8 @@ mod tests {
         let root = temp_dir();
         let downloads = root.path().join("Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
-        let resolved = DestinationPolicy::automatic(&settings_for(&downloads)).resolve(
-            "https://example.com/file.bin",
-            Path::new(""),
-            None,
-        );
+        let resolved = DestinationPolicy::automatic(&settings_for(&downloads))
+            .resolve("https://example.com/file.bin", None);
         std::fs::write(&resolved.part_path, b"partial").unwrap();
 
         let error = prepare_resolved_destination(&resolved).unwrap_err();
@@ -479,5 +594,33 @@ mod tests {
 
         assert_eq!(std::fs::read(&destination).unwrap(), b"new");
         assert!(!part_path.exists());
+    }
+
+    #[test]
+    fn resolve_checked_creates_missing_rule_directories() {
+        let root = temp_dir();
+        let settings = Settings {
+            default_download_dir: Some(root.path().join("Downloads")),
+            destination_rules_enabled: true,
+            destination_rules: vec![DestinationRule {
+                id: "videos".into(),
+                label: "Videos".into(),
+                enabled: true,
+                target_dir: root.path().join("Videos"),
+                extensions: vec![".mp4".into()],
+                icon_name: None,
+            }],
+            ..Settings::default()
+        };
+
+        let resolved = DestinationPolicy::automatic(&settings)
+            .resolve_checked("https://example.com/movie.mp4", None)
+            .unwrap();
+
+        assert_eq!(
+            resolved.destination,
+            root.path().join("Videos").join("movie.mp4")
+        );
+        assert!(root.path().join("Videos").exists());
     }
 }

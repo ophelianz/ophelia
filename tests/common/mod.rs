@@ -19,8 +19,10 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc};
 
+use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::TokenBucket;
 use ophelia::engine::types::{DownloadStatus, ProgressUpdate};
+use ophelia::settings::Settings;
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(Semaphore::MAX_PERMITS))
@@ -28,6 +30,10 @@ pub fn unlimited_semaphore() -> Arc<Semaphore> {
 
 pub fn unlimited_throttle() -> Arc<TokenBucket> {
     Arc::new(TokenBucket::new(0))
+}
+
+pub fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
+    DestinationPolicy::for_resolved_destination(&Settings::default(), destination)
 }
 
 pub fn test_data(size: usize) -> Vec<u8> {

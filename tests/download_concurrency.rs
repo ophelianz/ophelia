@@ -18,7 +18,6 @@ use common::*;
 
 use std::sync::{Arc, Mutex};
 
-use ophelia::engine::destination::DestinationPolicy;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
@@ -55,7 +54,7 @@ async fn work_stealing_produces_correct_output() {
         DownloadId(0),
         url,
         dest.clone(),
-        DestinationPolicy::manual(),
+        exact_destination_policy(&dest),
         config,
         tx,
         CancellationToken::new(),
@@ -108,7 +107,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         DownloadId(0),
         url,
         dest.clone(),
-        DestinationPolicy::manual(),
+        exact_destination_policy(&dest),
         config,
         tx,
         CancellationToken::new(),

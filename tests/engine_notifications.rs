@@ -51,7 +51,7 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
-        DestinationPolicy::manual(),
+        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
         HttpDownloadConfig::default(),
     ));
 
@@ -94,7 +94,7 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
-        DestinationPolicy::manual(),
+        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
         HttpDownloadConfig::default(),
     ));
     std::fs::write(&destination, b"partial").unwrap();
