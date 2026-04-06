@@ -309,7 +309,7 @@ impl Downloads {
             .and_then(|name| name.to_str())
             .unwrap_or("download")
             .to_string();
-        let spec = match DownloadSpec::from_manual_input(url, destination, &self.settings) {
+        let spec = match DownloadSpec::from_user_input(url, destination, &self.settings) {
             Ok(spec) => spec,
             Err(error) => {
                 self.report_add_failure(display_name, error, cx);

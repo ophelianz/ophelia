@@ -36,7 +36,7 @@ These names are intentional too:
 - `artifact state`: whether a transfer's bytes are still present on disk, tracked separately from transfer outcome/history
 - `live transfer metadata`: provider kind, source label, and control support cached next to live rows so workflow-shaped views can mirror backend semantics cheaply
 - `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
-- `destination policy`: backend-owned resolution of automatic destination folders, collision behavior, and final-file commit semantics
+- `destination policy`: backend-owned resolution of destination folders, collision behavior, and final-file commit semantics
 
 ## Directory map
 
@@ -116,6 +116,6 @@ For backend code:
 
 For deeper backend notes:
 
-- See `docs/architecture.md` for the as-built backend architecture, current gaps, and incremental direction.
+- See `docs/architecture.md` for the backend architecture, runtime ownership model, Rust/DOP design choices, performance tradeoffs, and current hotspots.
 - See `tests/` plus local `engine/destination.rs`, `engine/provider.rs`, `ipc.rs`, `engine/state/db.rs`, and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, destination-policy behavior, provider glue, engine notifications, provider-kind persistence migration, history queries, IPC ingress normalization, and DB worker event flow.
 - Backend history now keeps transfer outcome and artifact presence separate, which is the basis for "delete file but keep history" behavior.
