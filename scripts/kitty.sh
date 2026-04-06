@@ -106,10 +106,10 @@ apply_header() {
             if (at_top) {
                 if (in_block) {
                     block = block $0 ORS
-                    if ($0 ~ /This file is part of Ophelia\./) {
+                    if ($0 ~ /This file is part of Ophelia/) {
                         saw_ophelia = 1
                     }
-                    if ($0 ~ /GPL License, version 3 or later\./) {
+                    if ($0 ~ /GPL License, version 3 or later\./ || $0 ~ /terms of the GPL License, version 3 or later\./) {
                         saw_gpl = 1
                     }
                     if ($0 ~ /\*\/[[:space:]]*$/) {
@@ -128,8 +128,8 @@ apply_header() {
                 if ($0 ~ /^\/\*/) {
                     in_block = 1
                     block = $0 ORS
-                    saw_ophelia = ($0 ~ /This file is part of Ophelia\./)
-                    saw_gpl = ($0 ~ /GPL License, version 3 or later\./)
+                    saw_ophelia = ($0 ~ /This file is part of Ophelia/)
+                    saw_gpl = ($0 ~ /GPL License, version 3 or later\./ || $0 ~ /terms of the GPL License, version 3 or later\./)
                     if ($0 ~ /\*\/[[:space:]]*$/) {
                         block_is_ophelia = saw_ophelia && saw_gpl
                         flush_block()

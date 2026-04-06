@@ -17,21 +17,6 @@
 **       じしf_,)ノ
 **************************************************/
 
-/***************************************************
-** This file is part of Ophelia, distributed under the
-** terms of the GPL License, version 3 or later.
-**
-**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
-** ( bugs, do no evil and behave plz )
-**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
-**   ○
-**     ○
-**       ／l、
-**     （ﾟ､ ｡ ７
-**       l  ~ヽ
-**       じしf_,)ノ
-**************************************************/
-
 //! HTTP/HTTPS download orchestrator.
 //!
 //! `download_task` drives the full lifecycle of one download:

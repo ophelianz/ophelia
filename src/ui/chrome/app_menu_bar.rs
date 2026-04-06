@@ -17,21 +17,6 @@
 **       じしf_,)ノ
 **************************************************/
 
-/***************************************************
-** This file is part of Ophelia, distributed under the
-** terms of the GPL License, version 3 or later.
-**
-**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
-** ( bugs, do no evil and behave plz )
-**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
-**   ○
-**     ○
-**       ／l、
-**     （ﾟ､ ｡ ７
-**       l  ~ヽ
-**       じしf_,)ノ
-**************************************************/
-
 use gpui::{
     Context, Entity, FontWeight, IntoElement, MouseButton, MouseMoveEvent, OwnedMenu,
     ParentElement, Render, Window, div, prelude::*, px,
