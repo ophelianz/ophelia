@@ -18,3 +18,5 @@ settings:
         section: "目标位置"
         destination_rules_title: "目标位置"
         destination_rules_restore_defaults: "恢复默认"
+        collision_strategy_rename: "重命名"
+        collision_strategy_replace: "替换"

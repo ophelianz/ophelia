@@ -48,7 +48,11 @@ fn render_collision_strategy(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     h_flex()
-        .gap(px(Spacing::SETTINGS_INLINE_GAP))
+        .overflow_hidden()
+        .rounded(px(Chrome::BUTTON_RADIUS))
+        .border_1()
+        .border_color(Colors::input_border())
+        .bg(Colors::background())
         .child(collision_strategy_button(
             this,
             CollisionStrategy::Rename,
@@ -79,20 +83,26 @@ fn collision_strategy_button(
 
     div()
         .id(id)
-        .px(px(Chrome::MENU_ITEM_PADDING_X))
-        .py(px(Chrome::MENU_ITEM_PADDING_Y))
-        .rounded(px(Chrome::BUTTON_RADIUS))
-        .border_1()
-        .border_color(if selected {
-            Colors::ring()
-        } else {
-            Colors::input_border()
+        .min_w(px(88.0))
+        .h(px(Chrome::BUTTON_HEIGHT))
+        .px(px(Chrome::BUTTON_PADDING_X))
+        .when(matches!(strategy, CollisionStrategy::Rename), |this| {
+            this.rounded_l(px(Chrome::BUTTON_RADIUS))
+        })
+        .when(matches!(strategy, CollisionStrategy::Replace), |this| {
+            this.rounded_r(px(Chrome::BUTTON_RADIUS))
         })
         .bg(if selected {
             Colors::muted()
         } else {
             Colors::background()
         })
+        .when(matches!(strategy, CollisionStrategy::Rename), |this| {
+            this.border_r_1().border_color(Colors::input_border())
+        })
+        .flex()
+        .items_center()
+        .justify_center()
         .text_sm()
         .font_weight(if selected {
             gpui::FontWeight::SEMIBOLD

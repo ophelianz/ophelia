@@ -139,7 +139,7 @@ impl Render for NumberInput {
             .on_action(cx.listener(Self::increment))
             .on_action(cx.listener(Self::decrement))
             .child(
-                step_button("decrement", "-")
+                step_button("decrement", "-", StepButtonSide::Left)
                     .border_r_1()
                     .border_color(Colors::input_border())
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -148,7 +148,7 @@ impl Render for NumberInput {
             )
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .child(
-                step_button("increment", "+")
+                step_button("increment", "+", StepButtonSide::Right)
                     .border_l_1()
                     .border_color(Colors::input_border())
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -164,15 +164,27 @@ enum StepDirection {
     Decrement,
 }
 
+#[derive(Clone, Copy)]
+enum StepButtonSide {
+    Left,
+    Right,
+}
+
 fn sanitize_digits(text: &str) -> String {
     text.chars().filter(|ch| ch.is_ascii_digit()).collect()
 }
 
-fn step_button(id: &'static str, label: &'static str) -> Stateful<gpui::Div> {
+fn step_button(id: &'static str, label: &'static str, side: StepButtonSide) -> Stateful<gpui::Div> {
     div()
         .id(id)
         .w(px(Chrome::SIDEBAR_BUTTON_SIZE))
         .h(px(Chrome::SIDEBAR_BUTTON_SIZE))
+        .when(matches!(side, StepButtonSide::Left), |this| {
+            this.rounded_l(px(Chrome::BUTTON_RADIUS))
+        })
+        .when(matches!(side, StepButtonSide::Right), |this| {
+            this.rounded_r(px(Chrome::BUTTON_RADIUS))
+        })
         .flex()
         .items_center()
         .justify_center()

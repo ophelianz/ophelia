@@ -102,6 +102,7 @@ impl Render for DirectoryInput {
                     .id("directory-picker")
                     .w(px(Chrome::SIDEBAR_BUTTON_SIZE))
                     .h(px(Chrome::SIDEBAR_BUTTON_SIZE))
+                    .rounded_r(px(Chrome::BUTTON_RADIUS))
                     .flex()
                     .items_center()
                     .justify_center()
