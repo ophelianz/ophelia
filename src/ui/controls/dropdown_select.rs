@@ -223,3 +223,79 @@ fn render_popup(
                 .into_any_element()
         }))
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, Entity, MouseButton, Render, TestApp, Window, point, px};
+
+    use super::*;
+
+    struct DropdownHost {
+        dropdown: Entity<DropdownSelect>,
+        changed_count: usize,
+    }
+
+    impl DropdownHost {
+        fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let dropdown = cx.new(|cx| {
+                DropdownSelect::new(
+                    "test-dropdown",
+                    [
+                        DropdownOption::new("en", "English"),
+                        DropdownOption::new("zh-CN", "Simplified Chinese"),
+                    ],
+                    "en",
+                    cx,
+                )
+            });
+
+            cx.subscribe(
+                &dropdown,
+                |this: &mut Self, _, _: &DropdownSelectChanged, cx| {
+                    this.changed_count += 1;
+                    cx.notify();
+                },
+            )
+            .detach();
+
+            Self {
+                dropdown,
+                changed_count: 0,
+            }
+        }
+    }
+
+    impl Render for DropdownHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .p(px(20.0))
+                .child(div().w(px(240.0)).child(self.dropdown.clone()))
+        }
+    }
+
+    #[test]
+    fn selecting_an_option_updates_state_emits_change_and_closes_popup() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(DropdownHost::new);
+
+        window.draw();
+        window.simulate_click(point(px(40.0), px(40.0)), MouseButton::Left);
+
+        window.read(|host, app| {
+            let dropdown = host.dropdown.read(app);
+            assert!(dropdown.open);
+            assert_eq!(dropdown.selected_value(), "en");
+        });
+
+        window.draw();
+        window.simulate_click(point(px(40.0), px(132.0)), MouseButton::Left);
+
+        window.read(|host, app| {
+            let dropdown = host.dropdown.read(app);
+            assert_eq!(dropdown.selected_value(), "zh-CN");
+            assert!(!dropdown.open);
+            assert_eq!(host.changed_count, 1);
+        });
+    }
+}

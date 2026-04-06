@@ -25,8 +25,8 @@ use gpui::{
     App, Bounds, ContentMask, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, actions, div, fill, point,
-    prelude::*, px, relative, rgba, size,
+    ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, actions, div,
+    fill, point, prelude::*, px, relative, rgba, size,
 };
 
 use crate::ui::prelude::*;
@@ -397,7 +397,7 @@ impl TextField {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -752,6 +752,8 @@ impl Element for TextFieldElement {
             line.paint(
                 point(bounds.origin.x + scroll_offset, bounds.origin.y),
                 window.line_height(),
+                TextAlign::Left,
+                None,
                 window,
                 cx,
             )

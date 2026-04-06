@@ -290,8 +290,7 @@ impl Downloads {
                         model.tick_speed();
                     })
                     .ok();
-                })
-                .ok();
+                });
             }
         })
         .detach();

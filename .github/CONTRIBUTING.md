@@ -81,6 +81,13 @@ When possible, we follow patterns from:
 
 That is intentional. `gpui-component` comes from a major GPUI contributor and is one of the best practical references for idiomatic GPUI usage. If you are unsure how to structure a control or interaction pattern, copying that style is usually better than inventing a brand-new Ophelia-specific one.
 
+For now, Ophelia also depends on a local sibling checkout of `gpui-ce` during active framework iteration. The expected layout is:
+
+- `../ophelia`
+- `../gpui-ce`
+
+If that changes later, we will move back to a git or published dependency.
+
 ## Frontend Structure
 
 The frontend is organized around a few simple layers:
@@ -208,6 +215,19 @@ This does not need to become a giant translation pass every time you touch a fil
 If a part of the frontend already has an intentional pattern, extend it.
 
 If you think the pattern is bad, say so in the PR and justify the change clearly. “I personally prefer X” is not enough. Explain the maintenance or product payoff.
+
+### 9. Use GPUI-native tests when the behavior is UI-shaped
+
+If a behavior depends on GPUI entities, focus, clicks, typing, subscriptions, prompts, clipboard, restart, or resize, prefer a `gpui-ce` `TestApp` test over “we clicked around manually and it seemed fine.”
+
+Quick rule:
+
+- pure logic -> normal unit test
+- real UI behavior -> `TestApp`
+
+`TestAppContext` and the lower-level visual/test contexts are still fine when a test needs a capability the higher-level wrapper does not expose cleanly. They are the escape hatch, not the default.
+
+For now, colocated `#[cfg(test)]` modules are preferred unless there is a strong reason to build a heavier test harness.
 
 ## Known Frontend Hotspots
 

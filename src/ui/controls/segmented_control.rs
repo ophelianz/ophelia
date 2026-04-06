@@ -147,3 +147,59 @@ impl RenderOnce for SegmentedControl {
             }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, MouseButton, Render, TestApp, Window, px};
+
+    use super::*;
+
+    struct SegmentedControlHost {
+        selected: &'static str,
+    }
+
+    impl SegmentedControlHost {
+        fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+            Self { selected: "rename" }
+        }
+    }
+
+    impl Render for SegmentedControlHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().p(px(20.0)).child(
+                SegmentedControl::new("test-segmented-control")
+                    .option(
+                        SegmentedControlOption::new("rename", "Rename")
+                            .selected(self.selected == "rename")
+                            .min_width(96.0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected = "rename";
+                                cx.notify();
+                            })),
+                    )
+                    .option(
+                        SegmentedControlOption::new("replace", "Replace")
+                            .selected(self.selected == "replace")
+                            .min_width(96.0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected = "replace";
+                                cx.notify();
+                            })),
+                    ),
+            )
+        }
+    }
+
+    #[test]
+    fn clicking_a_segment_updates_the_selected_state() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(SegmentedControlHost::new);
+
+        window.draw();
+        window.simulate_click(gpui::point(px(160.0), px(40.0)), MouseButton::Left);
+
+        window.read(|host, _| {
+            assert_eq!(host.selected, "replace");
+        });
+    }
+}

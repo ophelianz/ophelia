@@ -72,8 +72,7 @@ impl DirectoryInput {
                             this.set_text(path_text, cx);
                         })
                         .ok();
-                })
-                .ok();
+                });
             }
         })
         .detach();

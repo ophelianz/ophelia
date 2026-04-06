@@ -343,3 +343,195 @@ impl Render for DownloadModal {
             )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gpui::{
+        Bounds, ClipboardItem, Context, Entity, Focusable, MouseButton, Render, TestApp, Window,
+        WindowBounds, WindowOptions, point, px,
+    };
+
+    use super::*;
+
+    struct DownloadModalHost {
+        modal: Entity<DownloadModal>,
+        confirmed: Option<(String, PathBuf)>,
+        cancelled: usize,
+    }
+
+    impl DownloadModalHost {
+        fn new(settings: Settings, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let modal = cx.new(|cx| DownloadModal::new(settings, cx));
+
+            cx.subscribe(
+                &modal,
+                |this: &mut Self, _, event: &DownloadConfirmed, cx| {
+                    this.confirmed = Some((event.url.clone(), event.destination.clone()));
+                    cx.notify();
+                },
+            )
+            .detach();
+
+            cx.subscribe(&modal, |this: &mut Self, _, _: &DownloadCancelled, cx| {
+                this.cancelled += 1;
+                cx.notify();
+            })
+            .detach();
+
+            Self {
+                modal,
+                confirmed: None,
+                cancelled: 0,
+            }
+        }
+    }
+
+    impl Render for DownloadModalHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.modal.clone())
+        }
+    }
+
+    fn test_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.default_download_dir = Some(std::env::temp_dir().join("ophelia-modal-tests"));
+        settings.destination_rules_enabled = false;
+        settings.destination_rules.clear();
+        settings
+    }
+
+    fn open_host(app: &mut TestApp, settings: Settings) -> gpui::TestAppWindow<DownloadModalHost> {
+        app.update(|cx| {
+            crate::ui::chrome::modal::bind_actions(cx);
+            crate::ui::controls::text_field::init(cx);
+        });
+
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
+        let mut window = app.open_window_with_options(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |window, cx| DownloadModalHost::new(settings.clone(), window, cx),
+        );
+        window.draw();
+        window
+    }
+
+    fn focus_url_input(window: &mut gpui::TestAppWindow<DownloadModalHost>) {
+        window.update(|host, window, cx| {
+            host.modal.update(cx, |modal, cx| {
+                modal.url_input.focus_handle(cx).focus(window, cx);
+            });
+        });
+    }
+
+    fn focus_destination_input(window: &mut gpui::TestAppWindow<DownloadModalHost>) {
+        window.update(|host, window, cx| {
+            host.modal.update(cx, |modal, cx| {
+                modal.destination_input.focus_handle(cx).focus(window, cx);
+            });
+        });
+    }
+
+    #[test]
+    fn typing_a_source_updates_preview_and_user_editing_preserves_destination() {
+        let settings = test_settings();
+        let expected_initial = settings
+            .download_dir()
+            .join("music.mp3")
+            .to_string_lossy()
+            .to_string();
+
+        let mut app = TestApp::new();
+        let mut window = open_host(&mut app, settings.clone());
+
+        focus_url_input(&mut window);
+        window.simulate_input("https://example.com/music.mp3");
+
+        window.read(|host, app| {
+            let modal = host.modal.read(app);
+            assert_eq!(modal.destination_input.read(app).text(), expected_initial);
+        });
+
+        focus_destination_input(&mut window);
+        window.simulate_keystrokes("cmd-a backspace");
+        window.simulate_input("custom.mp3");
+
+        focus_url_input(&mut window);
+        window.simulate_keystrokes("cmd-a backspace");
+        window.simulate_input("https://example.com/video.mp4");
+
+        window.read(|host, app| {
+            let modal = host.modal.read(app);
+            assert_eq!(modal.destination_input.read(app).text(), "custom.mp3");
+            assert!(modal.destination_edited);
+        });
+    }
+
+    #[test]
+    fn enter_submits_only_when_the_form_is_valid() {
+        let settings = test_settings();
+        let expected_destination = settings
+            .download_dir()
+            .join("file.bin")
+            .to_string_lossy()
+            .to_string();
+
+        let mut app = TestApp::new();
+        let mut window = open_host(&mut app, settings);
+
+        focus_url_input(&mut window);
+        window.simulate_keystrokes("enter");
+
+        window.read(|host, _| {
+            assert!(host.confirmed.is_none());
+        });
+
+        window.simulate_input("https://example.com/file.bin");
+        window.simulate_keystrokes("enter");
+
+        window.read(|host, _| {
+            assert_eq!(
+                host.confirmed,
+                Some((
+                    "https://example.com/file.bin".to_string(),
+                    PathBuf::from(expected_destination),
+                ))
+            );
+        });
+    }
+
+    #[test]
+    fn clicking_the_backdrop_emits_cancel() {
+        let mut app = TestApp::new();
+        let mut window = open_host(&mut app, test_settings());
+
+        window.simulate_click(point(px(10.0), px(10.0)), MouseButton::Left);
+
+        window.read(|host, _| {
+            assert_eq!(host.cancelled, 1);
+        });
+    }
+
+    #[test]
+    fn paste_button_reads_from_the_test_clipboard() {
+        let mut app = TestApp::new();
+        app.write_to_clipboard(ClipboardItem::new_string(
+            "https://example.com/clipboard.bin".to_string(),
+        ));
+        let mut window = open_host(&mut app, test_settings());
+
+        window.simulate_click(point(px(600.0), px(266.0)), MouseButton::Left);
+
+        window.read(|host, app| {
+            let modal = host.modal.read(app);
+            assert_eq!(
+                modal.url_input.read(app).text(),
+                "https://example.com/clipboard.bin"
+            );
+        });
+    }
+}

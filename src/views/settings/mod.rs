@@ -104,7 +104,10 @@ impl EventEmitter<SettingsClosed> for SettingsWindow {}
 
 impl SettingsWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = Settings::load();
+        Self::from_settings(Settings::load(), cx)
+    }
+
+    fn from_settings(settings: Settings, cx: &mut Context<Self>) -> Self {
         let initial_settings = settings.clone();
         let selected_language = settings.resolved_language().to_string();
         let fallback_download_dir = settings.download_dir().to_string_lossy().to_string();
@@ -197,6 +200,11 @@ impl SettingsWindow {
             next_destination_rule_index,
             open_icon_picker_rule: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_settings(settings: Settings, cx: &mut Context<Self>) -> Self {
+        Self::from_settings(settings, cx)
     }
 
     fn draft_settings(&self, cx: &mut Context<Self>) -> Settings {
@@ -761,6 +769,13 @@ fn setting_row(
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+
+    use gpui::{
+        Bounds, MouseButton, TestApp, TestAppContext, Window, WindowBounds, WindowOptions, point,
+        px,
+    };
+
     use super::*;
 
     #[test]
@@ -793,5 +808,68 @@ mod tests {
         ];
 
         assert_eq!(next_destination_rule_index(&rules), 3);
+    }
+
+    #[test]
+    fn language_dropdown_updates_draft_settings_via_real_ui_interaction() {
+        let mut app = TestApp::new();
+        let mut settings = Settings::default();
+        settings.language = "en".into();
+
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
+        let mut window = app.open_window_with_options(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |_window: &mut Window, cx| SettingsWindow::new_with_settings(settings.clone(), cx),
+        );
+        window.draw();
+
+        window.simulate_click(point(px(660.0), px(100.0)), MouseButton::Left);
+        window.draw();
+        window.simulate_click(point(px(660.0), px(198.0)), MouseButton::Left);
+
+        window.update(|settings: &mut SettingsWindow, _window, cx| {
+            assert_eq!(settings.draft_settings(cx).resolved_language(), "zh-CN");
+            assert!(settings.needs_restart(cx));
+        });
+    }
+
+    #[test]
+    fn restart_button_requests_an_app_restart() {
+        let mut app = TestAppContext::single();
+        let mut settings = Settings::default();
+        settings.language = "en".into();
+        let mut restart = app.expect_restart();
+
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
+        let window = app.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                move |_window: &mut Window, cx| {
+                    cx.new(|cx| SettingsWindow::new_with_settings(settings.clone(), cx))
+                },
+            )
+            .unwrap()
+        });
+        let view = window.root(&mut app).unwrap();
+        let cx = gpui::VisualTestContext::from_window(*window.deref(), &app).into_mut();
+        cx.run_until_parked();
+
+        cx.simulate_click(point(px(660.0), px(100.0)), gpui::Modifiers::none());
+        cx.simulate_click(point(px(660.0), px(198.0)), gpui::Modifiers::none());
+
+        cx.update(|window, app| {
+            view.update(app, |settings: &mut SettingsWindow, cx| {
+                assert!(settings.needs_restart(cx));
+                settings.save_and_restart(window, cx);
+            });
+        });
+
+        assert!(restart.try_recv().ok().flatten().is_some());
     }
 }

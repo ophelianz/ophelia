@@ -36,6 +36,7 @@ pub fn build_menus() -> Vec<Menu> {
         vec![
             Menu {
                 name: t!("app.name").to_string().into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action(t!("menu.about").to_string(), About),
                     MenuItem::separator(),
@@ -46,6 +47,7 @@ pub fn build_menus() -> Vec<Menu> {
             },
             Menu {
                 name: t!("menu.file").to_string().into(),
+                disabled: false,
                 items: vec![MenuItem::action(
                     t!("menu.new_download").to_string(),
                     OpenDownloadModal,
@@ -54,10 +56,12 @@ pub fn build_menus() -> Vec<Menu> {
             edit_menu(),
             Menu {
                 name: t!("menu.window").to_string().into(),
+                disabled: false,
                 items: vec![],
             },
             Menu {
                 name: t!("menu.help").to_string().into(),
+                disabled: false,
                 items: vec![MenuItem::action(t!("menu.about").to_string(), About)],
             },
         ]
@@ -65,6 +69,7 @@ pub fn build_menus() -> Vec<Menu> {
         vec![
             Menu {
                 name: t!("menu.file").to_string().into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action(t!("menu.new_download").to_string(), OpenDownloadModal),
                     MenuItem::action(t!("menu.settings").to_string(), OpenSettings),
@@ -75,6 +80,7 @@ pub fn build_menus() -> Vec<Menu> {
             edit_menu(),
             Menu {
                 name: t!("menu.window").to_string().into(),
+                disabled: false,
                 items: vec![MenuItem::action(
                     t!("menu.new_download").to_string(),
                     OpenDownloadModal,
@@ -82,6 +88,7 @@ pub fn build_menus() -> Vec<Menu> {
             },
             Menu {
                 name: t!("menu.help").to_string().into(),
+                disabled: false,
                 items: vec![MenuItem::action(t!("menu.about").to_string(), About)],
             },
         ]
@@ -131,6 +138,7 @@ pub fn menu_label(menu: &OwnedMenu) -> SharedString {
 fn edit_menu() -> Menu {
     Menu {
         name: t!("menu.edit").to_string().into(),
+        disabled: false,
         items: vec![
             MenuItem::os_action(t!("menu.cut").to_string(), text_field::Cut, OsAction::Cut),
             MenuItem::os_action(
