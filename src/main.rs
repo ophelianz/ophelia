@@ -32,6 +32,9 @@ use assets::Assets;
 use gpui::{App, Application, Bounds, prelude::*, px, size};
 use views::main::main_window::MainWindow;
 
+const MAIN_WINDOW_MIN_WIDTH: f32 = 960.0;
+const MAIN_WINDOW_MIN_HEIGHT: f32 = 620.0;
+
 fn run() {
     Application::new()
         .with_assets(Assets::new())
@@ -57,9 +60,13 @@ fn run() {
 
             let bounds = Bounds::centered(None, size(px(1280.), px(720.)), cx);
             let main_window = cx
-                .open_window(platform::window_options(bounds), |_, cx| {
-                    cx.new(|cx| MainWindow::new(cx))
-                })
+                .open_window(
+                    platform::window_options(
+                        bounds,
+                        size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT)),
+                    ),
+                    |_, cx| cx.new(|cx| MainWindow::new(cx)),
+                )
                 .unwrap();
 
             app_actions::set_main_window(main_window, cx);

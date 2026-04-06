@@ -13,7 +13,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{App, Context, Entity, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, Entity, Pixels, StatefulInteractiveElement as _, Window, div, prelude::*, px,
+};
 
 use crate::app::Downloads;
 use crate::app_actions;
@@ -24,18 +26,30 @@ use crate::ui::prelude::*;
 use crate::views::overlays::about_modal::AboutLayer;
 use crate::views::overlays::download_modal::DownloadModalLayer;
 
+use super::chunk_bitmap::ChunkBitmapCard;
 use super::download_list::DownloadList;
 use super::history::HistoryView;
 use super::sidebar::Sidebar;
 use super::stats_bar::StatsBar;
 
 const HISTORY_NAV_INDEX: usize = 1;
+const SIDEBAR_MIN_WIDTH: f32 = 200.0;
+const SIDEBAR_MAX_WIDTH: f32 = 320.0;
+const TRANSFERS_TOP_PANEL_DEFAULT_HEIGHT: f32 = 220.0;
+const TRANSFERS_TOP_PANEL_MIN_HEIGHT: f32 = 180.0;
+const TRANSFERS_TOP_PANEL_MAX_HEIGHT: f32 = 320.0;
+const TRANSFERS_BOTTOM_PANEL_MIN_HEIGHT: f32 = 260.0;
+const TRANSFERS_STATS_PANEL_DEFAULT_WIDTH: f32 = 640.0;
+const TRANSFERS_STATS_PANEL_MIN_WIDTH: f32 = 360.0;
+const TRANSFERS_CHUNK_PANEL_DEFAULT_WIDTH: f32 = 320.0;
+const TRANSFERS_CHUNK_PANEL_MIN_WIDTH: f32 = 220.0;
 
 /// Root view
 /// owns the full window layout and all live state.
 pub struct MainWindow {
     menu_bar: Entity<AppMenuBar>,
     sidebar: Entity<Sidebar>,
+    sidebar_layout: Entity<ResizableState>,
     downloads: Entity<Downloads>,
     download_list: Entity<DownloadList>,
     history_view: Entity<HistoryView>,
@@ -49,8 +63,10 @@ impl MainWindow {
         let sidebar = cx.new(|_| Sidebar {
             active_item: 0,
             collapsed: false,
+            expanded_width: Spacing::SIDEBAR_WIDTH,
             download_dir: Settings::load().download_dir(),
         });
+        let sidebar_layout = cx.new(|_| ResizableState::default());
 
         let downloads = cx.new(|cx| Downloads::new(cx));
         let download_list = cx.new(|cx| DownloadList::new(downloads.clone(), cx));
@@ -70,6 +86,7 @@ impl MainWindow {
         Self {
             menu_bar,
             sidebar,
+            sidebar_layout,
             downloads,
             download_list,
             history_view,
@@ -133,21 +150,7 @@ impl Render for MainWindow {
                     .flex()
                     .flex_1()
                     .overflow_hidden()
-                    .child(self.sidebar.clone())
-                    .child(
-                        div().flex().flex_col().flex_1().overflow_hidden().child(
-                            div()
-                                .id("main-content")
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(Spacing::CARD_GAP))
-                                .overflow_y_scroll()
-                                .px(px(Spacing::CONTENT_PADDING_X))
-                                .py(px(Spacing::CONTENT_PADDING_Y))
-                                .child(self.render_content(view_model, cx)),
-                        ),
-                    ),
+                    .child(self.render_body(view_model, cx)),
             )
             .child(self.download_modal.clone())
             .child(self.about_modal.clone())
@@ -155,6 +158,67 @@ impl Render for MainWindow {
 }
 
 impl MainWindow {
+    fn render_body(
+        &self,
+        view_model: MainWindowViewModel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sidebar = self.sidebar.read(cx);
+        let sidebar_width = sidebar.expanded_width();
+        let collapsed = sidebar.is_collapsed();
+        let _ = sidebar;
+
+        let content = div()
+            .id("main-content")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .px(px(Spacing::CONTENT_PADDING_X))
+            .py(px(Spacing::CONTENT_PADDING_Y))
+            .child(self.render_content(view_model));
+
+        if collapsed {
+            h_flex()
+                .size_full()
+                .child(
+                    div()
+                        .w(px(Spacing::SIDEBAR_COLLAPSED_WIDTH))
+                        .h_full()
+                        .flex_shrink_0()
+                        .child(self.sidebar.clone()),
+                )
+                .child(content)
+                .into_any_element()
+        } else {
+            let sidebar_entity = self.sidebar.clone();
+            h_resizable("main-window-layout")
+                .with_state(&self.sidebar_layout)
+                .on_resize(move |state, _, cx| {
+                    let width = state
+                        .read(cx)
+                        .sizes()
+                        .first()
+                        .copied()
+                        .unwrap_or(px(Spacing::SIDEBAR_WIDTH));
+                    let _ = sidebar_entity.update(cx, |sidebar, cx| {
+                        sidebar.set_expanded_width(f32::from(width));
+                        cx.notify();
+                    });
+                })
+                .child(
+                    resizable_panel()
+                        .size(px(sidebar_width))
+                        .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                        .child(self.sidebar.clone()),
+                )
+                .child(resizable_panel().child(content))
+                .into_any_element()
+        }
+    }
+
     fn render_header(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         if cfg!(target_os = "macos") {
             WindowHeader::empty().into_any_element()
@@ -165,27 +229,67 @@ impl MainWindow {
         }
     }
 
-    fn render_content(
-        &self,
-        view_model: MainWindowViewModel,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_content(&self, view_model: MainWindowViewModel) -> impl IntoElement {
         match view_model.content {
-            MainContentViewModel::History => self.history_view.clone().into_any_element(),
-            MainContentViewModel::Downloads(stats) => v_flex()
-                .gap(px(Spacing::CARD_GAP))
-                .child(StatsBar {
-                    download_samples: stats.download_samples,
-                    upload_samples: stats.upload_samples,
-                    download_speed: stats.download_speed,
-                    upload_speed: stats.upload_speed,
-                    active_count: stats.active_count,
-                    finished_count: stats.finished_count,
-                    queued_count: stats.queued_count,
-                })
-                .child(self.download_list.clone())
+            MainContentViewModel::History => div()
+                .id("history-scroll")
+                .size_full()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(self.history_view.clone())
                 .into_any_element(),
+            MainContentViewModel::Downloads(stats) => {
+                self.render_transfers(stats).into_any_element()
+            }
         }
+    }
+
+    fn render_transfers(&self, stats: StatsBarViewModel) -> impl IntoElement {
+        v_resizable("transfers-layout")
+            .child(
+                resizable_panel()
+                    .size(px(TRANSFERS_TOP_PANEL_DEFAULT_HEIGHT))
+                    .size_range(
+                        px(TRANSFERS_TOP_PANEL_MIN_HEIGHT)..px(TRANSFERS_TOP_PANEL_MAX_HEIGHT),
+                    )
+                    .child(self.render_transfers_summary(stats)),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(px(TRANSFERS_BOTTOM_PANEL_MIN_HEIGHT)..Pixels::MAX)
+                    .child(
+                        div()
+                            .id("transfers-list-scroll")
+                            .size_full()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(self.download_list.clone()),
+                    ),
+            )
+    }
+
+    fn render_transfers_summary(&self, stats: StatsBarViewModel) -> impl IntoElement {
+        h_resizable("transfers-top-layout")
+            .child(
+                resizable_panel()
+                    .size(px(TRANSFERS_STATS_PANEL_DEFAULT_WIDTH))
+                    .size_range(px(TRANSFERS_STATS_PANEL_MIN_WIDTH)..Pixels::MAX)
+                    .child(StatsBar {
+                        download_samples: stats.download_samples,
+                        upload_samples: stats.upload_samples,
+                        download_speed: stats.download_speed,
+                        upload_speed: stats.upload_speed,
+                        active_count: stats.active_count,
+                        finished_count: stats.finished_count,
+                        queued_count: stats.queued_count,
+                    }),
+            )
+            .child(
+                resizable_panel()
+                    .size(px(TRANSFERS_CHUNK_PANEL_DEFAULT_WIDTH))
+                    .size_range(px(TRANSFERS_CHUNK_PANEL_MIN_WIDTH)..Pixels::MAX)
+                    .child(ChunkBitmapCard),
+            )
     }
 }
 

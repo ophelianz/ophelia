@@ -167,6 +167,7 @@ impl Render for DownloadList {
         let weak = cx.weak_entity();
 
         v_flex()
+            .pt(px(Spacing::SECTION_GAP))
             .child(
                 div()
                     .text_sm()

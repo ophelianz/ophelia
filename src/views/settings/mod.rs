@@ -22,7 +22,10 @@
 
 use std::path::Path;
 
-use gpui::{Context, Entity, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, EventEmitter, FontWeight, Pixels, SharedString,
+    StatefulInteractiveElement as _, Window, div, prelude::*, px,
+};
 use rust_i18n::t;
 
 use crate::settings::{
@@ -35,6 +38,10 @@ mod destination_rule_icon_picker;
 mod destinations;
 mod general;
 mod network;
+
+const SETTINGS_SIDEBAR_MIN_WIDTH: f32 = 140.0;
+const SETTINGS_SIDEBAR_MAX_WIDTH: f32 = 240.0;
+const SETTINGS_CONTENT_MIN_WIDTH: f32 = 520.0;
 
 // ---------------------------------------------------------------------------
 // Events
@@ -384,19 +391,34 @@ impl Render for SettingsWindow {
             .child(header)
             .child(
                 div()
-                    .flex()
                     .flex_1()
                     .border_t_1()
                     .border_color(Colors::border())
                     .overflow_hidden()
-                    .child(self.render_sidebar(cx))
                     .child(
-                        div()
-                            .id("settings-content")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .p(px(Spacing::SETTINGS_CONTENT_PADDING))
-                            .child(self.render_content(cx)),
+                        h_resizable("settings-layout")
+                            .child(
+                                resizable_panel()
+                                    .size(px(Spacing::SETTINGS_SIDEBAR_WIDTH))
+                                    .size_range(
+                                        px(SETTINGS_SIDEBAR_MIN_WIDTH)
+                                            ..px(SETTINGS_SIDEBAR_MAX_WIDTH),
+                                    )
+                                    .child(self.render_sidebar(cx)),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .size_range(px(SETTINGS_CONTENT_MIN_WIDTH)..Pixels::MAX)
+                                    .child(
+                                        div()
+                                            .id("settings-content")
+                                            .size_full()
+                                            .min_w_0()
+                                            .overflow_y_scroll()
+                                            .p(px(Spacing::SETTINGS_CONTENT_PADDING))
+                                            .child(self.render_content(cx)),
+                                    ),
+                            ),
                     ),
             )
     }
@@ -484,7 +506,7 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
 
         div()
-            .w(px(Spacing::SETTINGS_SIDEBAR_WIDTH))
+            .w_full()
             .flex_shrink_0()
             .border_r_1()
             .border_color(Colors::border())
@@ -709,15 +731,16 @@ fn setting_row(
     let description = description.into();
     div()
         .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(24.0))
+        .flex_wrap()
+        .items_start()
+        .gap(px(Spacing::SETTINGS_ROW_GAP))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(3.0))
+                .gap(px(Spacing::SETTINGS_LABEL_GAP))
                 .flex_1()
+                .min_w_0()
                 .child(
                     div()
                         .text_sm()
@@ -729,10 +752,11 @@ fn setting_row(
                     div()
                         .text_xs()
                         .text_color(Colors::muted_foreground())
+                        .truncate()
                         .child(description),
                 ),
         )
-        .child(div().flex_shrink_0().child(control))
+        .child(div().flex_shrink_0().ml_auto().child(control))
 }
 
 #[cfg(test)]

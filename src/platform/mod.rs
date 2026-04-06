@@ -13,7 +13,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{Bounds, Pixels, WindowOptions};
+use gpui::{Bounds, Pixels, Size, WindowOptions};
 
 #[derive(Clone, Copy)]
 pub struct WindowChrome {
@@ -36,6 +36,6 @@ pub fn window_chrome() -> WindowChrome {
     imp::window_chrome()
 }
 
-pub fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
-    imp::window_options(bounds)
+pub fn window_options(bounds: Bounds<Pixels>, min_size: Size<Pixels>) -> WindowOptions {
+    imp::window_options(bounds, min_size)
 }

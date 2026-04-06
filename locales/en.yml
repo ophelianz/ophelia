@@ -68,6 +68,8 @@ history:
 stats:
     title: "NETWORK THROUGHPUT"
     window: "last 60s"
+    chunk_bitmap_title: "CHUNK BITMAP"
+    chunk_bitmap_placeholder: "Chunk progress view coming soon"
     active: "Active"
     finished: "Finished"
     queued: "Queued"

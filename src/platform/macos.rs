@@ -13,7 +13,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{Bounds, Pixels, TitlebarOptions, WindowBounds, WindowOptions, point, px};
+use gpui::{Bounds, Pixels, Size, TitlebarOptions, WindowBounds, WindowOptions, point, px};
 
 use crate::platform::WindowChrome;
 
@@ -27,7 +27,7 @@ pub fn window_chrome() -> WindowChrome {
     }
 }
 
-pub fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
+pub fn window_options(bounds: Bounds<Pixels>, min_size: Size<Pixels>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
@@ -35,6 +35,7 @@ pub fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
             traffic_light_position: Some(point(px(16.0), px(14.0))),
             ..Default::default()
         }),
+        window_min_size: Some(min_size),
         ..Default::default()
     }
 }

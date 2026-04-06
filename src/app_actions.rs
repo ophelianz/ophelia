@@ -29,6 +29,9 @@ pub struct AppState {
 
 impl Global for AppState {}
 
+const SETTINGS_WINDOW_MIN_WIDTH: f32 = 760.0;
+const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 520.0;
+
 pub fn init(cx: &mut App) {
     let show_about = cx.new(|_| false);
     let show_download_modal = cx.new(|_| false);
@@ -75,9 +78,16 @@ fn open_settings(_: &app_menu::OpenSettings, cx: &mut App) {
     };
 
     let bounds = Bounds::centered(None, size(px(1280.), px(600.)), cx);
-    let Ok(settings_window) = cx.open_window(platform::window_options(bounds), |_, cx| {
-        cx.new(|cx| SettingsWindow::new(cx))
-    }) else {
+    let Ok(settings_window) = cx.open_window(
+        platform::window_options(
+            bounds,
+            size(
+                px(SETTINGS_WINDOW_MIN_WIDTH),
+                px(SETTINGS_WINDOW_MIN_HEIGHT),
+            ),
+        ),
+        |_, cx| cx.new(|cx| SettingsWindow::new(cx)),
+    ) else {
         return;
     };
 

@@ -32,18 +32,30 @@ type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct Sidebar {
     pub active_item: usize,
     pub collapsed: bool,
+    pub expanded_width: f32,
     pub download_dir: PathBuf,
 }
 
 impl Sidebar {
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    pub fn expanded_width(&self) -> f32 {
+        self.expanded_width
+    }
+
+    pub fn set_expanded_width(&mut self, width: f32) {
+        self.expanded_width = width;
+    }
+
+    pub fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+    }
+
     fn view_model(&self) -> SidebarViewModel {
         SidebarViewModel {
             collapsed: self.collapsed,
-            width: if self.collapsed {
-                Spacing::SIDEBAR_COLLAPSED_WIDTH
-            } else {
-                Spacing::SIDEBAR_WIDTH
-            },
             nav_items: vec![
                 SidebarNavItemModel::new(
                     0,
@@ -72,7 +84,7 @@ impl Render for Sidebar {
             let weak = weak.clone();
             move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    this.collapsed = !this.collapsed;
+                    this.toggle_collapsed();
                     cx.notify();
                 });
             }
@@ -85,7 +97,7 @@ impl Render for Sidebar {
         div()
             .flex()
             .flex_col()
-            .w(px(vm.width))
+            .w_full()
             .h_full()
             .flex_shrink_0()
             .border_r_1()
@@ -135,7 +147,6 @@ impl Render for Sidebar {
 #[derive(Clone)]
 struct SidebarViewModel {
     collapsed: bool,
-    width: f32,
     nav_items: Vec<SidebarNavItemModel>,
     storage: StorageCardModel,
 }
@@ -483,5 +494,28 @@ fn format_gb(bytes: u64) -> String {
         format!("{:.1} TB", b / TB)
     } else {
         format!("{:.1} GB", b / GB)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_preserves_last_expanded_width() {
+        let mut sidebar = Sidebar {
+            active_item: 0,
+            collapsed: false,
+            expanded_width: 280.0,
+            download_dir: PathBuf::from("/tmp"),
+        };
+
+        sidebar.toggle_collapsed();
+        assert!(sidebar.is_collapsed());
+        assert_eq!(sidebar.expanded_width(), 280.0);
+
+        sidebar.toggle_collapsed();
+        assert!(!sidebar.is_collapsed());
+        assert_eq!(sidebar.expanded_width(), 280.0);
     }
 }

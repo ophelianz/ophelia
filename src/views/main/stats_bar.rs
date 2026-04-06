@@ -37,7 +37,6 @@ impl RenderOnce for StatsBar {
             .flex()
             .flex_col()
             .gap(px(Spacing::SECTION_GAP))
-            .mb(px(Spacing::CONTENT_PADDING_Y))
             .p(px(Chrome::STATS_CARD_PADDING))
             .rounded(px(Chrome::PANEL_RADIUS))
             .border_1()

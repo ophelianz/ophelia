@@ -13,7 +13,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{Bounds, Pixels, WindowBounds, WindowOptions};
+use gpui::{Bounds, Pixels, Size, WindowBounds, WindowOptions};
 
 use crate::platform::WindowChrome;
 
@@ -25,10 +25,11 @@ pub fn window_chrome() -> WindowChrome {
     }
 }
 
-pub fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
+pub fn window_options(bounds: Bounds<Pixels>, min_size: Size<Pixels>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
+        window_min_size: Some(min_size),
         ..Default::default()
     }
 }

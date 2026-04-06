@@ -45,6 +45,7 @@ These names are intentional too:
 - `primitives/`
     - `icon.rs`: icon rendering helpers and icon names
     - `logo.rs`: Ophelia logo element
+    - `resizable/`: local resizable panel primitive modeled after `gpui-component`
 - `controls/`
     - `dropdown_select.rs`: reusable anchored dropdown/select control
     - `text_field.rs`: custom text input

@@ -92,7 +92,6 @@ impl Spacing {
     pub const CONTENT_PADDING_X: f32 = 32.0;
     pub const CONTENT_PADDING_Y: f32 = 24.0;
     pub const SECTION_GAP: f32 = 16.0;
-    pub const CARD_GAP: f32 = 14.0;
     pub const LIST_GAP: f32 = 8.0;
     pub const CONTROL_GAP: f32 = 10.0;
     pub const ROW_GAP: f32 = 12.0;
@@ -103,6 +102,8 @@ impl Spacing {
     pub const SETTINGS_SECTION_GAP: f32 = 24.0;
     pub const SETTINGS_GROUP_GAP: f32 = 20.0;
     pub const SETTINGS_PANEL_GAP: f32 = 12.0;
+    pub const SETTINGS_ROW_GAP: f32 = 24.0;
+    pub const SETTINGS_LABEL_GAP: f32 = 3.0;
     pub const SETTINGS_INLINE_GAP: f32 = 8.0;
     pub const SETTINGS_CONTENT_PADDING: f32 = 32.0;
     pub const SETTINGS_CONTROL_WIDTH: f32 = 220.0;
@@ -116,6 +117,9 @@ impl Spacing {
 pub struct Chrome;
 
 impl Chrome {
+    pub const RESIZE_HANDLE_SIZE: f32 = 1.0;
+    pub const RESIZE_HANDLE_PADDING: f32 = 4.0;
+
     pub const CONTROL_RADIUS: f32 = 6.0;
     pub const BUTTON_RADIUS: f32 = 8.0;
     pub const BUTTON_HEIGHT: f32 = 32.0;
