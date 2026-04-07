@@ -134,8 +134,36 @@ impl DownloadModal {
     fn clipboard_source(settings: &Settings, cx: &mut Context<Self>) -> Option<String> {
         cx.read_from_clipboard()
             .and_then(|item| item.text())
-            .map(|text| text.trim().to_string())
+            .and_then(Self::extract_clipboard_source)
             .filter(|text| Self::preview_destination_for(text, settings).is_some())
+    }
+
+    fn extract_clipboard_source(text: String) -> Option<String> {
+        let mut lines = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        if lines.is_empty() {
+            return None;
+        }
+
+        let preferred = lines
+            .iter()
+            .find(|line| Self::looks_like_download_source(line))
+            .cloned();
+
+        preferred.or_else(|| Some(lines.swap_remove(0)))
+    }
+
+    fn looks_like_download_source(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("://")
+            || lower.starts_with("magnet:")
+            || lower.starts_with("ftp:")
+            || lower.starts_with("file:")
     }
 
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -535,6 +563,35 @@ mod tests {
             assert_eq!(
                 modal.url_input.read(app).text(),
                 "https://example.com/clipboard.bin"
+            );
+        });
+    }
+
+    #[test]
+    fn multiline_clipboard_prefers_the_url_line() {
+        let settings = test_settings();
+        let expected_destination = settings
+            .download_dir()
+            .join("clipboard.bin")
+            .to_string_lossy()
+            .to_string();
+
+        let mut app = TestApp::new();
+        app.write_to_clipboard(ClipboardItem::new_string(
+            "Interesting Download\nhttps://example.com/clipboard.bin\nShared from Safari"
+                .to_string(),
+        ));
+        let window = open_host(&mut app, settings);
+
+        window.read(|host, app| {
+            let modal = host.modal.read(app);
+            assert_eq!(
+                modal.url_input.read(app).text(),
+                "https://example.com/clipboard.bin"
+            );
+            assert_eq!(
+                modal.destination_input.read(app).text(),
+                expected_destination
             );
         });
     }

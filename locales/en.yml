@@ -10,6 +10,7 @@ menu:
     file: "File"
     help: "Help"
     new_download: "New Download"
+    open_ophelia: "Open Ophelia"
     paste: "Paste"
     quit: "Quit"
     select_all: "Select All"

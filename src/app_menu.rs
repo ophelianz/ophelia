@@ -22,7 +22,10 @@ use rust_i18n::t;
 
 use crate::ui::controls::text_field;
 
-actions!(ophelia_menu, [OpenDownloadModal, OpenSettings, About, Quit]);
+actions!(
+    ophelia_menu,
+    [OpenMainWindow, OpenDownloadModal, OpenSettings, About, Quit]
+);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([

@@ -388,6 +388,7 @@ mod tests {
         );
         let settings = Settings {
             default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            destination_rules_enabled: false,
             ..Settings::default()
         };
 
@@ -404,6 +405,7 @@ mod tests {
             AddDownloadRequest::from_url("https://example.com/path/file.bin?token=abc".to_string());
         let settings = Settings {
             default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            destination_rules_enabled: false,
             ..Settings::default()
         };
 

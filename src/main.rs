@@ -29,70 +29,65 @@ mod logging;
 mod platform;
 mod settings;
 mod theme;
+mod tray;
 mod ui;
 mod views;
 
 use assets::Assets;
-use gpui::{App, Application, Bounds, prelude::*, px, size};
-use views::main::main_window::MainWindow;
-
-const MAIN_WINDOW_MIN_WIDTH: f32 = 960.0;
-const MAIN_WINDOW_MIN_HEIGHT: f32 = 620.0;
+use gpui::{App, Application, ApplicationActivationPolicy, QuitMode, prelude::*};
 
 fn run() {
-    Application::new()
+    let app = Application::new()
         .with_assets(Assets::new())
-        .run(|cx: &mut App| {
-            let initial_settings = settings::Settings::load();
-            rust_i18n::set_locale(initial_settings.resolved_language());
+        .with_quit_mode(QuitMode::Explicit)
+        .with_activation_policy(ApplicationActivationPolicy::Regular);
+    app.on_reopen(|cx| {
+        let _ = app_actions::ensure_main_window(cx);
+    });
+    app.run(|cx: &mut App| {
+        let initial_settings = settings::Settings::load();
+        rust_i18n::set_locale(initial_settings.resolved_language());
 
-            app_menu::init(cx);
-            app_actions::init(cx);
-            ui::chrome::modal::bind_actions(cx);
-            ui::controls::number_input::init(cx);
-            ui::controls::text_field::init(cx);
+        let downloads = cx.new(|cx| app::Downloads::new(cx));
 
-            cx.text_system()
-                .add_fonts(
-                    [
-                        "Inter-VariableFont_opsz,wght.ttf",
-                        "IBMPlexSans-Light.ttf",
-                        "IBMPlexSans-Regular.ttf",
-                        "IBMPlexSans-Medium.ttf",
-                        "IBMPlexSans-SemiBold.ttf",
-                        "IBMPlexSans-Bold.ttf",
-                    ]
-                    .into_iter()
-                    .map(|filename| {
-                        std::borrow::Cow::Owned(
-                            std::fs::read(format!(
-                                "{}/assets/fonts/{filename}",
-                                env!("CARGO_MANIFEST_DIR")
-                            ))
-                            .unwrap(),
-                        )
-                    })
-                    .collect(),
-                )
-                .unwrap();
+        app_menu::init(cx);
+        app_actions::init(downloads, cx);
+        tray::init(cx);
+        ui::chrome::modal::bind_actions(cx);
+        ui::controls::number_input::init(cx);
+        ui::controls::text_field::init(cx);
 
-            let bounds = Bounds::centered(None, size(px(1280.), px(720.)), cx);
-            let main_window = cx
-                .open_window(
-                    platform::window_options(
-                        bounds,
-                        size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT)),
-                    ),
-                    |_, cx| cx.new(|cx| MainWindow::new(cx)),
-                )
-                .unwrap();
+        cx.text_system()
+            .add_fonts(
+                [
+                    "Inter-VariableFont_opsz,wght.ttf",
+                    "IBMPlexSans-Light.ttf",
+                    "IBMPlexSans-Regular.ttf",
+                    "IBMPlexSans-Medium.ttf",
+                    "IBMPlexSans-SemiBold.ttf",
+                    "IBMPlexSans-Bold.ttf",
+                ]
+                .into_iter()
+                .map(|filename| {
+                    std::borrow::Cow::Owned(
+                        std::fs::read(format!(
+                            "{}/assets/fonts/{filename}",
+                            env!("CARGO_MANIFEST_DIR")
+                        ))
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            )
+            .unwrap();
 
-            app_actions::set_main_window(main_window, cx);
+        let _ = app_actions::ensure_main_window(cx);
 
-            app_menu::refresh(cx);
+        app_menu::refresh(cx);
+        tray::refresh(cx, true);
 
-            cx.activate(true);
-        });
+        cx.activate(true);
+    });
 }
 
 fn main() {

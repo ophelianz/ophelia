@@ -55,6 +55,7 @@ pub struct MainWindow {
     sidebar: Entity<Sidebar>,
     sidebar_layout: Entity<ResizableState>,
     downloads: Entity<Downloads>,
+    close_hook_registered: bool,
     transfer_list: Entity<TransferList>,
     selected_transfer_id: Option<DownloadId>,
     history_view: Entity<HistoryView>,
@@ -63,9 +64,8 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(downloads: Entity<Downloads>, cx: &mut Context<Self>) -> Self {
         let menu_bar = cx.new(|cx| AppMenuBar::new(app_menu::build_owned_menus(), cx));
-        let downloads = cx.new(|cx| Downloads::new(cx));
         let sidebar = cx.new(|cx| Sidebar::new(downloads.clone(), cx));
         let sidebar_layout = cx.new(|_| ResizableState::default());
         let transfer_list = cx.new(|cx| TransferList::new(downloads.clone(), cx));
@@ -95,6 +95,7 @@ impl MainWindow {
             sidebar,
             sidebar_layout,
             downloads,
+            close_hook_registered: false,
             transfer_list,
             selected_transfer_id: None,
             history_view,
@@ -254,7 +255,15 @@ mod tests {
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.close_hook_registered {
+            window.on_window_should_close(cx, |_, cx| {
+                app_actions::handle_main_window_close(cx);
+                true
+            });
+            self.close_hook_registered = true;
+        }
+
         let view_model = self.view_model(cx);
 
         div()

@@ -184,6 +184,7 @@ mod tests {
         assert_eq!(
             request.preview_destination(&Settings {
                 default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+                destination_rules_enabled: false,
                 ..Settings::default()
             }),
             PathBuf::from("/tmp/downloads/browser-name.mp4")

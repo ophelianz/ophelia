@@ -401,6 +401,7 @@ mod tests {
     fn settings_for(dir: &Path) -> Settings {
         Settings {
             default_download_dir: Some(dir.to_path_buf()),
+            destination_rules_enabled: false,
             ..Settings::default()
         }
     }
