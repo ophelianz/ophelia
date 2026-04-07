@@ -110,9 +110,9 @@ impl Default for Settings {
             global_speed_limit_bps: 0,
             ipc_port: DEFAULT_IPC_PORT,
             collision_strategy: CollisionStrategy::Rename,
-            destination_rules_enabled: false,
+            destination_rules_enabled: true,
             destination_rules: default_destination_rules(&default_download_root()),
-            http_download_ordering_mode: HttpDownloadOrderingMode::Balanced,
+            http_download_ordering_mode: HttpDownloadOrderingMode::FileSpecific,
             sequential_download_extensions: default_sequential_download_extensions(),
         }
     }
@@ -203,9 +203,10 @@ mod tests {
                 .any(|rule| rule.id == "code")
         );
         assert!(!Settings::default().destination_rules.is_empty());
+        assert!(Settings::default().destination_rules_enabled);
         assert_eq!(
             Settings::default().http_download_ordering_mode,
-            HttpDownloadOrderingMode::Balanced
+            HttpDownloadOrderingMode::FileSpecific
         );
         assert_eq!(
             Settings::default().sequential_download_extensions,
@@ -230,11 +231,11 @@ mod tests {
         assert_eq!(settings.language, DEFAULT_LANGUAGE);
         assert_eq!(settings.max_connections_per_server, 6);
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
-        assert!(!settings.destination_rules_enabled);
+        assert!(settings.destination_rules_enabled);
         assert!(!settings.destination_rules.is_empty());
         assert_eq!(
             settings.http_download_ordering_mode,
-            HttpDownloadOrderingMode::Balanced
+            HttpDownloadOrderingMode::FileSpecific
         );
         assert_eq!(
             settings.sequential_download_extensions,
@@ -254,11 +255,11 @@ mod tests {
         assert_eq!(settings.ipc_port, 8123);
         assert_eq!(settings.language, DEFAULT_LANGUAGE);
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
-        assert!(!settings.destination_rules_enabled);
+        assert!(settings.destination_rules_enabled);
         assert!(!settings.destination_rules.is_empty());
         assert_eq!(
             settings.http_download_ordering_mode,
-            HttpDownloadOrderingMode::Balanced
+            HttpDownloadOrderingMode::FileSpecific
         );
         assert_eq!(
             settings.sequential_download_extensions,
