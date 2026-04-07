@@ -67,6 +67,10 @@ history:
         days_ago: "%{count} days ago"
 stats:
     title: "NETWORK THROUGHPUT"
+    download: "Download"
+    disk_io: "Disk I/O"
+    read: "Read"
+    write: "Write"
     window: "last 60s"
     chunk_map_empty: "No live transfer yet"
     chunk_map_empty_detail: "Start a transfer to see its live HTTP chunk map here."

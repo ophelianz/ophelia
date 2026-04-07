@@ -32,15 +32,15 @@ use crate::views::overlays::about_modal::AboutLayer;
 use crate::views::overlays::download_modal::DownloadModalLayer;
 
 use super::chunk_map::{ChunkMapCard, ChunkMapCardModel};
-use super::transfers_list::{TransferList, TransferListSelectionChanged};
 use super::history::HistoryView;
 use super::sidebar::Sidebar;
 use super::stats_bar::StatsBar;
+use super::transfers_list::{TransferList, TransferListSelectionChanged};
 
 const HISTORY_NAV_INDEX: usize = 1;
 const SIDEBAR_MIN_WIDTH: f32 = 200.0;
 const SIDEBAR_MAX_WIDTH: f32 = 320.0;
-const TRANSFERS_TOP_PANEL_DEFAULT_HEIGHT: f32 = 220.0;
+const TRANSFERS_TOP_PANEL_DEFAULT_HEIGHT: f32 = 320.0;
 const TRANSFERS_TOP_PANEL_MIN_HEIGHT: f32 = 180.0;
 const TRANSFERS_TOP_PANEL_MAX_HEIGHT: f32 = 320.0;
 const TRANSFERS_BOTTOM_PANEL_MIN_HEIGHT: f32 = 260.0;
@@ -131,9 +131,9 @@ impl MainWindow {
             MainContentViewModel::Downloads(TransfersSummaryViewModel {
                 stats: StatsBarViewModel {
                     download_samples: downloads.speed_samples_mbs(),
-                    upload_samples: Vec::new(),
                     download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
-                    upload_speed: 0.0,
+                    disk_read_speed: None,
+                    disk_write_speed: None,
                     active_count: active,
                     finished_count: finished,
                     queued_count: queued,
@@ -350,23 +350,44 @@ impl MainWindow {
                 resizable_panel()
                     .size(px(TRANSFERS_STATS_PANEL_DEFAULT_WIDTH))
                     .size_range(px(TRANSFERS_STATS_PANEL_MIN_WIDTH)..Pixels::MAX)
-                    .child(StatsBar {
+                    .child(transfers_summary_panel(StatsBar {
                         download_samples: summary.stats.download_samples,
-                        upload_samples: summary.stats.upload_samples,
                         download_speed: summary.stats.download_speed,
-                        upload_speed: summary.stats.upload_speed,
+                        disk_read_speed: summary.stats.disk_read_speed,
+                        disk_write_speed: summary.stats.disk_write_speed,
                         active_count: summary.stats.active_count,
                         finished_count: summary.stats.finished_count,
                         queued_count: summary.stats.queued_count,
-                    }),
+                    })),
             )
             .child(
                 resizable_panel()
                     .size(px(TRANSFERS_CHUNK_PANEL_DEFAULT_WIDTH))
                     .size_range(px(TRANSFERS_CHUNK_PANEL_MIN_WIDTH)..Pixels::MAX)
-                    .child(ChunkMapCard::new(summary.chunk_map)),
+                    .child(transfers_summary_panel(ChunkMapCard::new(
+                        summary.chunk_map,
+                    ))),
             )
     }
+}
+
+fn transfers_summary_panel(content: impl IntoElement) -> impl IntoElement {
+    div()
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .rounded(px(Chrome::PANEL_RADIUS))
+        .border_1()
+        .border_color(Colors::border())
+        .overflow_hidden()
+        .child(
+            div()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .p(px(Chrome::STATS_CARD_PADDING))
+                .child(content),
+        )
 }
 
 struct MainWindowViewModel {
@@ -380,9 +401,9 @@ enum MainContentViewModel {
 
 struct StatsBarViewModel {
     download_samples: Vec<f32>,
-    upload_samples: Vec<f32>,
     download_speed: f32,
-    upload_speed: f32,
+    disk_read_speed: Option<f32>,
+    disk_write_speed: Option<f32>,
     active_count: usize,
     finished_count: usize,
     queued_count: usize,

@@ -18,15 +18,18 @@
 **************************************************/
 
 use crate::ui::prelude::*;
-use gpui::{App, Background, Hsla, PathBuilder, Window, canvas, div, point, prelude::*, px, rgba};
+use gpui::{
+    App, Background, Hsla, PathBuilder, Window, canvas, div, linear_color_stop, linear_gradient,
+    point, prelude::*, px, rgba,
+};
 use rust_i18n::t;
 
 #[derive(IntoElement)]
 pub struct StatsBar {
     pub download_samples: Vec<f32>,
-    pub upload_samples: Vec<f32>,
     pub download_speed: f32,
-    pub upload_speed: f32,
+    pub disk_read_speed: Option<f32>,
+    pub disk_write_speed: Option<f32>,
     pub active_count: usize,
     pub finished_count: usize,
     pub queued_count: usize,
@@ -34,67 +37,61 @@ pub struct StatsBar {
 
 impl RenderOnce for StatsBar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let dl_speed = format!("{:.1}", self.download_speed);
-        let ul_speed = format!("{:.1}", self.upload_speed);
+        let download_speed = format_speed_value(self.download_speed);
 
         div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(Spacing::SECTION_GAP))
-            .p(px(Chrome::STATS_CARD_PADDING))
-            .rounded(px(Chrome::PANEL_RADIUS))
-            .border_1()
-            .border_color(Colors::border())
-            .bg(Colors::card())
             .child(
-                div()
-                    .flex()
+                h_flex()
+                    .items_start()
                     .justify_between()
-                    .items_center()
+                    .gap(px(Spacing::SECTION_GAP))
+                    .flex_wrap()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(Colors::muted_foreground())
-                            .child(t!("stats.title").to_string()),
+                        primary_speed_metric(
+                            t!("stats.download").to_string(),
+                            download_speed,
+                            t!("stats.window").to_string(),
+                        )
+                        .into_any_element(),
                     )
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(Colors::muted_foreground())
-                            .child(t!("stats.window").to_string()),
+                        disk_io_metric(
+                            self.disk_read_speed,
+                            self.disk_write_speed,
+                            t!("stats.disk_io").to_string(),
+                        )
+                        .into_any_element(),
                     ),
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_h(px(Chrome::STATS_GRAPH_HEIGHT))
                     .w_full()
-                    .h(px(Chrome::STATS_GRAPH_HEIGHT))
-                    .child(network_graph(self.download_samples, self.upload_samples)),
+                    .child(throughput_graph(self.download_samples)),
             )
             .child(
-                div()
-                    .flex()
+                h_flex()
                     .items_center()
-                    .gap(px(16.0))
-                    .child(speed_label("↓", &dl_speed, "MB/s", Colors::active().into()))
-                    .child(speed_label(
-                        "↑",
-                        &ul_speed,
-                        "MB/s",
-                        Colors::finished().into(),
-                    ))
-                    .child(div().w(px(1.0)).h(px(14.0)).bg(Colors::border()))
-                    .child(stat_pill(
+                    .gap(px(Spacing::SECTION_GAP))
+                    .flex_wrap()
+                    .child(count_metric(
                         &t!("stats.active").to_string(),
                         &self.active_count.to_string(),
                         Colors::active().into(),
                     ))
-                    .child(stat_pill(
+                    .child(count_metric(
                         &t!("stats.finished").to_string(),
                         &self.finished_count.to_string(),
                         Colors::finished().into(),
                     ))
-                    .child(stat_pill(
+                    .child(count_metric(
                         &t!("stats.queued").to_string(),
                         &self.queued_count.to_string(),
                         Colors::queued().into(),
@@ -107,11 +104,9 @@ impl RenderOnce for StatsBar {
 // Graph
 // ---------------------------------------------------------------------------
 
-fn network_graph(download: Vec<f32>, upload: Vec<f32>) -> impl IntoElement {
-    let dl_line = Colors::active();
-    let dl_fill = Colors::active_dim();
-    let ul_line = Colors::finished();
-    let ul_fill = rgba(0x4A90D918);
+fn throughput_graph(download: Vec<f32>) -> impl IntoElement {
+    let line: Hsla = Colors::active().into();
+    let background: Hsla = Colors::background().into();
     let grid = rgba(0xffffff08);
 
     canvas(
@@ -129,8 +124,7 @@ fn network_graph(download: Vec<f32>, upload: Vec<f32>) -> impl IntoElement {
             let gx = ox + pad;
             let gy = oy + pad;
 
-            let combined = download.iter().chain(upload.iter()).cloned();
-            let max = combined.fold(0.0_f32, f32::max).max(1.0);
+            let max = download.iter().cloned().fold(0.0_f32, f32::max).max(1.0);
 
             let to_pts = |samples: &[f32]| -> Vec<(f32, f32)> {
                 let n = samples.len();
@@ -150,28 +144,25 @@ fn network_graph(download: Vec<f32>, upload: Vec<f32>) -> impl IntoElement {
             };
 
             let dl = to_pts(&download);
-            let ul = to_pts(&upload);
 
             // Horizontal grid guides only
             for frac in [0.25_f32, 0.5, 0.75] {
                 hline(window, gx, gx + gw, gy + gh * frac, grid);
             }
 
-            // Upload (drawn first, sits behind download)
-            smooth_area(window, &ul, gx, gy + gh, gx + gw, ul_fill);
-            smooth_stroke(window, &ul, 1.0, ul_line);
-
-            // Download
-            smooth_area(window, &dl, gx, gy + gh, gx + gw, dl_fill);
-            smooth_stroke(window, &dl, 1.5, dl_line);
-
-            // Live indicator, single dot at latest value
-            if let Some(&(cx, cy)) = dl.last() {
-                dot(window, cx, cy, 3.0, dl_line);
-            }
-            if let Some(&(cx, cy)) = ul.last() {
-                dot(window, cx, cy, 2.5, ul_line);
-            }
+            smooth_area(
+                window,
+                &dl,
+                gx,
+                gy + gh,
+                gx + gw,
+                linear_gradient(
+                    0.0,
+                    linear_color_stop(line.opacity(0.42), 1.0),
+                    linear_color_stop(background.opacity(0.0), 0.0),
+                ),
+            );
+            smooth_stroke(window, &dl, 1.5, line);
         },
     )
     .size_full()
@@ -345,77 +336,143 @@ fn hline(window: &mut Window, x0: f32, x1: f32, y: f32, color: impl Into<Backgro
     }
 }
 
-fn dot(window: &mut Window, cx: f32, cy: f32, r: f32, color: impl Into<Background>) {
-    let mut p = PathBuilder::fill();
-    p.move_to(point(px(cx + r), px(cy)));
-    p.arc_to(
-        point(px(r), px(r)),
-        px(0.0),
-        false,
-        false,
-        point(px(cx - r), px(cy)),
-    );
-    p.arc_to(
-        point(px(r), px(r)),
-        px(0.0),
-        false,
-        false,
-        point(px(cx + r), px(cy)),
-    );
-    p.close();
-    if let Ok(path) = p.build() {
-        window.paint_path(path, color);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Layout helpers
-// ---------------------------------------------------------------------------
-
-fn speed_label(direction: &str, value: &str, unit: &str, color: Hsla) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.0))
+fn primary_speed_metric(label: String, value: String, caption: String) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap(px(4.0))
         .child(
             div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(color)
-                .child(direction.to_string()),
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::muted_foreground())
+                .child(label),
         )
         .child(
-            div()
-                .text_base()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(color)
-                .child(value.to_string()),
+            h_flex()
+                .items_end()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(28.0))
+                        .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                        .text_color(Colors::foreground())
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .pb(px(3.0))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::muted_foreground())
+                        .child("MB/s"),
+                ),
         )
         .child(
             div()
                 .text_xs()
                 .text_color(Colors::muted_foreground())
-                .child(unit.to_string()),
+                .child(caption),
         )
 }
 
-fn stat_pill(label: &str, value: &str, color: Hsla) -> gpui::Div {
+fn disk_io_metric(
+    read_speed: Option<f32>,
+    write_speed: Option<f32>,
+    label: String,
+) -> impl IntoElement {
     div()
         .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(color))
+        .items_start()
+        .gap(px(Spacing::CONTROL_GAP))
+        .flex_shrink_0()
+        .child(icon_m(IconName::Storage, Colors::muted_foreground()))
+        .child(
+            v_flex()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::muted_foreground())
+                        .child(label),
+                )
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap(px(Spacing::SECTION_GAP))
+                        .child(io_metric(t!("stats.read").to_string(), read_speed))
+                        .child(io_metric(t!("stats.write").to_string(), write_speed)),
+                ),
+        )
+}
+
+fn io_metric(label: String, speed: Option<f32>) -> impl IntoElement {
+    v_flex()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::muted_foreground())
+                .child(label),
+        )
         .child(
             div()
                 .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if speed.is_some() {
+                    Colors::foreground()
+                } else {
+                    Colors::muted_foreground()
+                })
+                .child(format_optional_speed(speed)),
+        )
+}
+
+fn count_metric(label: &str, value: &str, color: Hsla) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::muted_foreground())
                 .child(label.to_string()),
         )
         .child(
             div()
                 .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(Colors::foreground())
+                .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                .text_color(color)
                 .child(value.to_string()),
         )
+}
+
+fn format_speed_value(speed: f32) -> String {
+    format!("{speed:.1}")
+}
+
+fn format_optional_speed(speed: Option<f32>) -> String {
+    speed
+        .map(|speed| format!("{speed:.1} MB/s"))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_speed_value_uses_one_decimal_place() {
+        assert_eq!(format_speed_value(12.34), "12.3");
+        assert_eq!(format_speed_value(0.0), "0.0");
+    }
+
+    #[test]
+    fn format_optional_speed_uses_placeholder_when_missing() {
+        assert_eq!(format_optional_speed(None), "—");
+        assert_eq!(format_optional_speed(Some(5.26)), "5.3 MB/s");
+    }
 }
