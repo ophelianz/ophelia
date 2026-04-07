@@ -51,6 +51,7 @@ use crate::engine::types::{
 };
 
 use super::chunk_map::spawn_chunk_map_reporter;
+use super::config::ResolvedHttpDownloadOrdering;
 use super::error::{ChunkError, ChunkOutcome};
 use super::health::{activation_now, spawn_health_monitor};
 use super::probe::probe;
@@ -96,6 +97,7 @@ struct ResolvedChunks {
     destination: PathBuf,
     finalize_strategy: FinalizeStrategy,
     chunk_map_supported: bool,
+    ordering: ResolvedHttpDownloadOrdering,
 }
 
 async fn resolve_chunks(
@@ -149,6 +151,7 @@ async fn resolve_chunks(
                 }
             };
             *destination_sink.lock().unwrap() = Some(destination.clone());
+            let ordering = config.resolved_ordering_for_destination(&destination);
             tracing::info!(
                 total_bytes = total,
                 chunks = cl.len(),
@@ -162,6 +165,7 @@ async fn resolve_chunks(
                 destination,
                 finalize_strategy: destination_policy.finalize_strategy(),
                 chunk_map_supported: true,
+                ordering,
             })
         }
         None => {
@@ -204,6 +208,7 @@ async fn resolve_chunks(
                     destination: destination.clone(),
                 });
             }
+            let ordering = config.resolved_ordering_for_destination(&destination);
 
             let total_bytes = match probe_result.content_length {
                 Some(len) => len,
@@ -280,6 +285,7 @@ async fn resolve_chunks(
                 destination,
                 finalize_strategy,
                 chunk_map_supported: probe_result.accepts_ranges,
+                ordering,
             })
         }
     }
@@ -602,6 +608,7 @@ pub async fn download_task(
         destination,
         finalize_strategy,
         chunk_map_supported,
+        ordering,
     } = resolved;
 
     let file = Arc::new(file);
@@ -613,6 +620,7 @@ pub async fn download_task(
     let max_retries = config.max_retries_per_chunk;
     let min_steal_bytes = config.min_steal_bytes;
     let num_initial_chunks = chunks.len();
+    let sequential_ordering = ordering == ResolvedHttpDownloadOrdering::Sequential;
 
     // --- 4. Per-slot atomic arrays ---
     let slots = allocate_slot_arrays(&chunks);
@@ -732,7 +740,7 @@ pub async fn download_task(
                     None => break,
                 }
             }
-            _ = balancer.tick(), if !paused => {}
+            _ = balancer.tick(), if !paused && !sequential_ordering => {}
         }
 
         if let Some((finished_i, outcome)) = chunk_done {
@@ -762,7 +770,9 @@ pub async fn download_task(
                 if !paused {
                     match outcome {
                         ChunkOutcome::Finished => {
-                            current_limit = (current_limit * 2).min(slots.total_slots);
+                            if !sequential_ordering {
+                                current_limit = (current_limit * 2).min(slots.total_slots);
+                            }
                         }
                         ChunkOutcome::Paused => paused = true,
                         ChunkOutcome::Failed => all_ok = false,
@@ -775,7 +785,7 @@ pub async fn download_task(
 
         if !paused {
             // Steal first; if nothing to steal and there is spare capacity, hedge.
-            if pending.is_empty() && join_set.len() < current_limit {
+            if !sequential_ordering && pending.is_empty() && join_set.len() < current_limit {
                 try_steal(
                     &slots.starts,
                     &slots.ends,

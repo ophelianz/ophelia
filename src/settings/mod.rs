@@ -54,6 +54,15 @@ pub enum CollisionStrategy {
     Replace,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpDownloadOrderingMode {
+    #[default]
+    Balanced,
+    FileSpecific,
+    Sequential,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DestinationRule {
     pub id: String,
@@ -84,6 +93,10 @@ pub struct Settings {
     pub destination_rules_enabled: bool,
     /// First-match-wins routing rules for automatically chosen destinations.
     pub destination_rules: Vec<DestinationRule>,
+    /// HTTP chunk scheduling mode for range-supported downloads.
+    pub http_download_ordering_mode: HttpDownloadOrderingMode,
+    /// Extension list used when HTTP ordering is file-specific.
+    pub sequential_download_extensions: Vec<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +112,8 @@ impl Default for Settings {
             collision_strategy: CollisionStrategy::Rename,
             destination_rules_enabled: false,
             destination_rules: default_destination_rules(&default_download_root()),
+            http_download_ordering_mode: HttpDownloadOrderingMode::Balanced,
+            sequential_download_extensions: default_sequential_download_extensions(),
         }
     }
 }
@@ -159,6 +174,10 @@ pub fn suggested_destination_rule_icon_name(label: &str, extensions: &[String]) 
     suggested_icon_name(label, extensions)
 }
 
+pub fn default_sequential_download_extensions() -> Vec<String> {
+    [".mkv"].into_iter().map(str::to_string).collect()
+}
+
 fn default_download_root() -> PathBuf {
     default_download_dir()
 }
@@ -184,6 +203,14 @@ mod tests {
                 .any(|rule| rule.id == "code")
         );
         assert!(!Settings::default().destination_rules.is_empty());
+        assert_eq!(
+            Settings::default().http_download_ordering_mode,
+            HttpDownloadOrderingMode::Balanced
+        );
+        assert_eq!(
+            Settings::default().sequential_download_extensions,
+            default_sequential_download_extensions()
+        );
     }
 
     #[test]
@@ -205,6 +232,14 @@ mod tests {
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
         assert!(!settings.destination_rules_enabled);
         assert!(!settings.destination_rules.is_empty());
+        assert_eq!(
+            settings.http_download_ordering_mode,
+            HttpDownloadOrderingMode::Balanced
+        );
+        assert_eq!(
+            settings.sequential_download_extensions,
+            default_sequential_download_extensions()
+        );
     }
 
     #[test]
@@ -221,6 +256,14 @@ mod tests {
         assert_eq!(settings.collision_strategy, CollisionStrategy::Rename);
         assert!(!settings.destination_rules_enabled);
         assert!(!settings.destination_rules.is_empty());
+        assert_eq!(
+            settings.http_download_ordering_mode,
+            HttpDownloadOrderingMode::Balanced
+        );
+        assert_eq!(
+            settings.sequential_download_extensions,
+            default_sequential_download_extensions()
+        );
     }
 
     #[test]
@@ -255,5 +298,22 @@ mod tests {
         let icon = suggested_destination_rule_icon_name("Media", &[".mkv".into()]);
 
         assert_eq!(icon, "video");
+    }
+
+    #[test]
+    fn explicit_http_ordering_settings_deserialize() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "http_download_ordering_mode": "file_specific",
+                "sequential_download_extensions": [".MKV"]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.http_download_ordering_mode,
+            HttpDownloadOrderingMode::FileSpecific
+        );
+        assert_eq!(settings.sequential_download_extensions, vec![".MKV"]);
     }
 }
