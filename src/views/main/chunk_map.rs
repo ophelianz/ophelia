@@ -61,8 +61,7 @@ impl ChunkMapCardModel {
             .iter()
             .find_map(|row| {
                 let state = downloads.transfer_chunk_map_state(row.id);
-                (!matches!(state, TransferChunkMapState::Unsupported))
-                    .then_some((row, state))
+                (!matches!(state, TransferChunkMapState::Unsupported)).then_some((row, state))
             })
             .or_else(|| {
                 rows.first()
@@ -113,43 +112,35 @@ impl RenderOnce for ChunkMapCard {
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
-            .children(
-                self.model
-                    .filename
-                    .map(|filename| {
+            .children(self.model.filename.map(|filename| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(Spacing::CONTROL_GAP))
+                    .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(Spacing::CONTROL_GAP))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(Colors::foreground())
-                                    .truncate()
-                                    .child(filename),
-                            )
-                            .children(
-                                self.model
-                                    .total_size_label
-                                    .map(|total_size| {
-                                        div()
-                                            .px(px(10.0))
-                                            .py(px(4.0))
-                                            .rounded_full()
-                                            .bg(Colors::muted())
-                                            .text_xs()
-                                            .text_color(Colors::muted_foreground())
-                                            .child(total_size)
-                                            .into_any_element()
-                                    }),
-                            )
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::foreground())
+                            .truncate()
+                            .child(filename),
+                    )
+                    .children(self.model.total_size_label.map(|total_size| {
+                        div()
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded_full()
+                            .bg(Colors::muted())
+                            .text_xs()
+                            .text_color(Colors::muted_foreground())
+                            .child(total_size)
                             .into_any_element()
-                    }),
-            )
+                    }))
+                    .into_any_element()
+            }))
             .child(match state {
                 ChunkMapCardState::Empty => state_message(
                     t!("stats.chunk_map_empty").to_string(),
@@ -168,9 +159,10 @@ impl RenderOnce for ChunkMapCard {
                 .into_any_element(),
                 ChunkMapCardState::Http(rows) => chunk_grid(rows).into_any_element(),
             })
-            .when(matches!(self.model.state, ChunkMapCardState::Http(_)), |this| {
-                this.child(chunk_map_legend())
-            })
+            .when(
+                matches!(self.model.state, ChunkMapCardState::Http(_)),
+                |this| this.child(chunk_map_legend()),
+            )
     }
 }
 
@@ -271,7 +263,10 @@ fn cell_color(cell: ChunkMapCellState) -> gpui::Rgba {
 }
 
 fn chunk_rows(cells: &[ChunkMapCellState]) -> Vec<Vec<ChunkMapCellState>> {
-    cells.chunks(CHUNK_MAP_COLUMNS).map(|row| row.to_vec()).collect()
+    cells
+        .chunks(CHUNK_MAP_COLUMNS)
+        .map(|row| row.to_vec())
+        .collect()
 }
 
 fn format_bytes(bytes: u64) -> String {

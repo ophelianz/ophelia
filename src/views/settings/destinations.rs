@@ -20,7 +20,7 @@
 use gpui::{Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use rust_i18n::t;
 
-use crate::settings::CollisionStrategy;
+use crate::settings::{CollisionStrategy, HttpDownloadOrderingMode};
 use crate::ui::prelude::*;
 
 use super::{DestinationRuleEditor, SettingsWindow};
@@ -38,6 +38,16 @@ pub(super) fn render(this: &SettingsWindow, cx: &mut Context<SettingsWindow>) ->
             t!("settings.destinations.collision_strategy_label").to_string(),
             t!("settings.destinations.collision_strategy_description").to_string(),
             render_collision_strategy(this, cx),
+        ))
+        .child(super::setting_row(
+            t!("settings.destinations.http_download_ordering_mode_label").to_string(),
+            t!("settings.destinations.http_download_ordering_mode_description").to_string(),
+            render_http_download_ordering_mode(this, cx),
+        ))
+        .child(super::setting_row(
+            t!("settings.destinations.sequential_download_extensions_label").to_string(),
+            t!("settings.destinations.sequential_download_extensions_description").to_string(),
+            render_sequential_download_extensions(this),
         ))
         .child(super::setting_row(
             t!("settings.destinations.destination_rules_enabled_label").to_string(),
@@ -98,6 +108,83 @@ fn render_destination_rules_switch(
                 this.set_destination_rules_enabled(checked, cx)
             });
         })
+}
+
+fn render_http_download_ordering_mode(
+    this: &SettingsWindow,
+    cx: &mut Context<SettingsWindow>,
+) -> impl IntoElement {
+    let entity = cx.entity();
+
+    SegmentedControl::new("http-download-ordering-mode")
+        .option(
+            SegmentedControlOption::new(
+                "http-download-ordering-balanced",
+                t!("settings.destinations.http_download_ordering_mode_balanced").to_string(),
+            )
+            .selected(
+                this.settings.http_download_ordering_mode == HttpDownloadOrderingMode::Balanced,
+            )
+            .min_width(98.0)
+            .on_click({
+                let entity = entity.clone();
+                move |_, _, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.set_http_download_ordering_mode(
+                            HttpDownloadOrderingMode::Balanced,
+                            cx,
+                        );
+                    });
+                }
+            }),
+        )
+        .option(
+            SegmentedControlOption::new(
+                "http-download-ordering-file-specific",
+                t!("settings.destinations.http_download_ordering_mode_file_specific").to_string(),
+            )
+            .selected(
+                this.settings.http_download_ordering_mode == HttpDownloadOrderingMode::FileSpecific,
+            )
+            .min_width(122.0)
+            .on_click({
+                let entity = entity.clone();
+                move |_, _, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.set_http_download_ordering_mode(
+                            HttpDownloadOrderingMode::FileSpecific,
+                            cx,
+                        );
+                    });
+                }
+            }),
+        )
+        .option(
+            SegmentedControlOption::new(
+                "http-download-ordering-sequential",
+                t!("settings.destinations.http_download_ordering_mode_sequential").to_string(),
+            )
+            .selected(
+                this.settings.http_download_ordering_mode == HttpDownloadOrderingMode::Sequential,
+            )
+            .min_width(108.0)
+            .on_click(move |_, _, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.set_http_download_ordering_mode(HttpDownloadOrderingMode::Sequential, cx);
+                });
+            }),
+        )
+}
+
+fn render_sequential_download_extensions(this: &SettingsWindow) -> impl IntoElement {
+    let is_file_specific =
+        this.settings.http_download_ordering_mode == HttpDownloadOrderingMode::FileSpecific;
+
+    div()
+        .when(!is_file_specific, |this| this.opacity(0.6))
+        .child(super::setting_text_input(
+            this.sequential_download_extensions_input.clone(),
+        ))
 }
 
 fn render_destination_rules_section(

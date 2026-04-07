@@ -123,10 +123,7 @@ impl MainWindow {
                     finished_count: finished,
                     queued_count: queued,
                 },
-                chunk_map: ChunkMapCardModel::from_transfer_rows(
-                    &transfer_rows,
-                    &downloads,
-                ),
+                chunk_map: ChunkMapCardModel::from_transfer_rows(&transfer_rows, &downloads),
             })
         };
 

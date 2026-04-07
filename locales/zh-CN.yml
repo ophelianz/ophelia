@@ -22,3 +22,4 @@ settings:
         destination_rules_restore_defaults: "恢复默认"
         collision_strategy_rename: "重命名"
         collision_strategy_replace: "替换"
+        http_download_ordering_mode_label: "HTTP 下载顺序"

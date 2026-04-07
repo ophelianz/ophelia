@@ -33,7 +33,8 @@ use gpui::{
 use rust_i18n::t;
 
 use crate::settings::{
-    CollisionStrategy, DestinationRule, Settings, canonical_language, default_destination_rules,
+    CollisionStrategy, DestinationRule, HttpDownloadOrderingMode, Settings, canonical_language,
+    default_destination_rules,
 };
 use crate::theme::APP_FONT_FAMILY;
 use crate::ui::prelude::*;
@@ -94,6 +95,7 @@ pub struct SettingsWindow {
     active: Section,
     pub(super) language_select: Entity<DropdownSelect>,
     pub(super) download_dir_input: Entity<DirectoryInput>,
+    pub(super) sequential_download_extensions_input: Entity<TextField>,
     pub(super) destination_rule_editors: Vec<DestinationRuleEditor>,
     pub(super) global_speed_limit_input: Entity<NumberInput>,
     pub(super) ipc_port_input: Entity<NumberInput>,
@@ -145,6 +147,14 @@ impl SettingsWindow {
                 DirectoryInput::new(
                     fallback_download_dir.clone(),
                     t!("settings.destinations.download_folder_placeholder").to_string(),
+                    cx,
+                )
+            }),
+            sequential_download_extensions_input: cx.new(|cx| {
+                TextField::new(
+                    format_extensions_input(&settings.sequential_download_extensions),
+                    t!("settings.destinations.sequential_download_extensions_placeholder")
+                        .to_string(),
                     cx,
                 )
             }),
@@ -217,6 +227,8 @@ impl SettingsWindow {
             canonical_language(self.language_select.read(cx).selected_value()).to_string();
         settings.default_download_dir =
             parse_path_input(self.download_dir_input.read(cx).text(cx).as_ref());
+        settings.sequential_download_extensions =
+            parse_extensions_input(self.sequential_download_extensions_input.read(cx).text());
         settings.global_speed_limit_bps = parse_speed_limit_input(
             self.global_speed_limit_input.read(cx).text(),
             settings.global_speed_limit_bps,
@@ -281,6 +293,17 @@ impl SettingsWindow {
     ) {
         if self.settings.collision_strategy != strategy {
             self.settings.collision_strategy = strategy;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_http_download_ordering_mode(
+        &mut self,
+        mode: HttpDownloadOrderingMode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.http_download_ordering_mode != mode {
+            self.settings.http_download_ordering_mode = mode;
             cx.notify();
         }
     }
@@ -557,6 +580,10 @@ pub(super) fn setting_dropdown_select(input: Entity<DropdownSelect>) -> gpui::Di
 }
 
 pub(super) fn setting_number_input(input: Entity<NumberInput>) -> gpui::Div {
+    div().w(px(Spacing::SETTINGS_CONTROL_WIDTH)).child(input)
+}
+
+pub(super) fn setting_text_input(input: Entity<TextField>) -> gpui::Div {
     div().w(px(Spacing::SETTINGS_CONTROL_WIDTH)).child(input)
 }
 
@@ -875,5 +902,37 @@ mod tests {
         });
 
         assert!(restart.try_recv().ok().flatten().is_some());
+    }
+
+    #[test]
+    fn draft_settings_include_http_ordering_fields() {
+        let mut app = TestApp::new();
+        let settings = Settings::default();
+
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
+        let mut window = app.open_window_with_options(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |_window: &mut Window, cx| SettingsWindow::new_with_settings(settings.clone(), cx),
+        );
+
+        window.update(|settings: &mut SettingsWindow, _window, cx| {
+            settings.set_http_download_ordering_mode(HttpDownloadOrderingMode::FileSpecific, cx);
+            let _ = settings
+                .sequential_download_extensions_input
+                .update(cx, |input, cx| input.set_text(".mkv, .webm", cx));
+
+            let draft = settings.draft_settings(cx);
+            assert_eq!(
+                draft.http_download_ordering_mode,
+                HttpDownloadOrderingMode::FileSpecific
+            );
+            assert_eq!(
+                draft.sequential_download_extensions,
+                vec![".mkv".to_string(), ".webm".to_string()]
+            );
+        });
     }
 }
