@@ -108,6 +108,7 @@ fn throughput_graph(download: Vec<f32>) -> impl IntoElement {
     let line: Hsla = Colors::active().into();
     let background: Hsla = Colors::background().into();
     let grid = rgba(0xffffff08);
+    let render_max = graph_label_max(&download).max(1.0);
 
     canvas(
         |_bounds, _window, _cx| (),
@@ -124,29 +125,9 @@ fn throughput_graph(download: Vec<f32>) -> impl IntoElement {
             let gx = ox + pad;
             let gy = oy + pad;
 
-            let max = download.iter().cloned().fold(0.0_f32, f32::max).max(1.0);
+            let dl = graph_points(&download, gx, gy, gw, gh, render_max);
 
-            let to_pts = |samples: &[f32]| -> Vec<(f32, f32)> {
-                let n = samples.len();
-                if n == 0 {
-                    return Vec::new();
-                }
-                let denom = (n - 1).max(1) as f32;
-                samples
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &v)| {
-                        let x = gx + (i as f32 / denom) * gw;
-                        let y = gy + gh - (v / max) * gh * 0.92;
-                        (x, y)
-                    })
-                    .collect()
-            };
-
-            let dl = to_pts(&download);
-
-            // Horizontal grid guides only
-            for frac in [0.25_f32, 0.5, 0.75] {
+            for frac in [0.0_f32, 0.5, 1.0] {
                 hline(window, gx, gx + gw, gy + gh * frac, grid);
             }
 
@@ -188,44 +169,21 @@ fn catmull_rom_cp(pts: &[(f32, f32)], i: usize) -> ((f32, f32), (f32, f32)) {
     (cp1, cp2)
 }
 
-/// Evaluate cubic bezier at parameter t ∈ [0, 1].
-fn bezier_at(
-    p0: (f32, f32),
-    cp1: (f32, f32),
-    cp2: (f32, f32),
-    p1: (f32, f32),
-    t: f32,
-) -> (f32, f32) {
-    let mt = 1.0 - t;
-    let mt2 = mt * mt;
-    let mt3 = mt2 * mt;
-    let t2 = t * t;
-    let t3 = t2 * t;
-    (
-        mt3 * p0.0 + 3.0 * mt2 * t * cp1.0 + 3.0 * mt * t2 * cp2.0 + t3 * p1.0,
-        mt3 * p0.1 + 3.0 * mt2 * t * cp1.1 + 3.0 * mt * t2 * cp2.1 + t3 * p1.1,
-    )
-}
-
-/// Sample the catmull-rom spline at high resolution for ribbon construction.
-fn sample_spline(pts: &[(f32, f32)], steps_per_seg: usize) -> Vec<(f32, f32)> {
-    if pts.len() < 2 {
-        return pts.to_vec();
+fn graph_points(samples: &[f32], gx: f32, gy: f32, gw: f32, gh: f32, max: f32) -> Vec<(f32, f32)> {
+    let n = samples.len();
+    if n == 0 {
+        return Vec::new();
     }
-    let mut out = Vec::with_capacity((pts.len() - 1) * steps_per_seg + 1);
-    for i in 0..pts.len() - 1 {
-        let (cp1, cp2) = catmull_rom_cp(pts, i);
-        let end = if i == pts.len() - 2 {
-            steps_per_seg + 1
-        } else {
-            steps_per_seg
-        };
-        for j in 0..end {
-            let t = j as f32 / steps_per_seg as f32;
-            out.push(bezier_at(pts[i], cp1, cp2, pts[i + 1], t));
-        }
-    }
-    out
+    let denom = (n - 1).max(1) as f32;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = gx + (i as f32 / denom) * gw;
+            let y = gy + gh - (v / max) * gh * 0.92;
+            (x, y)
+        })
+        .collect()
 }
 
 /// Filled area under a smooth catmull-rom curve. Uses native cubic_bezier_to
@@ -265,56 +223,26 @@ fn smooth_area(
     }
 }
 
-/// Smooth line rendered as a filled ribbon polygon. Samples the spline
-/// at high resolution, offsets each sample by its normal, and builds
-/// a single closed path. One paint_path call.
 fn smooth_stroke(
     window: &mut Window,
     pts: &[(f32, f32)],
     thickness: f32,
     color: impl Into<Background>,
 ) {
-    let samples = sample_spline(pts, 8);
-    if samples.len() < 2 {
+    if pts.len() < 2 {
         return;
     }
 
-    let half = thickness / 2.0;
-    let n = samples.len();
-    let mut top = Vec::with_capacity(n);
-    let mut bot = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let (dx, dy) = if i == 0 {
-            (samples[1].0 - samples[0].0, samples[1].1 - samples[0].1)
-        } else if i == n - 1 {
-            (
-                samples[i].0 - samples[i - 1].0,
-                samples[i].1 - samples[i - 1].1,
-            )
-        } else {
-            (
-                samples[i + 1].0 - samples[i - 1].0,
-                samples[i + 1].1 - samples[i - 1].1,
-            )
-        };
-        let len = (dx * dx + dy * dy).sqrt().max(0.001);
-        let nx = -dy / len * half;
-        let ny = dx / len * half;
-
-        top.push((samples[i].0 + nx, samples[i].1 + ny));
-        bot.push((samples[i].0 - nx, samples[i].1 - ny));
+    let mut p = PathBuilder::stroke(px(thickness));
+    p.move_to(point(px(pts[0].0), px(pts[0].1)));
+    for i in 0..pts.len() - 1 {
+        let (cp1, cp2) = catmull_rom_cp(pts, i);
+        p.cubic_bezier_to(
+            point(px(pts[i + 1].0), px(pts[i + 1].1)),
+            point(px(cp1.0), px(cp1.1)),
+            point(px(cp2.0), px(cp2.1)),
+        );
     }
-
-    let mut p = PathBuilder::fill();
-    p.move_to(point(px(top[0].0), px(top[0].1)));
-    for &(x, y) in &top[1..] {
-        p.line_to(point(px(x), px(y)));
-    }
-    for &(x, y) in bot.iter().rev() {
-        p.line_to(point(px(x), px(y)));
-    }
-    p.close();
     if let Ok(path) = p.build() {
         window.paint_path(path, color);
     }
@@ -334,6 +262,10 @@ fn hline(window: &mut Window, x0: f32, x1: f32, y: f32, color: impl Into<Backgro
     if let Ok(path) = p.build() {
         window.paint_path(path, color);
     }
+}
+
+fn graph_label_max(samples: &[f32]) -> f32 {
+    samples.iter().copied().fold(0.0_f32, f32::max)
 }
 
 fn primary_speed_metric(label: String, value: String, caption: String) -> impl IntoElement {
