@@ -19,6 +19,7 @@
 
 use gpui::{Bounds, Pixels, Size, WindowOptions};
 
+pub(crate) mod io;
 pub(crate) mod paths;
 
 #[derive(Clone, Copy)]

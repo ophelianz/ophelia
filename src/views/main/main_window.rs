@@ -128,15 +128,15 @@ impl MainWindow {
             let (active, finished, queued) = downloads.status_counts();
 
             MainContentViewModel::Downloads(TransfersSummaryViewModel {
-                stats: StatsBarViewModel {
-                    download_samples: downloads.speed_samples_mbs(),
-                    download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
-                    disk_read_speed: None,
-                    disk_write_speed: None,
-                    active_count: active,
-                    finished_count: finished,
-                    queued_count: queued,
-                },
+                stats: stats_bar_view_model(
+                    downloads.speed_samples_mbs(),
+                    downloads.download_speed_bps(),
+                    downloads.disk_read_speed_bps(),
+                    downloads.disk_write_speed_bps(),
+                    active,
+                    finished,
+                    queued,
+                ),
                 chunk_map: ChunkMapCardModel::from_transfer_rows(
                     &transfer_rows,
                     &downloads,
@@ -157,6 +157,34 @@ fn resolve_selected_transfer_id_for_transfers(
         Some(selected_id) if rows.iter().any(|row| row.id == selected_id) => Some(selected_id),
         _ => rows.first().map(|row| row.id),
     }
+}
+
+fn stats_bar_view_model(
+    download_samples: Vec<f32>,
+    download_speed_bps: u64,
+    disk_read_speed_bps: Option<u64>,
+    disk_write_speed_bps: Option<u64>,
+    active_count: usize,
+    finished_count: usize,
+    queued_count: usize,
+) -> StatsBarViewModel {
+    StatsBarViewModel {
+        download_samples,
+        download_speed: speed_bps_to_mbs(download_speed_bps),
+        disk_read_speed: disk_speed_bps_to_mbs(disk_read_speed_bps),
+        disk_write_speed: disk_speed_bps_to_mbs(disk_write_speed_bps),
+        active_count,
+        finished_count,
+        queued_count,
+    }
+}
+
+fn speed_bps_to_mbs(speed_bps: u64) -> f32 {
+    speed_bps as f32 / 1_000_000.0
+}
+
+fn disk_speed_bps_to_mbs(speed_bps: Option<u64>) -> Option<f32> {
+    speed_bps.map(speed_bps_to_mbs)
 }
 
 #[cfg(test)]
@@ -183,6 +211,23 @@ mod tests {
             resolve_selected_transfer_id_for_transfers(&rows, Some(DownloadId(99))),
             Some(DownloadId(12))
         );
+    }
+
+    #[test]
+    fn stats_bar_view_model_threads_disk_speeds() {
+        let view_model = stats_bar_view_model(
+            vec![1.0, 2.0],
+            3_000_000,
+            Some(1_500_000),
+            Some(500_000),
+            2,
+            3,
+            4,
+        );
+
+        assert_eq!(view_model.download_speed, 3.0);
+        assert_eq!(view_model.disk_read_speed, Some(1.5));
+        assert_eq!(view_model.disk_write_speed, Some(0.5));
     }
 
     fn test_row(id: DownloadId) -> TransferListRow {

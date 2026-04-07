@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, SharedString};
 
@@ -43,6 +43,7 @@ use crate::engine::{
     RestoredDownload, SavedDownload, TransferChunkMapState, TransferControlSupport,
 };
 use crate::ipc::IpcServer;
+use crate::platform::io::{ProcessIoCounters, sample_process_io_counters};
 use crate::settings::Settings;
 
 /// All live download state in SoA layout.
@@ -71,6 +72,7 @@ pub struct Downloads {
 
     /// Rolling ~60-second download speed history (one sample per second).
     pub speed_history: VecDeque<u64>,
+    io_sampler: ProcessIoSampler,
     poll_ticks: u8,
 
     history_reader: HistoryReader,
@@ -240,6 +242,70 @@ impl SidebarStorageSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessIoSample {
+    at: Instant,
+    counters: ProcessIoCounters,
+}
+
+#[derive(Debug, Default)]
+struct ProcessIoSampler {
+    last_sample: Option<ProcessIoSample>,
+    read_speed_bps: Option<u64>,
+    write_speed_bps: Option<u64>,
+}
+
+impl ProcessIoSampler {
+    fn sample_now(&mut self, now: Instant) {
+        self.update_from_sample(sample_process_io_counters(), now);
+    }
+
+    fn update_from_sample(&mut self, counters: Option<ProcessIoCounters>, now: Instant) {
+        let Some(counters) = counters else {
+            self.last_sample = None;
+            self.read_speed_bps = None;
+            self.write_speed_bps = None;
+            return;
+        };
+
+        let Some(previous) = self.last_sample else {
+            self.last_sample = Some(ProcessIoSample { at: now, counters });
+            self.read_speed_bps = Some(0);
+            self.write_speed_bps = Some(0);
+            return;
+        };
+
+        let elapsed = now.saturating_duration_since(previous.at).as_secs_f64();
+        self.last_sample = Some(ProcessIoSample { at: now, counters });
+        if elapsed <= 0.0 {
+            return;
+        }
+
+        self.read_speed_bps = Some(
+            (counters
+                .read_bytes
+                .saturating_sub(previous.counters.read_bytes) as f64
+                / elapsed)
+                .round() as u64,
+        );
+        self.write_speed_bps = Some(
+            (counters
+                .write_bytes
+                .saturating_sub(previous.counters.write_bytes) as f64
+                / elapsed)
+                .round() as u64,
+        );
+    }
+
+    fn read_speed_bps(&self) -> Option<u64> {
+        self.read_speed_bps
+    }
+
+    fn write_speed_bps(&self) -> Option<u64> {
+        self.write_speed_bps
+    }
+}
+
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
@@ -269,6 +335,7 @@ impl Downloads {
             total_bytes: Vec::new(),
             speeds: Vec::new(),
             speed_history: VecDeque::new(),
+            io_sampler: ProcessIoSampler::default(),
             poll_ticks: 0,
             history_reader,
             history: Vec::new(),
@@ -300,7 +367,7 @@ impl Downloads {
                         while let Some(req) = model.ipc.try_recv() {
                             model.add_request(req, cx);
                         }
-                        model.tick_speed();
+                        model.tick_metrics();
                     })
                     .ok();
                 });
@@ -435,8 +502,8 @@ impl Downloads {
         self.delete_artifact(id, cx);
     }
 
-    /// Samples total speed once per second (every 10 × 100 ms polls).
-    fn tick_speed(&mut self) {
+    /// Samples app-session metrics once per second (every 10 × 100 ms polls).
+    fn tick_metrics(&mut self) {
         self.poll_ticks = self.poll_ticks.wrapping_add(1);
         if self.poll_ticks % 10 == 0 {
             let total: u64 = self.speeds.iter().sum();
@@ -444,6 +511,7 @@ impl Downloads {
                 self.speed_history.pop_front();
             }
             self.speed_history.push_back(total);
+            self.io_sampler.sample_now(Instant::now());
         }
     }
 
@@ -458,6 +526,14 @@ impl Downloads {
             .iter()
             .map(|&s| s as f32 / 1_000_000.0)
             .collect()
+    }
+
+    pub fn disk_read_speed_bps(&self) -> Option<u64> {
+        self.io_sampler.read_speed_bps()
+    }
+
+    pub fn disk_write_speed_bps(&self) -> Option<u64> {
+        self.io_sampler.write_speed_bps()
     }
 
     /// (active, finished, queued) counts.
@@ -856,5 +932,80 @@ mod tests {
             transfer_chunk_map_state_or_unsupported(&states, Some(1)),
             TransferChunkMapState::Loading
         );
+    }
+
+    #[test]
+    fn process_io_sampler_establishes_zero_baseline_on_first_sample() {
+        let mut sampler = ProcessIoSampler::default();
+        let now = Instant::now();
+
+        sampler.update_from_sample(
+            Some(ProcessIoCounters {
+                read_bytes: 128,
+                write_bytes: 256,
+            }),
+            now,
+        );
+
+        assert_eq!(sampler.read_speed_bps(), Some(0));
+        assert_eq!(sampler.write_speed_bps(), Some(0));
+    }
+
+    #[test]
+    fn process_io_sampler_computes_read_and_write_deltas() {
+        let mut sampler = ProcessIoSampler::default();
+        let start = Instant::now();
+
+        sampler.update_from_sample(
+            Some(ProcessIoCounters {
+                read_bytes: 1_000,
+                write_bytes: 2_000,
+            }),
+            start,
+        );
+        sampler.update_from_sample(
+            Some(ProcessIoCounters {
+                read_bytes: 4_000,
+                write_bytes: 8_000,
+            }),
+            start + Duration::from_secs(2),
+        );
+
+        assert_eq!(sampler.read_speed_bps(), Some(1_500));
+        assert_eq!(sampler.write_speed_bps(), Some(3_000));
+    }
+
+    #[test]
+    fn process_io_sampler_reports_zero_for_idle_supported_samples() {
+        let mut sampler = ProcessIoSampler::default();
+        let start = Instant::now();
+        let counters = ProcessIoCounters {
+            read_bytes: 64,
+            write_bytes: 32,
+        };
+
+        sampler.update_from_sample(Some(counters), start);
+        sampler.update_from_sample(Some(counters), start + Duration::from_secs(1));
+
+        assert_eq!(sampler.read_speed_bps(), Some(0));
+        assert_eq!(sampler.write_speed_bps(), Some(0));
+    }
+
+    #[test]
+    fn process_io_sampler_clears_metrics_when_sampling_is_unavailable() {
+        let mut sampler = ProcessIoSampler::default();
+        let now = Instant::now();
+
+        sampler.update_from_sample(
+            Some(ProcessIoCounters {
+                read_bytes: 128,
+                write_bytes: 256,
+            }),
+            now,
+        );
+        sampler.update_from_sample(None, now + Duration::from_secs(1));
+
+        assert_eq!(sampler.read_speed_bps(), None);
+        assert_eq!(sampler.write_speed_bps(), None);
     }
 }
