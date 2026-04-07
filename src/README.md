@@ -12,6 +12,7 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
     - also stores destination-policy settings such as collision strategy and extension-based routing rules
+    - also stores HTTP download-ordering settings such as `Balanced`, `FileSpecific`, `Sequential`, and the file-specific extension list
     - persists through the shared platform path policy
 
 ## Frontend terms
@@ -39,6 +40,7 @@ These names are intentional too:
 - `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
 - `destination policy`: backend-owned resolution of destination folders, collision behavior, and final-file commit semantics
 - `chunk map state`: HTTP-specific, active-transfer-only visualization state for the Transfers view that stays out of persistence and does not expose raw executor slot arrays
+- `HTTP ordering mode`: backend-owned scheduling choice for range-supported HTTP downloads: throughput-first, always sequential, or sequential only for matching extensions
 
 ## Directory map
 
@@ -91,7 +93,7 @@ These names are intentional too:
     - `mod.rs`: platform module root and window-chrome entry points
     - `paths.rs`: shared app config/data/log/download directory policy plus legacy path helpers
 - `settings/`
-    - `mod.rs`: persisted settings model and atomic load/save
+    - `mod.rs`: persisted settings model and atomic load/save, including destination-policy and HTTP ordering-mode settings
 - `engine/`
     - `engine.rs`: `DownloadEngine` handle and `EngineActor`
     - `destination.rs`: shared destination resolution, collision handling, and final-file commit helpers
@@ -99,7 +101,7 @@ These names are intentional too:
     - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config plus destination-policy mapping
     - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
     - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
-    - `http/`: HTTP-specific executor pipeline, including live chunk-map snapshot reporting for active chunked transfers
+    - `http/`: HTTP-specific executor pipeline, including live chunk-map snapshot reporting and ordering-mode-aware scheduling for active chunked transfers
 
 ## Placement rules
 

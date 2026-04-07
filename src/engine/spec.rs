@@ -290,6 +290,8 @@ mod tests {
     fn from_auto_request_uses_settings_for_http_defaults() {
         let settings = Settings {
             max_connections_per_download: 3,
+            http_download_ordering_mode: crate::settings::HttpDownloadOrderingMode::Sequential,
+            sequential_download_extensions: vec![".mkv".into()],
             ..Settings::default()
         };
 
@@ -304,6 +306,11 @@ mod tests {
             DownloadSource::Http { url, config } => {
                 assert_eq!(url, "https://example.com/file.bin");
                 assert_eq!(config.max_connections, 3);
+                assert_eq!(
+                    config.ordering_mode,
+                    crate::settings::HttpDownloadOrderingMode::Sequential
+                );
+                assert_eq!(config.sequential_extensions, vec![".mkv"]);
             }
         }
     }

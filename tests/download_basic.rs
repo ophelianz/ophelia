@@ -23,7 +23,7 @@ use common::*;
 use std::sync::{Arc, Mutex};
 
 use ophelia::engine::destination::DestinationPolicy;
-use ophelia::settings::{CollisionStrategy, DestinationRule, Settings};
+use ophelia::settings::{CollisionStrategy, DestinationRule, HttpDownloadOrderingMode, Settings};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
@@ -33,6 +33,20 @@ use ophelia::engine::types::{
     ChunkMapCellState, DownloadId, DownloadStatus, TaskRuntimeUpdate, TransferChunkMapState,
     TransferControlSupport,
 };
+
+fn snapshot_has_prefix_shaped_coverage(
+    snapshot: &ophelia::engine::types::HttpChunkMapSnapshot,
+) -> bool {
+    let mut saw_empty = false;
+    for cell in &snapshot.cells {
+        match cell {
+            ChunkMapCellState::Empty => saw_empty = true,
+            ChunkMapCellState::Partial | ChunkMapCellState::Complete if saw_empty => return false,
+            ChunkMapCellState::Partial | ChunkMapCellState::Complete => {}
+        }
+    }
+    true
+}
 
 struct RangeDispositionResponder {
     data: Vec<u8>,
@@ -693,4 +707,67 @@ async fn active_part_file_duplicate_returns_error() {
 
     let updates = drain_progress(&mut rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
+    let data = test_data(32_000);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video.mkv"))
+        .respond_with(RangeResponder { data: data.clone() })
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/video.mkv", server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("video.mkv");
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
+    download_task(
+        DownloadId(0),
+        url,
+        dest,
+        exact_destination_policy(&dir.path().join("video.mkv")),
+        HttpDownloadConfig {
+            min_connections: 4,
+            max_connections: 4,
+            ordering_mode: HttpDownloadOrderingMode::Sequential,
+            speed_limit_bps: 8_000,
+            write_buffer_size: 512,
+            ..HttpDownloadConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+        runtime_tx,
+    )
+    .await;
+
+    match wait_for_runtime_update(&mut runtime_rx, |update| {
+        matches!(
+            update,
+            TaskRuntimeUpdate::ChunkMapStateChanged {
+                state: TransferChunkMapState::Http(_),
+                ..
+            }
+        )
+    })
+    .await
+    {
+        TaskRuntimeUpdate::ChunkMapStateChanged {
+            state: TransferChunkMapState::Http(snapshot),
+            ..
+        } => {
+            assert_eq!(snapshot.cells.len(), 128);
+            assert!(snapshot_has_prefix_shaped_coverage(&snapshot));
+        }
+        other => panic!("expected http chunk-map snapshot, got {other:?}"),
+    }
 }
