@@ -30,7 +30,7 @@ use crate::ui::prelude::*;
 use crate::views::overlays::about_modal::AboutLayer;
 use crate::views::overlays::download_modal::DownloadModalLayer;
 
-use super::chunk_bitmap::ChunkBitmapCard;
+use super::chunk_map::{ChunkMapCard, ChunkMapCardModel};
 use super::download_list::DownloadList;
 use super::history::HistoryView;
 use super::sidebar::Sidebar;
@@ -110,16 +110,23 @@ impl MainWindow {
             MainContentViewModel::History
         } else {
             let downloads = self.downloads.read(cx);
+            let transfer_rows = downloads.transfer_rows();
             let (active, finished, queued) = downloads.status_counts();
 
-            MainContentViewModel::Downloads(StatsBarViewModel {
-                download_samples: downloads.speed_samples_mbs(),
-                upload_samples: Vec::new(),
-                download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
-                upload_speed: 0.0,
-                active_count: active,
-                finished_count: finished,
-                queued_count: queued,
+            MainContentViewModel::Downloads(TransfersSummaryViewModel {
+                stats: StatsBarViewModel {
+                    download_samples: downloads.speed_samples_mbs(),
+                    upload_samples: Vec::new(),
+                    download_speed: downloads.download_speed_bps() as f32 / 1_000_000.0,
+                    upload_speed: 0.0,
+                    active_count: active,
+                    finished_count: finished,
+                    queued_count: queued,
+                },
+                chunk_map: ChunkMapCardModel::from_transfer_rows(
+                    &transfer_rows,
+                    &downloads,
+                ),
             })
         };
 
@@ -232,13 +239,13 @@ impl MainWindow {
                 .overflow_y_scroll()
                 .child(self.history_view.clone())
                 .into_any_element(),
-            MainContentViewModel::Downloads(stats) => {
-                self.render_transfers(stats).into_any_element()
+            MainContentViewModel::Downloads(summary) => {
+                self.render_transfers(summary).into_any_element()
             }
         }
     }
 
-    fn render_transfers(&self, stats: StatsBarViewModel) -> impl IntoElement {
+    fn render_transfers(&self, summary: TransfersSummaryViewModel) -> impl IntoElement {
         v_resizable("transfers-layout")
             .child(
                 resizable_panel()
@@ -246,7 +253,7 @@ impl MainWindow {
                     .size_range(
                         px(TRANSFERS_TOP_PANEL_MIN_HEIGHT)..px(TRANSFERS_TOP_PANEL_MAX_HEIGHT),
                     )
-                    .child(self.render_transfers_summary(stats)),
+                    .child(self.render_transfers_summary(summary)),
             )
             .child(
                 resizable_panel()
@@ -262,27 +269,27 @@ impl MainWindow {
             )
     }
 
-    fn render_transfers_summary(&self, stats: StatsBarViewModel) -> impl IntoElement {
+    fn render_transfers_summary(&self, summary: TransfersSummaryViewModel) -> impl IntoElement {
         h_resizable("transfers-top-layout")
             .child(
                 resizable_panel()
                     .size(px(TRANSFERS_STATS_PANEL_DEFAULT_WIDTH))
                     .size_range(px(TRANSFERS_STATS_PANEL_MIN_WIDTH)..Pixels::MAX)
                     .child(StatsBar {
-                        download_samples: stats.download_samples,
-                        upload_samples: stats.upload_samples,
-                        download_speed: stats.download_speed,
-                        upload_speed: stats.upload_speed,
-                        active_count: stats.active_count,
-                        finished_count: stats.finished_count,
-                        queued_count: stats.queued_count,
+                        download_samples: summary.stats.download_samples,
+                        upload_samples: summary.stats.upload_samples,
+                        download_speed: summary.stats.download_speed,
+                        upload_speed: summary.stats.upload_speed,
+                        active_count: summary.stats.active_count,
+                        finished_count: summary.stats.finished_count,
+                        queued_count: summary.stats.queued_count,
                     }),
             )
             .child(
                 resizable_panel()
                     .size(px(TRANSFERS_CHUNK_PANEL_DEFAULT_WIDTH))
                     .size_range(px(TRANSFERS_CHUNK_PANEL_MIN_WIDTH)..Pixels::MAX)
-                    .child(ChunkBitmapCard),
+                    .child(ChunkMapCard::new(summary.chunk_map)),
             )
     }
 }
@@ -293,7 +300,7 @@ struct MainWindowViewModel {
 
 enum MainContentViewModel {
     History,
-    Downloads(StatsBarViewModel),
+    Downloads(TransfersSummaryViewModel),
 }
 
 struct StatsBarViewModel {
@@ -304,4 +311,9 @@ struct StatsBarViewModel {
     active_count: usize,
     finished_count: usize,
     queued_count: usize,
+}
+
+struct TransfersSummaryViewModel {
+    stats: StatsBarViewModel,
+    chunk_map: ChunkMapCardModel,
 }

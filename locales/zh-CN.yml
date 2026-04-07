@@ -2,8 +2,7 @@ _version: 1
 app:
     name: "Ophelia"
 stats:
-    chunk_bitmap_title: "分块位图"
-    chunk_bitmap_placeholder: "分块进度视图即将推出"
+    chunk_map_empty: "暂无实时传输"
 menu:
     settings: "设置"
 sidebar:

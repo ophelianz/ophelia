@@ -17,7 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-pub mod chunk_bitmap;
+pub mod chunk_map;
 pub mod download_list;
 pub mod download_row;
 pub mod history;
