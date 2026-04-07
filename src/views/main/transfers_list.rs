@@ -18,10 +18,11 @@
 **************************************************/
 
 use gpui::{
-    App, Context, Entity, IntoElement, Render, RenderOnce, SharedString, Window, div, prelude::*,
-    px,
+    App, Context, Entity, IntoElement, Render, RenderOnce, SharedString, UniformListScrollHandle,
+    Window, div, prelude::*, px, uniform_list,
 };
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::app::{Downloads, TransferListRow};
 use crate::engine::{DownloadId, DownloadStatus};
@@ -60,6 +61,7 @@ pub struct TransferList {
     downloads: Entity<Downloads>,
     filter: TransferFilter,
     selected_id: Option<DownloadId>,
+    scroll_handle: UniformListScrollHandle,
 }
 
 pub struct TransferListSelectionChanged {
@@ -75,6 +77,7 @@ impl TransferList {
             downloads,
             filter: TransferFilter::All,
             selected_id: None,
+            scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
@@ -124,15 +127,15 @@ impl TransferList {
                 let id = row.id;
                 let selected = selected_id == Some(id);
                 let icon_name = resolved_transfer_icon_name(&row, settings);
-                let on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>> =
+                let on_pause_resume: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>> =
                     if row.available_actions.pause {
                         let downloads = downloads.clone();
-                        Some(Box::new(move |_window: &mut Window, app: &mut App| {
+                        Some(Rc::new(move |_window: &mut Window, app: &mut App| {
                             downloads.update(app, |downloads, cx| downloads.pause(id, cx));
                         }))
                     } else if row.available_actions.resume {
                         let downloads = downloads.clone();
-                        Some(Box::new(move |_window: &mut Window, app: &mut App| {
+                        Some(Rc::new(move |_window: &mut Window, app: &mut App| {
                             downloads.update(app, |downloads, cx| downloads.resume(id, cx));
                         }))
                     } else {
@@ -141,15 +144,15 @@ impl TransferList {
 
                 let on_remove = if row.available_actions.delete_artifact {
                     let downloads = downloads.clone();
-                    Some(Box::new(move |_window: &mut Window, app: &mut App| {
+                    Some(Rc::new(move |_window: &mut Window, app: &mut App| {
                         downloads.update(app, |downloads, cx| downloads.remove(id, cx));
                     })
-                        as Box<dyn Fn(&mut Window, &mut App) + 'static>)
+                        as Rc<dyn Fn(&mut Window, &mut App) + 'static>)
                 } else {
                     None
                 };
 
-                TransferRow {
+                TransferRowModel {
                     id,
                     filename: row.filename,
                     destination: row.destination,
@@ -159,18 +162,13 @@ impl TransferList {
                     progress: row.progress,
                     state: row.display_state,
                     selected,
-                    on_select: None,
                     on_pause_resume,
                     on_remove,
                 }
             })
             .collect();
 
-        TransferListViewModel {
-            filters,
-            rows,
-            selected_id,
-        }
+        TransferListViewModel { filters, rows }
     }
 
     pub fn visible_transfer_rows(&self, cx: &App) -> Vec<TransferListRow> {
@@ -214,8 +212,13 @@ impl Render for TransferList {
 
         let view_model = self.view_model(rows, selected_id, &settings);
         let weak = cx.weak_entity();
+        let rows_empty = view_model.rows.is_empty();
+        let row_models = Rc::new(view_model.rows);
+        let scroll_handle = self.scroll_handle.clone();
 
         v_flex()
+            .size_full()
+            .min_h_0()
             .pt(px(Spacing::SECTION_GAP))
             .child(
                 div()
@@ -249,33 +252,86 @@ impl Render for TransferList {
                         .into_any_element()
                     })),
             )
-            .child(if view_model.rows.is_empty() {
+            .child(if rows_empty {
                 TransferListEmptyState.into_any_element()
             } else {
-                v_flex()
-                    .gap(px(Spacing::LIST_GAP))
-                    .children(view_model.rows.into_iter().map(|mut row| {
-                        let id = row.id;
-                        row.selected = view_model.selected_id == Some(id);
-                        row.on_select = Some(Box::new({
-                            let weak = weak.clone();
-                            move |_window: &mut Window, app: &mut App| {
-                                let _ = weak.update(app, |this, cx| {
-                                    this.set_selected_id(Some(id), cx);
-                                });
-                            }
-                        }));
-                        row
-                    }))
-                    .into_any_element()
+                uniform_list(
+                    "transfers-rows",
+                    row_models.len(),
+                    cx.processor(move |_, range: std::ops::Range<usize>, _window, _cx| {
+                        range
+                            .map(|ix| {
+                                let model = row_models[ix].clone();
+                                let id = model.id;
+                                let weak = weak.clone();
+                                TransferRow {
+                                    id: model.id,
+                                    filename: model.filename,
+                                    destination: model.destination,
+                                    icon_name: model.icon_name,
+                                    downloaded_bytes: model.downloaded_bytes,
+                                    total_bytes: model.total_bytes,
+                                    progress: model.progress,
+                                    state: model.state,
+                                    selected: model.selected,
+                                    on_select: Some(Box::new(
+                                        move |_window: &mut Window, app: &mut App| {
+                                            let _ = weak.update(app, |this, cx| {
+                                                this.set_selected_id(Some(id), cx);
+                                            });
+                                        },
+                                    )),
+                                    on_pause_resume: model.on_pause_resume.as_ref().map({
+                                        |handler| {
+                                            let handler = Rc::clone(handler);
+                                            Box::new(move |window: &mut Window, cx: &mut App| {
+                                                handler(window, cx);
+                                            })
+                                                as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                        }
+                                    }),
+                                    on_remove: model.on_remove.as_ref().map(|handler| {
+                                        let handler = Rc::clone(handler);
+                                        Box::new(move |window: &mut Window, cx: &mut App| {
+                                            handler(window, cx);
+                                        })
+                                            as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                    }),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&scroll_handle)
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .pb(px(Spacing::LIST_GAP))
+                .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                .with_width_from_item(Some(0))
+                .into_any_element()
             })
     }
 }
 
 struct TransferListViewModel {
     filters: Vec<TransferFilterChipModel>,
-    rows: Vec<TransferRow>,
-    selected_id: Option<DownloadId>,
+    rows: Vec<TransferRowModel>,
+}
+
+#[derive(Clone)]
+struct TransferRowModel {
+    id: DownloadId,
+    filename: SharedString,
+    destination: SharedString,
+    icon_name: SharedString,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    progress: f32,
+    state: crate::app::TransferDisplayState,
+    selected: bool,
+    on_pause_resume: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_remove: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
 
 #[derive(Clone)]
@@ -390,7 +446,20 @@ mod tests {
     use super::*;
     use crate::app::{TransferAvailableActions, TransferDisplayState};
     use crate::settings::DestinationRule;
+    use gpui::{
+        Bounds, Context, MouseButton, Pixels, TestApp, Window, WindowBounds, WindowOptions, point,
+        px, size,
+    };
+    use std::ops::Range;
     use std::path::PathBuf;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    const PROBE_ROW_HEIGHT: f32 = 88.0;
+    const PROBE_ITEM_COUNT: usize = 200;
+    const PROBE_TOP_HEIGHT: f32 = 220.0;
 
     #[test]
     fn selection_defaults_to_first_visible_row() {
@@ -469,6 +538,150 @@ mod tests {
         };
 
         assert_eq!(resolved_transfer_icon_name(&row, &settings), "video");
+    }
+
+    struct ProbeTransfersHost {
+        render_count: Arc<AtomicUsize>,
+        visible_range: Range<usize>,
+        scroll_handle: UniformListScrollHandle,
+    }
+
+    impl ProbeTransfersHost {
+        fn new(
+            render_count: Arc<AtomicUsize>,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> Self {
+            Self {
+                render_count,
+                visible_range: 0..0,
+                scroll_handle: UniformListScrollHandle::new(),
+            }
+        }
+    }
+
+    impl Render for ProbeTransfersHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let render_count = Arc::clone(&self.render_count);
+
+            div().size_full().child(
+                v_resizable("probe-transfers-layout")
+                    .child(
+                        resizable_panel()
+                            .size(px(PROBE_TOP_HEIGHT))
+                            .size_range(px(160.0)..px(320.0))
+                            .child(div().size_full()),
+                    )
+                    .child(
+                        resizable_panel().size_range(px(120.0)..Pixels::MAX).child(
+                            uniform_list(
+                                "probe-transfers-list",
+                                PROBE_ITEM_COUNT,
+                                cx.processor(move |this, range: Range<usize>, _window, _cx| {
+                                    this.visible_range = range.clone();
+                                    range
+                                        .map(|ix| {
+                                            ProbeTransferRow::new(ix, Arc::clone(&render_count))
+                                        })
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                            .track_scroll(&self.scroll_handle)
+                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                            .with_width_from_item(Some(0))
+                            .size_full(),
+                        ),
+                    ),
+            )
+        }
+    }
+
+    #[derive(IntoElement)]
+    struct ProbeTransferRow {
+        ix: usize,
+        render_count: Arc<AtomicUsize>,
+    }
+
+    impl ProbeTransferRow {
+        fn new(ix: usize, render_count: Arc<AtomicUsize>) -> Self {
+            Self { ix, render_count }
+        }
+    }
+
+    impl RenderOnce for ProbeTransferRow {
+        fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+            self.render_count.fetch_add(1, Ordering::Relaxed);
+
+            div()
+                .w_full()
+                .h(px(PROBE_ROW_HEIGHT))
+                .border_b_1()
+                .border_color(Colors::border())
+                .child(format!("Row {}", self.ix))
+        }
+    }
+
+    fn open_probe_window(
+        app: &mut TestApp,
+        render_count: Arc<AtomicUsize>,
+    ) -> gpui::TestAppWindow<ProbeTransfersHost> {
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(900.0), px(700.0)));
+        let mut window = app.open_window_with_options(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |window, cx| ProbeTransfersHost::new(Arc::clone(&render_count), window, cx),
+        );
+        window.draw();
+        window
+    }
+
+    // These tests were added to see if lazy loading was the problem with the
+    // performance issues when dragging the bottom resizable panel.
+    // might delete later?
+    #[test]
+    fn lazy_transfer_list_renders_only_a_visible_slice_during_vertical_drag() {
+        let render_count = Arc::new(AtomicUsize::new(0));
+        let mut app = TestApp::new();
+        let mut window = open_probe_window(&mut app, Arc::clone(&render_count));
+
+        let initial_visible = window.read(|host, _| host.visible_range.clone());
+        let initial_rendered = render_count.swap(0, Ordering::Relaxed);
+
+        assert!(!initial_visible.is_empty());
+        assert!(initial_visible.len() < PROBE_ITEM_COUNT);
+        assert!(initial_rendered < 32);
+
+        window.simulate_mouse_down(point(px(450.0), px(PROBE_TOP_HEIGHT)), MouseButton::Left);
+        window.simulate_mouse_move(point(px(450.0), px(170.0)));
+        window.simulate_mouse_up(point(px(450.0), px(170.0)), MouseButton::Left);
+
+        let resized_visible = window.read(|host, _| host.visible_range.clone());
+        let rendered_during_drag = render_count.load(Ordering::Relaxed);
+
+        assert!(resized_visible.len() >= initial_visible.len());
+        assert!(resized_visible.len() < PROBE_ITEM_COUNT);
+        assert!(rendered_during_drag < 48);
+    }
+
+    #[test]
+    fn lazy_transfer_list_updates_visible_range_when_window_height_changes() {
+        let render_count = Arc::new(AtomicUsize::new(0));
+        let mut app = TestApp::new();
+        let mut window = open_probe_window(&mut app, render_count);
+
+        let initial_visible = window.read(|host, _| host.visible_range.clone());
+
+        window.simulate_resize(size(px(900.0), px(520.0)));
+        window.draw();
+
+        let resized_visible = window.read(|host, _| host.visible_range.clone());
+
+        assert!(!initial_visible.is_empty());
+        assert!(!resized_visible.is_empty());
+        assert!(resized_visible.len() <= initial_visible.len());
+        assert!(resized_visible.len() < PROBE_ITEM_COUNT);
     }
 
     fn test_row(id: DownloadId) -> TransferListRow {

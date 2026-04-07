@@ -379,10 +379,8 @@ impl MainWindow {
                     .size_range(px(TRANSFERS_BOTTOM_PANEL_MIN_HEIGHT)..Pixels::MAX)
                     .child(
                         div()
-                            .id("transfers-list-scroll")
                             .size_full()
                             .min_h_0()
-                            .overflow_y_scroll()
                             .child(self.transfer_list.clone()),
                     ),
             )
