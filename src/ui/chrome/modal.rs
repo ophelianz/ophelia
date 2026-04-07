@@ -88,7 +88,7 @@ impl RenderOnce for Modal {
                 .flex()
                 .w(size.width)
                 .h(size.height)
-                .bg(gpui::rgba(0x00000088))
+                .bg(Colors::overlay_scrim())
                 .id("modal-bg")
                 .map(|div| match decorations {
                     gpui::Decorations::Server => div,
@@ -119,7 +119,7 @@ impl RenderOnce for Modal {
                         .m_auto()
                         .border_1()
                         .border_color(Colors::border())
-                        .bg(Colors::card())
+                        .bg(Colors::background())
                         .rounded(px(Chrome::MODAL_RADIUS))
                         .flex_col()
                         .on_any_mouse_down(|_, _, cx| {

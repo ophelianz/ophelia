@@ -16,6 +16,7 @@
 use gpui::{Rgba, rgb, rgba};
 
 pub const APP_FONT_FAMILY: &str = "IBM Plex Sans";
+pub const TITLE_FONT_FAMILY: &str = "Inter";
 
 // ---------------------------------------------------------------------------
 // Color palette
@@ -47,6 +48,9 @@ impl Colors {
     }
     pub fn muted_foreground() -> Rgba {
         rgb(0x737373)
+    }
+    pub fn overlay_scrim() -> Rgba {
+        rgba(0x010202c8)
     }
 
     // State colors

@@ -55,6 +55,7 @@ fn run() {
             cx.text_system()
                 .add_fonts(
                     [
+                        "Inter-VariableFont_opsz,wght.ttf",
                         "IBMPlexSans-Light.ttf",
                         "IBMPlexSans-Regular.ttf",
                         "IBMPlexSans-Medium.ttf",

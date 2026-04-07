@@ -106,6 +106,7 @@ impl RenderOnce for AboutModal {
                                     .gap(px(4.0))
                                     .child(
                                         div()
+                                            .font_family(TITLE_FONT_FAMILY)
                                             .text_xl()
                                             .font_weight(FontWeight::NORMAL)
                                             .text_color(Colors::foreground())

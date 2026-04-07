@@ -271,8 +271,9 @@ impl RenderOnce for SidebarBrand {
                         .child(OpheliaLogo::new(44.0))
                         .child(
                             div()
+                                .font_family(TITLE_FONT_FAMILY)
                                 .text_xl()
-                                .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                                .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(Colors::foreground())
                                 .child(t!("app.name").to_string()),
                         ),
