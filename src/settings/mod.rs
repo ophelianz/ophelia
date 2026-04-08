@@ -97,6 +97,8 @@ pub struct Settings {
     pub http_download_ordering_mode: HttpDownloadOrderingMode,
     /// Extension list used when HTTP ordering is file-specific.
     pub sequential_download_extensions: Vec<String>,
+    /// Master switch for in-app popup notifications.
+    pub notifications_enabled: bool,
 }
 
 impl Default for Settings {
@@ -114,6 +116,7 @@ impl Default for Settings {
             destination_rules: default_destination_rules(&default_download_root()),
             http_download_ordering_mode: HttpDownloadOrderingMode::FileSpecific,
             sequential_download_extensions: default_sequential_download_extensions(),
+            notifications_enabled: true,
         }
     }
 }
@@ -212,6 +215,7 @@ mod tests {
             Settings::default().sequential_download_extensions,
             default_sequential_download_extensions()
         );
+        assert!(Settings::default().notifications_enabled);
     }
 
     #[test]
@@ -241,6 +245,7 @@ mod tests {
             settings.sequential_download_extensions,
             default_sequential_download_extensions()
         );
+        assert!(settings.notifications_enabled);
     }
 
     #[test]
@@ -265,6 +270,7 @@ mod tests {
             settings.sequential_download_extensions,
             default_sequential_download_extensions()
         );
+        assert!(settings.notifications_enabled);
     }
 
     #[test]
@@ -316,5 +322,17 @@ mod tests {
             HttpDownloadOrderingMode::FileSpecific
         );
         assert_eq!(settings.sequential_download_extensions, vec![".MKV"]);
+    }
+
+    #[test]
+    fn explicit_notifications_setting_deserializes() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "notifications_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!settings.notifications_enabled);
     }
 }

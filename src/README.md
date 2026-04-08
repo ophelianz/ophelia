@@ -6,7 +6,7 @@ Ophelia keeps the frontend and backend split into a few clear layers:
 - `views/`: app-specific compositions such as windows, panels, lists, and overlays
 - `theme.rs`: shared design tokens and visual constants
 - `app.rs`: app-layer bridge between GPUI and the backend engine
-- `app_menu.rs` / `app_actions.rs`: app-level actions, shortcuts, and menu wiring
+- `app_menu.rs` / `app_actions.rs` / `tray.rs`: app-level actions, shortcuts, tray integration, and shell wiring
 - `platform/`: shared OS integration such as window chrome and app path policy
 - `engine/`: download engine, persistence, and provider-specific backend logic
 - `ipc.rs`: local ingress for browser-extension download handoff
@@ -66,10 +66,11 @@ These names are intentional too:
 - `main/`
     - `main_window.rs`: root application window
     - `sidebar.rs`: top-level `Transfers` / `History` navigation
-    - `download_list.rs`: live transfers surface with internal status filters
-    - `download_row.rs`: individual download row pieces
+    - `transfers_list.rs`: live transfers surface with internal status filters
+    - `transfer_row.rs`: individual transfer row pieces
     - `history.rs`: global history view and filter chips
     - `stats_bar.rs`: throughput and status summary card
+    - `chunk_map.rs`: selected-transfer chunk-map summary card
 - `settings/`
     - `mod.rs`: settings window entity
     - `general.rs`: general app settings section
@@ -83,11 +84,13 @@ These names are intentional too:
 
 ### Backend-adjacent root
 
-- `app.rs`: GPUI-facing download model, backend service owner, progress polling, and history bridge
+- `app.rs`: GPUI-facing download model type, backend service owner, progress polling, and history bridge
     - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
     - also caches provider kind, source label, control support, HTTP chunk-map state, and an `id -> index` side map for each live row
     - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
     - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
+- `app_actions.rs`: app-shell owner for the global `Downloads` entity handle, main/settings window reuse, overlay visibility state, and macOS dock/tray mode transitions
+- `tray.rs`: macOS tray/menu-bar bridge that refreshes aggregate speed and routes queued tray intents into `app_actions`
 - `ipc.rs`: local Axum server plus app-owned IPC ingress handle
 - `platform/`
     - `mod.rs`: platform module root and window-chrome entry points

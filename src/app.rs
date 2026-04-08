@@ -45,6 +45,7 @@ use crate::engine::{
 use crate::ipc::IpcServer;
 use crate::platform::io::{ProcessIoCounters, sample_process_io_counters};
 use crate::settings::Settings;
+use crate::views::overlays::notification::NotificationKind;
 
 /// All live download state in SoA layout.
 /// One vec per field, all vecs share the same index space.
@@ -396,7 +397,7 @@ impl Downloads {
                 return None;
             }
         };
-        Some(self.push_spec(spec, cx))
+        Some(self.add_spec(spec, AddOrigin::UserInput, cx))
     }
 
     pub fn add_request(
@@ -412,17 +413,26 @@ impl Downloads {
                 return None;
             }
         };
-        Some(self.push_spec(spec, cx))
+        Some(self.add_spec(spec, AddOrigin::IpcRequest, cx))
+    }
+
+    fn add_spec(
+        &mut self,
+        spec: DownloadSpec,
+        origin: AddOrigin,
+        cx: &mut Context<Self>,
+    ) -> DownloadId {
+        let filename = notification_filename(spec.destination());
+        let id = self.push_spec(spec, cx);
+        if let Some(kind) = start_notification_kind(origin) {
+            self.show_notification(cx, filename, kind);
+        }
+        id
     }
 
     fn push_spec(&mut self, spec: DownloadSpec, cx: &mut Context<Self>) -> DownloadId {
         let destination = spec.destination().to_path_buf();
-        let filename: SharedString = destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-            .into();
+        let filename = notification_filename(&destination);
         let dest_str: SharedString = destination.to_string_lossy().to_string().into();
 
         let provider_kind: SharedString = spec.provider_kind().to_string().into();
@@ -453,11 +463,7 @@ impl Downloads {
         cx: &mut Context<Self>,
     ) {
         tracing::warn!("failed to resolve download destination: {error}");
-        crate::views::overlays::notification::show(
-            cx,
-            display_name.into(),
-            crate::views::overlays::notification::NotificationKind::Error,
-        );
+        self.show_notification(cx, display_name.into(), NotificationKind::Error);
     }
 
     pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
@@ -636,19 +642,9 @@ impl Downloads {
             self.speeds[idx] = update.speed_bytes_per_sec;
 
             // Show notification on first terminal transition.
-            let is_terminal = matches!(
-                update.status,
-                DownloadStatus::Finished | DownloadStatus::Error
-            );
-            let was_terminal = matches!(prev, DownloadStatus::Finished | DownloadStatus::Error);
-            if is_terminal && !was_terminal {
+            if let Some(kind) = terminal_notification_kind(prev, update.status) {
                 let filename = self.filenames[idx].clone();
-                let kind = if update.status == DownloadStatus::Finished {
-                    crate::views::overlays::notification::NotificationKind::Success
-                } else {
-                    crate::views::overlays::notification::NotificationKind::Error
-                };
-                crate::views::overlays::notification::show(cx, filename, kind);
+                self.show_notification(cx, filename, kind);
                 self.refresh_history(cx);
             }
 
@@ -733,6 +729,21 @@ impl Downloads {
     fn rebuild_row_index(&mut self) {
         self.row_by_id = build_row_index(&self.ids);
     }
+
+    fn show_notification(
+        &self,
+        cx: &mut Context<Self>,
+        filename: impl Into<SharedString>,
+        kind: NotificationKind,
+    ) {
+        show_popup_notification(&self.settings, cx, filename.into(), kind);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddOrigin {
+    UserInput,
+    IpcRequest,
 }
 
 fn control_action_name(action: DownloadControlAction) -> &'static str {
@@ -758,6 +769,49 @@ fn artifact_state_name(state: crate::engine::ArtifactState) -> &'static str {
         crate::engine::ArtifactState::Present => "present",
         crate::engine::ArtifactState::Deleted => "deleted",
         crate::engine::ArtifactState::Missing => "missing",
+    }
+}
+
+fn notification_filename(destination: &Path) -> SharedString {
+    destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+        .into()
+}
+
+fn show_popup_notification(
+    settings: &Settings,
+    cx: &mut gpui::App,
+    filename: SharedString,
+    kind: NotificationKind,
+) {
+    if settings.notifications_enabled {
+        crate::views::overlays::notification::show(cx, filename, kind);
+    }
+}
+
+fn start_notification_kind(origin: AddOrigin) -> Option<NotificationKind> {
+    match origin {
+        AddOrigin::UserInput => None,
+        AddOrigin::IpcRequest => Some(NotificationKind::Started),
+    }
+}
+
+fn terminal_notification_kind(
+    previous: DownloadStatus,
+    next: DownloadStatus,
+) -> Option<NotificationKind> {
+    let was_terminal = matches!(previous, DownloadStatus::Finished | DownloadStatus::Error);
+    if was_terminal {
+        return None;
+    }
+
+    match next {
+        DownloadStatus::Finished => Some(NotificationKind::Success),
+        DownloadStatus::Error => Some(NotificationKind::Error),
+        _ => None,
     }
 }
 
@@ -811,6 +865,7 @@ fn query_disk(path: &Path) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestApp;
 
     #[test]
     fn transfer_available_actions_follow_status_and_capabilities() {
@@ -900,6 +955,77 @@ mod tests {
             source_summary("ftp", "ftp://example.com/file.zip"),
             "ftp: ftp://example.com/file.zip"
         );
+    }
+
+    #[test]
+    fn ipc_requests_show_a_start_notification_but_manual_adds_do_not() {
+        assert_eq!(start_notification_kind(AddOrigin::UserInput), None);
+        assert_eq!(
+            start_notification_kind(AddOrigin::IpcRequest),
+            Some(NotificationKind::Started)
+        );
+    }
+
+    #[test]
+    fn terminal_notification_kind_only_emits_on_first_terminal_transition() {
+        assert_eq!(
+            terminal_notification_kind(DownloadStatus::Downloading, DownloadStatus::Finished),
+            Some(NotificationKind::Success)
+        );
+        assert_eq!(
+            terminal_notification_kind(DownloadStatus::Downloading, DownloadStatus::Error),
+            Some(NotificationKind::Error)
+        );
+        assert_eq!(
+            terminal_notification_kind(DownloadStatus::Finished, DownloadStatus::Finished),
+            None
+        );
+        assert_eq!(
+            terminal_notification_kind(DownloadStatus::Error, DownloadStatus::Error),
+            None
+        );
+        assert_eq!(
+            terminal_notification_kind(DownloadStatus::Paused, DownloadStatus::Paused),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_filename_uses_the_resolved_destination_name() {
+        assert_eq!(
+            notification_filename(Path::new("/tmp/downloads/browser-name.mp4")).as_ref(),
+            "browser-name.mp4"
+        );
+    }
+
+    #[test]
+    fn popup_notifications_respect_the_global_settings_switch() {
+        let mut app = TestApp::new();
+        let mut enabled_settings = Settings::default();
+        enabled_settings.notifications_enabled = true;
+
+        app.update(|cx| {
+            show_popup_notification(
+                &enabled_settings,
+                cx,
+                "file.mp4".into(),
+                NotificationKind::Started,
+            );
+        });
+        assert_eq!(app.windows().len(), 1);
+
+        let mut disabled_settings = Settings::default();
+        disabled_settings.notifications_enabled = false;
+        let mut app = TestApp::new();
+        app.update(|cx| {
+            show_popup_notification(
+                &disabled_settings,
+                cx,
+                "file.mp4".into(),
+                NotificationKind::Error,
+            );
+        });
+        assert_eq!(app.windows().len(), 0);
     }
 
     #[test]
