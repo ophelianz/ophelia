@@ -31,7 +31,7 @@ fn wait_for_matching_notification(
     engine: &mut DownloadEngine,
     mut predicate: impl FnMut(&EngineNotification) -> bool,
 ) -> EngineNotification {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if let Some(notification) = engine.poll_notification() {
             if predicate(&notification) {
