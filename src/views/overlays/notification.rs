@@ -27,7 +27,9 @@ use gpui::{
 
 use crate::ui::prelude::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationKind {
+    Started,
     Success,
     Error,
 }
@@ -49,10 +51,12 @@ impl Notification {
 impl Render for Notification {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let (icon, accent) = match self.kind {
+            NotificationKind::Started => (IconName::ArrowDownToLine, Colors::finished()),
             NotificationKind::Success => (IconName::CircleCheck, Colors::active()),
             NotificationKind::Error => (IconName::CircleX, Colors::error()),
         };
         let label = match self.kind {
+            NotificationKind::Started => t!("notifications.started"),
             NotificationKind::Success => t!("notifications.complete"),
             NotificationKind::Error => t!("notifications.failed"),
         };

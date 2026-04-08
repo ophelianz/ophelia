@@ -301,6 +301,13 @@ impl SettingsWindow {
         }
     }
 
+    pub(super) fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.notifications_enabled != enabled {
+            self.settings.notifications_enabled = enabled;
+            cx.notify();
+        }
+    }
+
     pub(super) fn set_destination_rules_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.destination_rules_enabled != enabled {
             self.settings.destination_rules_enabled = enabled;
@@ -424,7 +431,7 @@ impl SettingsWindow {
 impl SettingsWindow {
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.active {
-            Section::General => general::render(self).into_any_element(),
+            Section::General => general::render(self, cx).into_any_element(),
             Section::Destinations => destinations::render(self, cx).into_any_element(),
             Section::Network => network::render(self).into_any_element(),
         }
@@ -796,6 +803,28 @@ mod tests {
                 draft.sequential_download_extensions,
                 vec![".mkv".to_string(), ".webm".to_string()]
             );
+        });
+    }
+
+    #[test]
+    fn general_notifications_switch_updates_draft_settings() {
+        let mut app = TestApp::new();
+        let settings = Settings::default();
+
+        let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
+        let mut window = app.open_window_with_options(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |_window: &mut Window, cx| SettingsWindow::new_with_settings(settings.clone(), cx),
+        );
+
+        window.update(|settings: &mut SettingsWindow, _window, cx| {
+            settings.set_notifications_enabled(false, cx);
+
+            let draft = settings.draft_settings(cx);
+            assert!(!draft.notifications_enabled);
         });
     }
 }

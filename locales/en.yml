@@ -44,6 +44,7 @@ sidebar:
     storage: "Storage"
     storage_used: "used"
 notifications:
+    started: "Download started"
     complete: "Download complete"
     failed: "Download failed"
 history:
@@ -92,6 +93,8 @@ settings:
         section: "General"
         language_label: "Language"
         language_description: "Choose the display language for the app interface and menus."
+        notifications_label: "Enable Notifications"
+        notifications_description: "Show popup notifications for download start, completion, and failure."
         language_option_english: "English"
         language_option_simplified_chinese: "Simplified Chinese"
     restart_required_button: "Restart"
