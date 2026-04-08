@@ -1,0 +1,187 @@
+name: Stable macOS Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  release-stable:
+    runs-on: macos-latest
+    environment: stable-release
+    env:
+      OPHELIA_RELEASE_CHANNEL: stable
+      OPHELIA_BUILD_COMMIT: ${{ github.sha }}
+      OPHELIA_UPDATE_MANIFEST_BASE_URL: https://ophelia.app/updates
+      OPHELIA_MINISIGN_PUBKEY: ${{ secrets.OPHELIA_MINISIGN_PUBKEY }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout gpui-ce sibling
+        shell: bash
+        run: |
+          rm -rf ../gpui-ce
+          git clone --depth 1 https://github.com/ophelianz/gpui-ce.git ../gpui-ce
+
+      - name: Compute build metadata
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.release.published_at }}" ]; then
+            timestamp='${{ github.event.release.published_at }}'
+          else
+            timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          stable_version='${{ github.event.release.tag_name }}'
+          stable_version="${stable_version#v}"
+          echo "OPHELIA_BUILD_TIMESTAMP=$timestamp" >> "$GITHUB_ENV"
+          echo "OPHELIA_STABLE_VERSION=$stable_version" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install release tooling
+        run: |
+          brew install minisign
+          cargo install cargo-bundle --locked
+
+      - name: Detect arch
+        id: arch
+        run: |
+          arch_name="$(uname -m)"
+          if [ "$arch_name" = "arm64" ]; then
+            echo "slug=arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "slug=x86_64" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" build.keychain
+
+      - name: Build app bundle
+        run: cargo bundle --release
+
+      - name: Package signed app for notarization
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
+          test -n "$APP_BUNDLE"
+          codesign --force --deep --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
+          ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ steps.arch.outputs.slug }}-notary.zip"
+
+      - name: Notarize app bundle
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "Ophelia-macos-${{ steps.arch.outputs.slug }}-notary.zip" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+
+      - name: Staple and validate app bundle
+        run: |
+          APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
+          test -n "$APP_BUNDLE"
+          xcrun stapler staple "$APP_BUNDLE"
+          xcrun stapler validate "$APP_BUNDLE"
+          spctl --assess --type execute -vv "$APP_BUNDLE"
+
+      - name: Build final distributables
+        run: |
+          set -eu
+          APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
+          test -n "$APP_BUNDLE"
+          ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ steps.arch.outputs.slug }}.zip"
+          hdiutil create -volname "Ophelia" -srcfolder "$APP_BUNDLE" -ov -format UDZO "Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg"
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg"
+          xcrun stapler validate "Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg"
+
+      - name: Sign distributables with minisign
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$MINISIGN_PRIVATE_KEY" > minisign.key
+          minisign -S -s minisign.key -m "Ophelia-macos-${{ steps.arch.outputs.slug }}.zip"
+          minisign -S -s minisign.key -m "Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg"
+
+      - name: Compute zip metadata
+        id: zip
+        run: |
+          sha256="$(shasum -a 256 "Ophelia-macos-${{ steps.arch.outputs.slug }}.zip" | awk '{print $1}')"
+          size="$(stat -f%z "Ophelia-macos-${{ steps.arch.outputs.slug }}.zip")"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+
+      - name: Upload stable release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Ophelia-macos-${{ steps.arch.outputs.slug }}.zip
+            Ophelia-macos-${{ steps.arch.outputs.slug }}.zip.minisig
+            Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg
+            Ophelia-macos-${{ steps.arch.outputs.slug }}.dmg.minisig
+
+      - name: Generate stable manifest
+        run: |
+          python3 scripts/update_manifest.py \
+            --channel stable \
+            --version "${{ env.OPHELIA_STABLE_VERSION }}" \
+            --pub-date "${{ env.OPHELIA_BUILD_TIMESTAMP }}" \
+            --commit "${{ github.sha }}" \
+            --notes-url "${{ github.event.release.html_url }}" \
+            --asset-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/Ophelia-macos-${{ steps.arch.outputs.slug }}.zip" \
+            --asset-size "${{ steps.zip.outputs.size }}" \
+            --sha256 "${{ steps.zip.outputs.sha256 }}" \
+            --minisign-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/Ophelia-macos-${{ steps.arch.outputs.slug }}.zip.minisig" \
+            --output "dist/updates/macos/${{ steps.arch.outputs.slug }}/stable.json"
+
+      - name: Checkout website repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.WEBSITE_REPO }}
+          token: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
+          path: website
+
+      - name: Publish stable manifest to website repo
+        run: |
+          mkdir -p "website/updates/macos/${{ steps.arch.outputs.slug }}"
+          cp "dist/updates/macos/${{ steps.arch.outputs.slug }}/stable.json" "website/updates/macos/${{ steps.arch.outputs.slug }}/stable.json"
+          cd website
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "updates/macos/${{ steps.arch.outputs.slug }}/stable.json"
+          git diff --cached --quiet && exit 0
+          git commit -m "Update Ophelia stable manifest (${{ github.event.release.tag_name }})"
+          git push

@@ -88,6 +88,24 @@ For now, Ophelia also depends on a local sibling checkout of `gpui-ce` during ac
 
 If that changes later, we will move back to a git or published dependency.
 
+## Local updater QA
+
+The custom updater is currently macOS-only and easiest to validate through the local Nightly flow.
+
+Use:
+
+- `scripts/local_nightly_update_qa.sh --minisign-pubkey "<pubkey>"`
+
+That helper writes a reusable env file in `/tmp/ophelia-update-lab/qa-env.sh` and prints the exact remaining steps for:
+
+- building an older Nightly QA app
+- building a newer Nightly app
+- signing, notarizing, and stapling the newer app
+- rebuilding the updater ZIP and manifest
+- serving the local update site
+
+It intentionally does **not** try to hide Apple notarization latency. If Apple’s queue is slow, the helper should still leave you with a reproducible flow instead of terminal-history archaeology.
+
 ## Frontend Structure
 
 The frontend is organized around a few simple layers:
