@@ -83,8 +83,14 @@ jobs:
           set -eu
           APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
           test -n "$APP_BUNDLE"
-          codesign --force --deep --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
-          ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
+          echo "Signing app bundle: $APP_BUNDLE"
+          echo "Using signing identity: $APPLE_SIGNING_IDENTITY"
+          security find-identity -v -p codesigning
+          echo "Bundle file count: $(find "$APP_BUNDLE" | wc -l | tr -d ' ')"
+          time codesign --force --deep --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
+          time codesign --verify --deep --strict "$APP_BUNDLE"
+          time ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
+          ls -lh "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
 
       - name: Notarize app bundle
         env:
