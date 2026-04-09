@@ -68,11 +68,13 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
           echo "$APPLE_CERTIFICATE_P12" | base64 --decode > certificate.p12
-          security create-keychain -p "" build.keychain
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "APPLE_BUILD_KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
-          security unlock-keychain -p "" build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -k "" build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
 
       - name: Build app bundle
         run: cargo bundle --release
@@ -88,8 +90,8 @@ jobs:
           echo "Using signing identity: $APPLE_SIGNING_IDENTITY"
           security find-identity -v -p codesigning
           echo "Bundle file count: $(find "$APP_BUNDLE" | wc -l | tr -d ' ')"
-          time codesign --force --deep --options runtime --timestamp --verbose=4 --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
-          time codesign --verify --deep --strict "$APP_BUNDLE"
+          time codesign --force --options runtime --timestamp --verbose=4 --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
+          time codesign --verify --strict "$APP_BUNDLE"
           time ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
           ls -lh "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
 
