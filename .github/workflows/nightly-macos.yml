@@ -25,7 +25,7 @@ jobs:
     env:
       OPHELIA_RELEASE_CHANNEL: nightly
       OPHELIA_BUILD_COMMIT: ${{ github.sha }}
-      OPHELIA_UPDATE_MANIFEST_BASE_URL: https://ophelia.app/updates
+      OPHELIA_UPDATE_MANIFEST_BASE_URL: https://ophelia.nz/updates
       OPHELIA_MINISIGN_PUBKEY: ${{ secrets.OPHELIA_MINISIGN_PUBKEY }}
 
     steps:

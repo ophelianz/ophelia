@@ -11,7 +11,7 @@ fn main() {
     let build_commit = env::var("OPHELIA_BUILD_COMMIT").unwrap_or_default();
     let build_timestamp = env::var("OPHELIA_BUILD_TIMESTAMP").unwrap_or_default();
     let manifest_base_url = env::var("OPHELIA_UPDATE_MANIFEST_BASE_URL")
-        .unwrap_or_else(|_| "https://ophelia.app/updates".into());
+        .unwrap_or_else(|_| "https://ophelia.nz/updates".into());
     let minisign_pubkey = env::var("OPHELIA_MINISIGN_PUBKEY").unwrap_or_default();
 
     println!("cargo:rustc-env=OPHELIA_RELEASE_CHANNEL={release_channel}");

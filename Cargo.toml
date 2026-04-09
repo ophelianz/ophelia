@@ -8,7 +8,7 @@ readme = "README.md"
 
 [package.metadata.bundle]
 name = "Ophelia"
-identifier = "com.ophelia.app"
+identifier = "nz.ophelia.app"
 icon = ["assets/AppIcon.icns"]
 category = "public.app-category.utilities"
 
