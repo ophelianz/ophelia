@@ -225,12 +225,12 @@ jobs:
 
       - name: Publish stable manifest to website repo
         run: |
-          mkdir -p "website/updates/macos/${{ matrix.arch_slug }}"
-          cp "dist/updates/macos/${{ matrix.arch_slug }}/stable.json" "website/updates/macos/${{ matrix.arch_slug }}/stable.json"
+          mkdir -p "website/public/updates/macos/${{ matrix.arch_slug }}"
+          cp "dist/updates/macos/${{ matrix.arch_slug }}/stable.json" "website/public/updates/macos/${{ matrix.arch_slug }}/stable.json"
           cd website
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "updates/macos/${{ matrix.arch_slug }}/stable.json"
+          git add "public/updates/macos/${{ matrix.arch_slug }}/stable.json"
           git diff --cached --quiet && exit 0
           git commit -m "Update Ophelia stable manifest (${{ github.event.release.tag_name }}, ${{ matrix.arch_slug }})"
           git push

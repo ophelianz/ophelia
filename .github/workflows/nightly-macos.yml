@@ -228,12 +228,12 @@ jobs:
 
       - name: Publish nightly manifest to website repo
         run: |
-          mkdir -p "website/updates/macos/${{ matrix.arch_slug }}"
-          cp "dist/updates/macos/${{ matrix.arch_slug }}/nightly.json" "website/updates/macos/${{ matrix.arch_slug }}/nightly.json"
+          mkdir -p "website/public/updates/macos/${{ matrix.arch_slug }}"
+          cp "dist/updates/macos/${{ matrix.arch_slug }}/nightly.json" "website/public/updates/macos/${{ matrix.arch_slug }}/nightly.json"
           cd website
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "updates/macos/${{ matrix.arch_slug }}/nightly.json"
+          git add "public/updates/macos/${{ matrix.arch_slug }}/nightly.json"
           git diff --cached --quiet && exit 0
           git commit -m "Update Ophelia nightly manifest (${GITHUB_SHA::7}, ${{ matrix.arch_slug }})"
           git push
