@@ -111,7 +111,16 @@ jobs:
         run: |
           APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
           test -n "$APP_BUNDLE"
-          xcrun stapler staple "$APP_BUNDLE"
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$APP_BUNDLE"; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            echo "Stapler ticket not ready yet for app bundle; retrying in 30s (attempt $attempt/5)"
+            sleep 30
+          done
           xcrun stapler validate "$APP_BUNDLE"
           spctl --assess --type execute -vv "$APP_BUNDLE"
 
@@ -134,7 +143,16 @@ jobs:
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
             --wait
-          xcrun stapler staple "Ophelia-macos-${{ matrix.arch_slug }}.dmg"
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "Ophelia-macos-${{ matrix.arch_slug }}.dmg"; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            echo "Stapler ticket not ready yet for DMG; retrying in 30s (attempt $attempt/5)"
+            sleep 30
+          done
           xcrun stapler validate "Ophelia-macos-${{ matrix.arch_slug }}.dmg"
 
       - name: Sign distributables with minisign
