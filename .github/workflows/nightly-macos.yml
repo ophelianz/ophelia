@@ -89,7 +89,7 @@ jobs:
           echo "Using signing identity: $APPLE_SIGNING_IDENTITY"
           security find-identity -v -p codesigning
           echo "Bundle file count: $(find "$APP_BUNDLE" | wc -l | tr -d ' ')"
-          time codesign --force --options runtime --timestamp --verbose=4 --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
+          time codesign --force --options runtime --verbose=4 --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"
           time codesign --verify --strict "$APP_BUNDLE"
           time ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
           ls -lh "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip"
