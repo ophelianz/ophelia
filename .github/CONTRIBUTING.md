@@ -86,7 +86,13 @@ For now, Ophelia also depends on a local sibling checkout of `gpui-ce` during ac
 - `../ophelia`
 - `../gpui-ce`
 
-If that changes later, we will move back to a git or published dependency.
+CI and release builds do **not** float on whatever happens to be at the tip of `ophelianz/gpui-ce`. They pin the sibling checkout through:
+
+- `.github/gpui-ce-ref`
+
+If you intentionally need newer `gpui-ce` behavior in CI or release builds, update that file in the same change and call it out in the PR.
+
+If the local dev setup changes later, we will move back to a git or published dependency.
 
 ## Local updater QA
 
@@ -105,6 +111,14 @@ That helper writes a reusable env file in `/tmp/ophelia-update-lab/qa-env.sh` an
 - serving the local update site
 
 It intentionally does **not** try to hide Apple notarization latency. If Apple’s queue is slow, the helper should still leave you with a reproducible flow instead of terminal-history archaeology.
+
+## Release Pipeline
+
+The macOS release/update pipeline now has a dedicated runbook:
+
+- `.github/release-pipeline.md`
+
+Read that before changing GitHub Actions, release secrets, website manifest publication, or the pinned `gpui-ce` revision.
 
 ## Frontend Structure
 

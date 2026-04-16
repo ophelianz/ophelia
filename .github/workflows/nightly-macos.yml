@@ -6,16 +6,71 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: write
+concurrency:
+  group: nightly-macos-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  release-nightly:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      website_repo: ${{ steps.website.outputs.repo }}
+      website_branch: ${{ steps.website.outputs.default_branch }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate pinned gpui-ce revision
+        id: gpui
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gpui_ref="$(tr -d '[:space:]' < .github/gpui-ce-ref)"
+          if [[ ! "$gpui_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected .github/gpui-ce-ref to contain a full 40-character commit SHA."
+            exit 1
+          fi
+          gh api "repos/ophelianz/gpui-ce/commits/${gpui_ref}" --jq .sha >/dev/null
+          echo "ref=$gpui_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Validate website manifest destination
+        id: website
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBSITE_REPO: ${{ vars.WEBSITE_REPO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          website_repo="${WEBSITE_REPO:-ophelianz/website}"
+          if [[ "$website_repo" == *"://"* || "$website_repo" == *.git ]]; then
+            echo "::error::WEBSITE_REPO must be set to owner/repo, not a URL or a .git remote."
+            exit 1
+          fi
+
+          default_branch="$(gh api "repos/${website_repo}" --jq .default_branch)"
+
+          echo "repo=$website_repo" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Nightly preflight"
+            echo "- Pinned \`gpui-ce\`: \`${{ steps.gpui.outputs.ref }}\`"
+            echo "- Website repo: \`${website_repo}\`"
+            echo "- Website branch: \`${default_branch}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.arch_slug }}
+    needs: preflight
     runs-on: ${{ matrix.runner }}
-    environment: nightly-release
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - runner: macos-26
@@ -24,7 +79,6 @@ jobs:
             arch_slug: x86_64
     env:
       OPHELIA_RELEASE_CHANNEL: nightly
-      OPHELIA_BUILD_COMMIT: ${{ github.sha }}
       OPHELIA_UPDATE_MANIFEST_BASE_URL: https://ophelia.nz/updates
       OPHELIA_MINISIGN_PUBKEY: ${{ secrets.OPHELIA_MINISIGN_PUBKEY }}
 
@@ -32,21 +86,19 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Checkout gpui-ce sibling
-        shell: bash
-        run: |
-          rm -rf ../gpui-ce
-          git clone --depth 1 https://github.com/ophelianz/gpui-ce.git ../gpui-ce
+        run: scripts/checkout_gpui_ce.sh
 
       - name: Compute build metadata
         shell: bash
         run: |
+          set -euo pipefail
           if [ -n "${{ github.event.head_commit.timestamp }}" ]; then
             timestamp='${{ github.event.head_commit.timestamp }}'
           else
             timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi
+          echo "OPHELIA_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "OPHELIA_BUILD_TIMESTAMP=$timestamp" >> "$GITHUB_ENV"
-          echo "OPHELIA_NIGHTLY_VERSION=nightly-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +109,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install release tooling
+        shell: bash
         run: |
+          set -euo pipefail
           brew install minisign
           cargo install cargo-bundle --locked
 
@@ -65,16 +119,25 @@ jobs:
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        shell: bash
         run: |
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > certificate.p12
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-          echo "APPLE_BUILD_KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings build.keychain
-          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          set -euo pipefail
+          certificate_path="${RUNNER_TEMP}/ophelia-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/ophelia-build.keychain-db"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          keychain_password="$(uuidgen)"
+          {
+            echo "APPLE_BUILD_KEYCHAIN=$keychain_path"
+            echo "APPLE_BUILD_KEYCHAIN_PASSWORD=$keychain_password"
+            echo "APPLE_CERTIFICATE_PATH=$certificate_path"
+            echo "MINISIGN_KEY_PATH=${RUNNER_TEMP}/ophelia-minisign.key"
+          } >> "$GITHUB_ENV"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
 
       - name: Build app bundle
         run: cargo bundle --release
@@ -82,13 +145,25 @@ jobs:
       - name: Package signed app for notarization
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
+          matching_identities="$(security find-identity -v -p codesigning | grep -F "$APPLE_SIGNING_IDENTITY" || true)"
+          if [[ -z "$matching_identities" ]]; then
+            echo "::error::Expected signing identity '$APPLE_SIGNING_IDENTITY' was not imported."
+            security find-identity -v -p codesigning
+            exit 1
+          fi
+          match_count="$(printf '%s\n' "$matching_identities" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [[ "$match_count" != "1" ]]; then
+            echo "::error::Expected exactly one matching signing identity, found $match_count."
+            printf '%s\n' "$matching_identities"
+            exit 1
+          fi
+
           APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
           test -n "$APP_BUNDLE"
           echo "Signing app bundle: $APP_BUNDLE"
-          echo "Using signing identity: $APPLE_SIGNING_IDENTITY"
-          security find-identity -v -p codesigning
           echo "Bundle file count: $(find "$APP_BUNDLE" | wc -l | tr -d ' ')"
           for attempt in 1 2 3; do
             if time codesign --force --options runtime --timestamp --verbose=4 --sign "$APPLE_SIGNING_IDENTITY" "$APP_BUNDLE"; then
@@ -109,7 +184,9 @@ jobs:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        shell: bash
         run: |
+          set -euo pipefail
           result="$(xcrun notarytool submit "Ophelia-macos-${{ matrix.arch_slug }}-notary.zip" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
@@ -129,7 +206,9 @@ jobs:
           fi
 
       - name: Staple and validate app bundle
+        shell: bash
         run: |
+          set -euo pipefail
           APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
           test -n "$APP_BUNDLE"
           for attempt in 1 2 3 4 5; do
@@ -146,8 +225,9 @@ jobs:
           spctl --assess --type execute -vv "$APP_BUNDLE"
 
       - name: Build final distributables
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           APP_BUNDLE="$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
           test -n "$APP_BUNDLE"
           ditto -c -k --keepParent --rsrc --sequesterRsrc "$APP_BUNDLE" "Ophelia-macos-${{ matrix.arch_slug }}.zip"
@@ -158,7 +238,9 @@ jobs:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        shell: bash
         run: |
+          set -euo pipefail
           xcrun notarytool submit "Ophelia-macos-${{ matrix.arch_slug }}.dmg" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
@@ -179,61 +261,163 @@ jobs:
       - name: Sign distributables with minisign
         env:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        shell: bash
         run: |
-          printf '%s' "$MINISIGN_PRIVATE_KEY" > minisign.key
-          minisign -S -s minisign.key -m "Ophelia-macos-${{ matrix.arch_slug }}.zip"
-          minisign -S -s minisign.key -m "Ophelia-macos-${{ matrix.arch_slug }}.dmg"
+          set -euo pipefail
+          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$MINISIGN_KEY_PATH"
+          minisign -S -s "$MINISIGN_KEY_PATH" -m "Ophelia-macos-${{ matrix.arch_slug }}.zip"
+          minisign -S -s "$MINISIGN_KEY_PATH" -m "Ophelia-macos-${{ matrix.arch_slug }}.dmg"
 
-      - name: Compute zip metadata
-        id: zip
-        run: |
-          sha256="$(shasum -a 256 "Ophelia-macos-${{ matrix.arch_slug }}.zip" | awk '{print $1}')"
-          size="$(stat -f%z "Ophelia-macos-${{ matrix.arch_slug }}.zip")"
-          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
-          echo "size=$size" >> "$GITHUB_OUTPUT"
-
-      - name: Publish rolling nightly release
-        uses: softprops/action-gh-release@v2
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: nightly
-          name: Ophelia Nightly
-          prerelease: true
-          make_latest: false
-          files: |
+          name: macos-release-${{ matrix.arch_slug }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
             Ophelia-macos-${{ matrix.arch_slug }}.zip
             Ophelia-macos-${{ matrix.arch_slug }}.zip.minisig
             Ophelia-macos-${{ matrix.arch_slug }}.dmg
             Ophelia-macos-${{ matrix.arch_slug }}.dmg.minisig
 
-      - name: Generate nightly manifest
+      - name: Cleanup signing material
+        if: always()
+        shell: bash
         run: |
-          python3 scripts/update_manifest.py \
-            --channel nightly \
-            --version "${{ env.OPHELIA_NIGHTLY_VERSION }}" \
-            --pub-date "${{ env.OPHELIA_BUILD_TIMESTAMP }}" \
-            --commit "${{ github.sha }}" \
-            --notes-url "https://github.com/${{ github.repository }}/releases/tag/nightly" \
-            --asset-url "https://github.com/${{ github.repository }}/releases/download/nightly/Ophelia-macos-${{ matrix.arch_slug }}.zip" \
-            --asset-size "${{ steps.zip.outputs.size }}" \
-            --sha256 "${{ steps.zip.outputs.sha256 }}" \
-            --minisign-url "https://github.com/${{ github.repository }}/releases/download/nightly/Ophelia-macos-${{ matrix.arch_slug }}.zip.minisig" \
-            --output "dist/updates/macos/${{ matrix.arch_slug }}/nightly.json"
+          set -euo pipefail
+          if [ -n "${APPLE_BUILD_KEYCHAIN:-}" ]; then
+            security delete-keychain "$APPLE_BUILD_KEYCHAIN" || true
+          fi
+          rm -f "${APPLE_CERTIFICATE_PATH:-}" "${MINISIGN_KEY_PATH:-}"
+
+  publish:
+    name: Publish nightly
+    needs:
+      - preflight
+      - build
+    runs-on: ubuntu-latest
+    environment: nightly-release
+    permissions:
+      contents: write
+    env:
+      OPHELIA_UPDATE_MANIFEST_BASE_URL: https://ophelia.nz/updates
+      WEBSITE_DEPLOY_TOKEN: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
+      WEBSITE_REPO: ${{ needs.preflight.outputs.website_repo }}
+      WEBSITE_BRANCH: ${{ needs.preflight.outputs.website_branch }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: macos-release-*
+
+      - name: Validate website repo token access
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${WEBSITE_DEPLOY_TOKEN:-}" ]]; then
+            echo "::error::WEBSITE_DEPLOY_TOKEN is not configured for the nightly-release environment."
+            exit 1
+          fi
+          git ls-remote "https://x-access-token:${WEBSITE_DEPLOY_TOKEN}@github.com/${WEBSITE_REPO}.git" "refs/heads/${WEBSITE_BRANCH}" >/dev/null
+
+      - name: Publish rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find release-assets -type f -print0)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No release assets were downloaded."
+            exit 1
+          fi
+
+          notes="Rolling nightly build for ${GITHUB_SHA::7}"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly "${files[@]}" --clobber
+            gh release edit nightly --title "Ophelia Nightly" --notes "$notes" --prerelease --target "$GITHUB_SHA"
+          else
+            gh release create nightly "${files[@]}" --title "Ophelia Nightly" --notes "$notes" --prerelease --latest=false --target "$GITHUB_SHA"
+          fi
+
+      - name: Generate nightly manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.head_commit.timestamp }}" ]; then
+            timestamp='${{ github.event.head_commit.timestamp }}'
+          else
+            timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          version="nightly-${GITHUB_SHA::7}"
+
+          for arch in arm64 x86_64; do
+            zip_path="$(find release-assets -name "Ophelia-macos-${arch}.zip" -print -quit)"
+            test -n "$zip_path"
+            sha256="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
+            size="$(stat -c%s "$zip_path")"
+            python3 scripts/update_manifest.py \
+              --channel nightly \
+              --version "$version" \
+              --pub-date "$timestamp" \
+              --commit "$GITHUB_SHA" \
+              --notes-url "https://github.com/${{ github.repository }}/releases/tag/nightly" \
+              --asset-url "https://github.com/${{ github.repository }}/releases/download/nightly/Ophelia-macos-${arch}.zip" \
+              --asset-size "$size" \
+              --sha256 "$sha256" \
+              --minisign-url "https://github.com/${{ github.repository }}/releases/download/nightly/Ophelia-macos-${arch}.zip.minisig" \
+              --output "dist/updates/macos/${arch}/nightly.json"
+          done
 
       - name: Checkout website repo
         uses: actions/checkout@v5
         with:
-          repository: ${{ secrets.WEBSITE_REPO }}
+          repository: ${{ needs.preflight.outputs.website_repo }}
+          ref: ${{ needs.preflight.outputs.website_branch }}
           token: ${{ secrets.WEBSITE_DEPLOY_TOKEN }}
           path: website
+          persist-credentials: false
 
-      - name: Publish nightly manifest to website repo
+      - name: Publish nightly manifests to website repo
+        shell: bash
         run: |
-          mkdir -p "website/public/updates/macos/${{ matrix.arch_slug }}"
-          cp "dist/updates/macos/${{ matrix.arch_slug }}/nightly.json" "website/public/updates/macos/${{ matrix.arch_slug }}/nightly.json"
+          set -euo pipefail
+          for arch in arm64 x86_64; do
+            mkdir -p "website/public/updates/macos/${arch}"
+            cp "dist/updates/macos/${arch}/nightly.json" "website/public/updates/macos/${arch}/nightly.json"
+          done
+
           cd website
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "public/updates/macos/${{ matrix.arch_slug }}/nightly.json"
+          git add public/updates/macos/arm64/nightly.json public/updates/macos/x86_64/nightly.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update Ophelia nightly manifest (${GITHUB_SHA::7}, ${{ matrix.arch_slug }})"
-          git push
+          git commit -m "Update Ophelia nightly manifests (${GITHUB_SHA::7})"
+          git remote set-url origin "https://x-access-token:${WEBSITE_DEPLOY_TOKEN}@github.com/${WEBSITE_REPO}.git"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:"${WEBSITE_BRANCH}"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            git fetch origin "${WEBSITE_BRANCH}"
+            git rebase "origin/${WEBSITE_BRANCH}"
+            sleep 5
+          done
+
+      - name: Summarize published nightly
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Nightly publish"
+            echo "- Release: [nightly](https://github.com/${{ github.repository }}/releases/tag/nightly)"
+            echo "- Manifests:"
+            echo "  - https://ophelia.nz/updates/macos/arm64/nightly.json"
+            echo "  - https://ophelia.nz/updates/macos/x86_64/nightly.json"
+          } >> "$GITHUB_STEP_SUMMARY"
