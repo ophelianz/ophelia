@@ -13,5 +13,6 @@ package/inno/Output/*.exe
 # misc
 **/.DS_Store
 .env
+.ropeproject
 *.html
 docs/

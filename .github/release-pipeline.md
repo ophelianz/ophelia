@@ -4,14 +4,14 @@ This document is the maintainer runbook for Ophelia's macOS CI/CD and updater pi
 
 ## Current shape
 
-## buh
-
 Ophelia currently ships macOS-only updater builds.
 
 - GitHub Releases host signed binaries.
 - `https://ophelia.nz/updates/...` hosts manifest JSON only.
 - The updater is custom and Ophelia-owned.
-- `gpui-ce` is still a sibling path dependency locally, but CI/release builds pin it through `.github/gpui-ce-ref`.
+- The published GPUI fork used by CI/release is `ophelianz/gpui-oe`.
+- The local and CI sibling checkout path is `../gpui-oe`.
+- Ophelia still resolves the dependency as Cargo package `gpui-ce` for compatibility during this phase.
 
 ## Workflows
 
@@ -21,7 +21,7 @@ File: `.github/workflows/ci.yml`
 
 - Runs on every `push` and `pull_request`
 - macOS only
-- Checks out the pinned `gpui-ce` sibling revision
+- Checks out the pinned `gpui-oe` sibling revision
 - Runs:
     - `cargo fmt --all -- --check`
     - `cargo check --locked`
@@ -65,17 +65,22 @@ The manifest/release publication should be serialized.
 
 That split avoids the old failure mode where one matrix leg could publish assets or a manifest before the other architecture finished, leaving Nightly or Stable in a half-published state.
 
-## gpui-ce pinning
+## GPUI fork pinning
 
 The authoritative CI/release revision lives in:
 
-- `.github/gpui-ce-ref`
+- `.github/gpui-oe-ref`
 
-When you intentionally update `gpui-ce` in CI:
+The fork/repo name and the Cargo package name are intentionally different right now:
+
+- published repo and sibling checkout: `gpui-oe`
+- Cargo package compatibility name: `gpui-ce`
+
+When you intentionally update the published GPUI fork in CI:
 
 1. Update your local sibling checkout.
 2. Validate Ophelia against it locally.
-3. Update `.github/gpui-ce-ref` to the exact tested commit SHA.
+3. Update `.github/gpui-oe-ref` to the exact tested commit SHA.
 4. Mention the pin bump in the PR or release notes.
 
 ## Website manifest destination

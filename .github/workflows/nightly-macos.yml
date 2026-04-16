@@ -23,19 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Validate pinned gpui-ce revision
+      - name: Validate pinned gpui-oe revision
         id: gpui
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gpui_ref="$(tr -d '[:space:]' < .github/gpui-ce-ref)"
+          gpui_ref="$(tr -d '[:space:]' < .github/gpui-oe-ref)"
           if [[ ! "$gpui_ref" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Expected .github/gpui-ce-ref to contain a full 40-character commit SHA."
+            echo "::error::Expected .github/gpui-oe-ref to contain a full 40-character commit SHA."
             exit 1
           fi
-          gh api "repos/ophelianz/gpui-ce/commits/${gpui_ref}" --jq .sha >/dev/null
+          gh api "repos/ophelianz/gpui-oe/commits/${gpui_ref}" --jq .sha >/dev/null
           echo "ref=$gpui_ref" >> "$GITHUB_OUTPUT"
 
       - name: Validate website manifest destination
@@ -58,7 +58,8 @@ jobs:
           echo "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
           {
             echo "### Nightly preflight"
-            echo "- Pinned \`gpui-ce\`: \`${{ steps.gpui.outputs.ref }}\`"
+            echo "- Pinned \`gpui-oe\` repo commit: \`${{ steps.gpui.outputs.ref }}\`"
+            echo "- Cargo package compatibility: \`gpui-ce\`"
             echo "- Website repo: \`${website_repo}\`"
             echo "- Website branch: \`${default_branch}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -85,8 +86,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Checkout gpui-ce sibling
-        run: scripts/checkout_gpui_ce.sh
+      - name: Checkout gpui-oe sibling
+        run: scripts/checkout_gpui_oe.sh
 
       - name: Compute build metadata
         shell: bash
@@ -103,7 +104,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93
+          toolchain: 1.94.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -245,10 +246,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcrun notarytool submit "Ophelia-macos-${{ matrix.arch_slug }}.dmg" \
+          result="$(xcrun notarytool submit "Ophelia-macos-${{ matrix.arch_slug }}.dmg" \
             -p "$APPLE_NOTARY_PROFILE" \
             --keychain "$APPLE_BUILD_KEYCHAIN" \
-            --wait
+            --wait \
+            --output-format json)"
+          echo "$result"
+          status="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$result")"
+          if [ "$status" != "Accepted" ]; then
+            submission_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$result")"
+            echo "DMG notarization failed with status: $status"
+            xcrun notarytool log "$submission_id" \
+              -p "$APPLE_NOTARY_PROFILE" \
+              --keychain "$APPLE_BUILD_KEYCHAIN" || true
+            exit 1
+          fi
           for attempt in 1 2 3 4 5; do
             if xcrun stapler staple "Ophelia-macos-${{ matrix.arch_slug }}.dmg"; then
               break

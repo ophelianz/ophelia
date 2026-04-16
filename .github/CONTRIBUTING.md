@@ -81,16 +81,23 @@ When possible, we follow patterns from:
 
 That is intentional. `gpui-component` comes from a major GPUI contributor and is one of the best practical references for idiomatic GPUI usage. If you are unsure how to structure a control or interaction pattern, copying that style is usually better than inventing a brand-new Ophelia-specific one.
 
-For now, Ophelia also depends on a local sibling checkout of `gpui-ce` during active framework iteration. The expected layout is:
+Ophelia is currently being migrated to a fresh upstream-based fork, `gpui-oe`, while keeping the crate package name compatible as `gpui-ce` for the first cutover. The expected local layout during this spike is:
 
 - `../ophelia`
-- `../gpui-ce`
+- `../gpui-oe`
 
-CI and release builds do **not** float on whatever happens to be at the tip of `ophelianz/gpui-ce`. They pin the sibling checkout through:
+GitHub CI and release builds now pin the published sibling checkout through:
 
-- `.github/gpui-ce-ref`
+- `.github/gpui-oe-ref`
 
-If you intentionally need newer `gpui-ce` behavior in CI or release builds, update that file in the same change and call it out in the PR.
+The important compatibility split is:
+
+- repository and sibling checkout name: `gpui-oe`
+- Cargo package compatibility name: `gpui-ce`
+
+That means Ophelia still depends on `package = "gpui-ce"` while resolving it from the `../gpui-oe` checkout.
+
+If you intentionally need newer GPUI behavior in CI or release builds, update the published `gpui-oe` fork first, then update the pin in the same change and call it out in the PR.
 
 If the local dev setup changes later, we will move back to a git or published dependency.
 
@@ -118,7 +125,7 @@ The macOS release/update pipeline now has a dedicated runbook:
 
 - `.github/release-pipeline.md`
 
-Read that before changing GitHub Actions, release secrets, website manifest publication, or the pinned `gpui-ce` revision.
+Read that before changing GitHub Actions, release secrets, website manifest publication, or the pinned `gpui-oe` revision.
 
 That includes Apple signing and notarization auth changes. Keep those details in the runbook instead of scattering them across PR comments or workflow history.
 
@@ -252,7 +259,7 @@ If you think the pattern is bad, say so in the PR and justify the change clearly
 
 ### 9. Use GPUI-native tests when the behavior is UI-shaped
 
-If a behavior depends on GPUI entities, focus, clicks, typing, subscriptions, prompts, clipboard, restart, or resize, prefer a `gpui-ce` `TestApp` test over “we clicked around manually and it seemed fine.”
+If a behavior depends on GPUI entities, focus, clicks, typing, subscriptions, prompts, clipboard, restart, or resize, prefer a GPUI `TestApp` test over “we clicked around manually and it seemed fine.”
 
 Quick rule:
 

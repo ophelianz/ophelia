@@ -20,13 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Checkout gpui-ce sibling
-        run: scripts/checkout_gpui_ce.sh
+      - name: Checkout gpui-oe sibling
+        run: scripts/checkout_gpui_oe.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93
+          toolchain: 1.94.1
           components: rustfmt
 
       - name: Cache cargo

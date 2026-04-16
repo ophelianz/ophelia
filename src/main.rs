@@ -36,10 +36,10 @@ mod updater;
 mod views;
 
 use assets::Assets;
-use gpui::{App, Application, ApplicationActivationPolicy, QuitMode, prelude::*};
+use gpui::{App, ApplicationActivationPolicy, QuitMode, application, prelude::*};
 
 fn run() {
-    let app = Application::new()
+    let app = application()
         .with_assets(Assets::new())
         .with_quit_mode(QuitMode::Explicit)
         .with_activation_policy(ApplicationActivationPolicy::Regular);
