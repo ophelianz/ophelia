@@ -32,6 +32,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, SharedString};
@@ -508,6 +509,30 @@ impl Downloads {
         self.delete_artifact(id, cx);
     }
 
+    /// Open the containing folder for a live transfer's destination path.
+    pub fn open_destination_folder(&mut self, id: DownloadId, _cx: &mut Context<Self>) {
+        let Some(idx) = self.index_of(id) else {
+            return;
+        };
+
+        let destination = PathBuf::from(self.destinations[idx].as_ref());
+        let target = if destination.is_dir() {
+            destination
+        } else {
+            destination
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(destination)
+        };
+
+        if let Err(error) = open_in_file_manager(&target) {
+            tracing::warn!(
+                path = %target.display(),
+                "failed to open transfer destination in file manager: {error}"
+            );
+        }
+    }
+
     /// Samples app-session metrics once per second (every 10 × 100 ms polls).
     fn tick_metrics(&mut self) {
         self.poll_ticks = self.poll_ticks.wrapping_add(1);
@@ -779,6 +804,23 @@ fn notification_filename(destination: &Path) -> SharedString {
         .unwrap_or("unknown")
         .to_string()
         .into()
+}
+
+fn open_in_file_manager(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).spawn().map(|_| ())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer").arg(path).spawn().map(|_| ())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(path).spawn().map(|_| ())
+    }
 }
 
 fn show_popup_notification(
