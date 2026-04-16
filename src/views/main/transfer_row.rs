@@ -85,6 +85,7 @@ pub struct TransferRow {
     pub state: TransferDisplayState,
     pub selected: bool,
     pub on_select: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+    pub on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
     pub on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
     pub on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
@@ -125,8 +126,14 @@ impl RenderOnce for TransferRow {
                 .into_any_element(),
             )
             .child(
-                TransferRowActions::new(self.id, self.state, self.on_pause_resume, self.on_remove)
-                    .into_any_element(),
+                TransferRowActions::new(
+                    self.id,
+                    self.state,
+                    self.on_open_destination,
+                    self.on_pause_resume,
+                    self.on_remove,
+                )
+                .into_any_element(),
             );
 
         if let Some(on_select) = self.on_select {
@@ -226,6 +233,7 @@ impl RenderOnce for TransferRowDetails {
 struct TransferRowActions {
     id: DownloadId,
     state: TransferDisplayState,
+    on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
     on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
@@ -234,12 +242,14 @@ impl TransferRowActions {
     fn new(
         id: DownloadId,
         state: TransferDisplayState,
+        on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
         on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
         on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
     ) -> Self {
         Self {
             id,
             state,
+            on_open_destination,
             on_pause_resume,
             on_remove,
         }
@@ -248,6 +258,12 @@ impl TransferRowActions {
 
 impl RenderOnce for TransferRowActions {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let open_button = row_action_button(
+            ElementId::NamedInteger("transfer-row-action-open".into(), self.id.0),
+            Some("transfer-row-open-action"),
+            IconName::Folder,
+            self.on_open_destination,
+        );
         let pause_button = self.on_pause_resume.zip(self.state.action_icon()).map(
             |(on_pause_resume, icon_name)| {
                 row_action_button(
@@ -271,6 +287,7 @@ impl RenderOnce for TransferRowActions {
             .items_center()
             .gap(px(Spacing::LIST_GAP))
             .flex_shrink_0()
+            .child(open_button)
             .children(pause_button)
             .children(remove_button)
     }
@@ -460,6 +477,7 @@ mod tests {
     struct TransferRowHost {
         selected: bool,
         selection_events: usize,
+        open_action_events: usize,
         primary_action_events: usize,
     }
 
@@ -468,6 +486,7 @@ mod tests {
             Self {
                 selected: false,
                 selection_events: 0,
+                open_action_events: 0,
                 primary_action_events: 0,
             }
         }
@@ -499,6 +518,15 @@ mod tests {
                             });
                         }
                     })),
+                    on_open_destination: Box::new({
+                        let entity = entity.clone();
+                        move |_window, app| {
+                            entity.update(app, |this, cx| {
+                                this.open_action_events += 1;
+                                cx.notify();
+                            });
+                        }
+                    }),
                     on_pause_resume: Some(Box::new({
                         let entity = entity.clone();
                         move |_window, app| {
@@ -544,7 +572,31 @@ mod tests {
             view.update(app, |host: &mut TransferRowHost, _cx| {
                 assert!(!host.selected);
                 assert_eq!(host.selection_events, 0);
+                assert_eq!(host.open_action_events, 0);
                 assert_eq!(host.primary_action_events, 1);
+            });
+        });
+    }
+
+    #[test]
+    fn clicking_the_open_action_does_not_select_the_row() {
+        let mut app = TestAppContext::single();
+        let window = app.open_window(size(px(800.0), px(240.0)), TransferRowHost::new);
+        let view = window.root(&mut app).unwrap();
+        let cx = VisualTestContext::from_window(*window.deref(), &app).into_mut();
+
+        cx.run_until_parked();
+        let button_bounds = cx
+            .debug_bounds("transfer-row-open-action")
+            .expect("open action button should render debug bounds");
+        cx.simulate_click(button_bounds.center(), Modifiers::none());
+
+        cx.update(|_window, app| {
+            view.update(app, |host: &mut TransferRowHost, _cx| {
+                assert!(!host.selected);
+                assert_eq!(host.selection_events, 0);
+                assert_eq!(host.open_action_events, 1);
+                assert_eq!(host.primary_action_events, 0);
             });
         });
     }

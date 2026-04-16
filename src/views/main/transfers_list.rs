@@ -152,6 +152,15 @@ impl TransferList {
                     None
                 };
 
+                let on_open_destination: Rc<dyn Fn(&mut Window, &mut App) + 'static> = {
+                    let downloads = downloads.clone();
+                    Rc::new(move |_window: &mut Window, app: &mut App| {
+                        downloads.update(app, |downloads, cx| {
+                            downloads.open_destination_folder(id, cx);
+                        });
+                    })
+                };
+
                 TransferRowModel {
                     id,
                     filename: row.filename,
@@ -162,6 +171,7 @@ impl TransferList {
                     progress: row.progress,
                     state: row.display_state,
                     selected,
+                    on_open_destination,
                     on_pause_resume,
                     on_remove,
                 }
@@ -281,6 +291,13 @@ impl Render for TransferList {
                                             });
                                         },
                                     )),
+                                    on_open_destination: {
+                                        let handler = Rc::clone(&model.on_open_destination);
+                                        Box::new(move |window: &mut Window, cx: &mut App| {
+                                            handler(window, cx);
+                                        })
+                                            as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                    },
                                     on_pause_resume: model.on_pause_resume.as_ref().map({
                                         |handler| {
                                             let handler = Rc::clone(handler);
@@ -330,6 +347,7 @@ struct TransferRowModel {
     progress: f32,
     state: crate::app::TransferDisplayState,
     selected: bool,
+    on_open_destination: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
     on_pause_resume: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_remove: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
