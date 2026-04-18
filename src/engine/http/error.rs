@@ -17,7 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Chunk-level error classification.
+//! Chunk-level error classification
 //!
 //! `ChunkError` drives the retry logic in the slot runner: Retryable errors get
 //! exponential backoff, NonRetryable stops the slot, Fatal stops the whole download,
@@ -31,9 +31,9 @@ pub enum ChunkError {
     /// Transient failure -> retry with backoff. `retry_after` is populated from
     /// the Retry-After header on 429.
     Retryable { retry_after: Option<Duration> },
-    /// Server refused definitively (403, 404, 410). Retrying won't help.
+    /// Server refused definitively (403, 404, 410) so retrying won't help.
     NonRetryable,
-    /// Local failure (disk full, permission denied). Stops the entire download.
+    /// Local failure (disk full, permission denied) will stop the entire download.
     Fatal(String),
     /// Soft pause requested via CancellationToken -> exit cleanly, save state.
     Paused,

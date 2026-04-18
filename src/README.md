@@ -1,46 +1,17 @@
 # `src/` layout
 
-Ophelia keeps the frontend and backend split into a few clear layers:
-
 - `ui/`: reusable UI building blocks that are not tied to a specific product screen
 - `views/`: app-specific compositions such as windows, panels, lists, and overlays
 - `theme.rs`: shared design tokens and visual constants
 - `app.rs`: app-layer bridge between GPUI and the backend engine
 - `app_menu.rs` / `app_actions.rs` / `tray.rs`: app-level actions, shortcuts, tray integration, and shell wiring
 - `platform/`: shared OS integration such as window chrome and app path policy
-- `engine/`: download engine, persistence, and provider-specific backend logic
+- `engine/`: download engine, persistence, provider-specific backend logic
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
     - also stores destination-policy settings such as collision strategy and extension-based routing rules
     - also stores HTTP download-ordering settings such as `Balanced`, `FileSpecific`, `Sequential`, and the file-specific extension list
     - persists through the shared platform path policy
-
-## Frontend terms
-
-These names are intentional:
-
-- `primitive`: low-level reusable building block
-- `control`: interactive widget with behavior/state
-- `chrome`: reusable window/menu/modal shell UI
-- `view`: app-specific composition of controls and chrome
-- `helper`: non-visual utility function or tiny render helper
-
-## Backend terms
-
-These names are intentional too:
-
-- `app bridge`: the app-facing state/entity layer that connects GPUI to backend services
-- `engine`: provider-neutral runtime control, shared types, scheduling, and orchestration
-- `provider`: protocol/tool-specific download implementation such as HTTP
-- `state`: persistence and history access
-- `ingress`: transport for getting external requests into the app, such as local IPC
-- `artifact state`: whether a transfer's bytes are still present on disk, tracked separately from transfer outcome/history
-- `live transfer metadata`: provider kind, source label, and control support cached next to live rows so workflow-shaped views can mirror backend semantics cheaply
-- `runtime control support`: active transfers can narrow their available controls once runtime facts are known, such as HTTP falling back to single-stream mode
-- `live transfer removal action`: whether a live row left the active surface because the transfer was cancelled or because the artifact was deleted
-- `destination policy`: backend-owned resolution of destination folders, collision behavior, and final-file commit semantics
-- `chunk map state`: HTTP-specific, active-transfer-only visualization state for the Transfers view that stays out of persistence and does not expose raw executor slot arrays
-- `HTTP ordering mode`: backend-owned scheduling choice for range-supported HTTP downloads: throughput-first, always sequential, or sequential only for matching extensions
 
 ## Directory map
 
@@ -48,7 +19,7 @@ These names are intentional too:
 
 - `primitives/`
     - `icon.rs`: icon rendering helpers and icon names
-    - `logo.rs`: Ophelia logo element
+    - `logo.rs`: Ophelia logo made in GPUI
     - `resizable/`: local resizable panel primitive modeled after `gpui-component`
 - `controls/`
     - `dropdown_select.rs`: reusable anchored dropdown/select control
@@ -105,27 +76,3 @@ These names are intentional too:
     - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
     - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
     - `http/`: HTTP-specific executor pipeline, including live chunk-map snapshot reporting and ordering-mode-aware scheduling for active chunked transfers
-
-## Placement rules
-
-When adding a new file:
-
-- Put it in `ui/` if it should be reusable outside one screen or window.
-- Put it in `views/` if it exists to assemble app-specific state and layout.
-- Prefer extending an existing subfolder before creating a new top-level category.
-- If a view grows, split presentational pieces first before introducing more folders.
-
-For backend code:
-
-- Put provider-neutral orchestration and shared engine types in `engine/`.
-- Put shared destination/path policy in `engine/destination.rs`, not in `app.rs`, IPC handlers, or provider-specific task files.
-- Put protocol/tool-specific download logic in a dedicated provider submodule such as `engine/http/`.
-- Put persistence and history access in `engine/state/`, not in provider modules.
-- Put transport-specific ingress in modules like `ipc.rs`, not inside provider implementations or the engine actor.
-- Keep `app.rs` focused on bridging GPUI state to backend services rather than accumulating provider-specific logic.
-
-For deeper backend notes:
-
-- See `docs/architecture.md` for the backend architecture, runtime ownership model, Rust/DOP design choices, performance tradeoffs, and current hotspots.
-- See `tests/` plus local `engine/destination.rs`, `engine/provider.rs`, `ipc.rs`, `engine/state/db.rs`, and `engine/state/mod.rs` tests for backend coverage of the current HTTP executor path, destination-policy behavior, provider glue, engine notifications, provider-kind persistence migration, history queries, IPC ingress normalization, and DB worker event flow.
-- Backend history now keeps transfer outcome and artifact presence separate, which is the basis for "delete file but keep history" behavior.

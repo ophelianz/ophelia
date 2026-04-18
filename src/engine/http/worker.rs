@@ -22,9 +22,9 @@
 //! `download_chunk` owns one HTTP range request from byte_start to chunk_end.
 //! It streams bytes into a write buffer and flushes with `write_at` (pwrite).
 //! Three signals are checked on every iteration via a biased select!:
-//!   1. pause_token  → flush buffer, return Paused (offsets saved = disk state)
-//!   2. kill_token   → flush buffer, return Killed (health monitor, retry fresh)
-//!   3. stream.next() inside a stall timeout → normal data or error
+//!   1. pause_token  -> flush buffer, return Paused (offsets saved = disk state)
+//!   2. kill_token   -> flush buffer, return Killed (health monitor, retry fresh)
+//!   3. stream.next() inside a stall timeout -> normal data or error
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

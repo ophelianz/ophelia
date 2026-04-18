@@ -138,8 +138,8 @@ impl Db {
         Ok(n)
     }
 
-    /// Remove DB rows whose .ophelia_part file no longer exists on disk.
-    /// Happens when the user manually deleted a partial download.
+    /// Remove DB rows whose .ophelia_part file no longer exists on disk;
+    /// happens when the user manually deleted a partial download
     pub fn validate_integrity(&self) -> rusqlite::Result<()> {
         let mut stmt = self.conn.prepare(
             "SELECT id, destination FROM downloads

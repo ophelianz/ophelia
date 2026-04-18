@@ -20,9 +20,9 @@
 //! Server capability probe.
 //!
 //! A single GET with `Range: bytes=0-0` tells us three things:
-//!   - 206 Partial Content → server supports range requests (parallel chunks OK)
-//!   - Content-Range header → total file size
-//!   - Content-Disposition header → server-suggested filename (used instead of the URL path)
+//!   - 206 Partial Content -> server supports range requests (parallel chunks OK)
+//!   - Content-Range header -> total file size
+//!   - Content-Disposition header -> server-suggested filename (used instead of the URL path)
 
 use reqwest::StatusCode;
 
