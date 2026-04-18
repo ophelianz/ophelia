@@ -19,7 +19,7 @@
 
 - `primitives/`
     - `icon.rs`: icon rendering helpers and icon names
-    - `logo.rs`: Ophelia logo element
+    - `logo.rs`: Ophelia logo made in GPUI
     - `resizable/`: local resizable panel primitive modeled after `gpui-component`
 - `controls/`
     - `dropdown_select.rs`: reusable anchored dropdown/select control
