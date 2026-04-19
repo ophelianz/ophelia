@@ -891,10 +891,10 @@ fn delete_artifact_files(destination: &Path) -> ArtifactState {
     for path in artifact_paths(destination) {
         match std::fs::remove_file(&path) {
             Ok(()) => removed_any = true,
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(path = %path.display(), "failed to delete artifact: {error}")
-            }
+            Err(error) => match error.kind() {
+                ErrorKind::NotFound => {}
+                _ => tracing::warn!(path = %path.display(), "failed to delete artifact: {error}"),
+            },
         }
     }
 
