@@ -347,7 +347,7 @@ fn unique_destination(base: PathBuf) -> PathBuf {
 fn replace_existing_file(part_path: &Path, destination: &Path) -> io::Result<()> {
     match std::fs::rename(part_path, destination) {
         Ok(()) => Ok(()),
-        Err(error) if destination.exists() => {
+        Err(_) if destination.exists() => {
             let backup_path = unique_backup_path(destination);
             std::fs::rename(destination, &backup_path)?;
             match std::fs::rename(part_path, destination) {
