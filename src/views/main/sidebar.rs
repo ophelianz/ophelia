@@ -423,7 +423,7 @@ impl RenderOnce for StorageCard {
                     .items_center()
                     .gap(px(6.0))
                     .text_sm()
-                    .font_weight(gpui::FontWeight::LIGHT)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(Colors::finished())
                     .child(icon_sm(IconName::Database, Colors::finished()))
                     .child(t!("sidebar.storage").to_string()),
@@ -435,7 +435,7 @@ impl RenderOnce for StorageCard {
                     .child(
                         div()
                             .text_base()
-                            .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                            .font_weight(gpui::FontWeight::BOLD)
                             .text_color(Colors::foreground())
                             .child(self.model.used),
                     )
