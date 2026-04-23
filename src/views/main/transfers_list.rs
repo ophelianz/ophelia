@@ -234,7 +234,7 @@ impl Render for TransferList {
                 div()
                     .text_sm()
                     .text_color(Colors::muted_foreground())
-                    .font_weight(gpui::FontWeight::EXTRA_BOLD)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .mb(px(Spacing::SECTION_LABEL_BOTTOM_MARGIN))
                     .child(t!("transfers.section_label").to_string()),
             )

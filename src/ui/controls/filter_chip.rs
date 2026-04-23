@@ -61,7 +61,7 @@ impl RenderOnce for FilterChip {
             .py(px(6.0))
             .rounded(px(Chrome::CONTROL_RADIUS))
             .text_sm()
-            .font_weight(gpui::FontWeight::LIGHT)
+            .font_weight(gpui::FontWeight::MEDIUM)
             .cursor_pointer()
             .bg(if self.active {
                 Colors::muted().into()

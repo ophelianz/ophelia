@@ -419,6 +419,19 @@ jobs:
           path: website
           persist-credentials: false
 
+      - name: Validate website repo push access
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd website
+          git remote set-url origin "https://x-access-token:${WEBSITE_DEPLOY_TOKEN}@github.com/${WEBSITE_REPO}.git"
+          if ! git push --dry-run origin HEAD:"${WEBSITE_BRANCH}" >/tmp/ophelia-website-push-check.log 2>&1; then
+            echo "::error::WEBSITE_DEPLOY_TOKEN can read ${WEBSITE_REPO} but cannot push to ${WEBSITE_BRANCH}."
+            echo "::error::Confirm the token has Contents: Read and write for ${WEBSITE_REPO}, is authorized for the ophelianz org if SSO applies, and that ${WEBSITE_BRANCH} is not blocked for this token."
+            cat /tmp/ophelia-website-push-check.log
+            exit 1
+          fi
+
       - name: Publish stable manifests to website repo
         shell: bash
         run: |
