@@ -24,7 +24,7 @@ use rust_i18n::t;
 
 use crate::app_actions;
 
-const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/icons/logo.svg");
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/logo.svg");
 const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRAY_REFRESH_INTERVAL_TICKS: u8 = 10;
 

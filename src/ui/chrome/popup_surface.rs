@@ -20,7 +20,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Corner, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Anchor, AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
     Point, RenderOnce, Styled, Window, anchored, deferred, div, point, px,
 };
 
@@ -129,7 +129,7 @@ impl RenderOnce for PopupSurface {
         };
 
         anchored()
-            .anchor(Corner::TopLeft)
+            .anchor(Anchor::TopLeft)
             .offset(self.offset)
             .child(deferred(panel.children(self.children)))
     }
