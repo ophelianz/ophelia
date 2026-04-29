@@ -308,6 +308,60 @@ async fn no_range_http_emits_unsupported_chunk_map_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn no_range_http_emits_narrowed_runtime_control_support() {
+    let data = test_data(2_000);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file.bin"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(data))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/file.bin", server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("file.bin");
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
+    download_task(
+        DownloadId(0),
+        url,
+        dest,
+        exact_destination_policy(&dir.path().join("file.bin")),
+        HttpDownloadConfig::default(),
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+        runtime_tx,
+    )
+    .await;
+
+    match wait_for_runtime_update(&mut runtime_rx, |update| {
+        matches!(update, TaskRuntimeUpdate::ControlSupportChanged { .. })
+    })
+    .await
+    {
+        TaskRuntimeUpdate::ControlSupportChanged { support, .. } => {
+            assert_eq!(
+                support,
+                TransferControlSupport {
+                    can_pause: false,
+                    can_resume: false,
+                    can_cancel: true,
+                    can_restore: false,
+                }
+            );
+        }
+        other => panic!("expected control-support update, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fallback_when_no_content_length() {
     let data = test_data(3_000);
     let expected_hash = sha256(&data);

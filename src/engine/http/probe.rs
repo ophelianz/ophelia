@@ -26,6 +26,8 @@
 
 use reqwest::StatusCode;
 
+use crate::engine::destination::normalize_filename_component;
+
 pub struct ProbeResult {
     pub content_length: Option<u64>,
     pub accepts_ranges: bool,
@@ -74,19 +76,9 @@ fn parse_content_disposition_filename(header: &str) -> Option<String> {
         if let Some(val) = part.strip_prefix("filename=") {
             let name = val.trim().trim_matches('"');
             if !name.is_empty() {
-                return Some(sanitize_filename(name));
+                return normalize_filename_component(name);
             }
         }
     }
     None
-}
-
-fn sanitize_filename(name: &str) -> String {
-    // Drop path separators and null bytes to prevent directory traversal.
-    // Take only the last component in case the server sends a full path.
-    let base = name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(name);
-    base.chars().filter(|&c| c != '\0').collect()
 }

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
+use crate::engine::destination::part_path_for;
 use crate::engine::state::http;
 use crate::engine::types::{
     ArtifactState, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
@@ -151,10 +152,7 @@ impl Db {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?
             .filter_map(|r| r.ok())
-            .filter(|(_, dest)| {
-                let part = format!("{}.ophelia_part", dest);
-                !std::path::Path::new(&part).exists()
-            })
+            .filter(|(_, dest)| !part_path_for(std::path::Path::new(dest)).exists())
             .map(|(id, _)| id)
             .collect();
 

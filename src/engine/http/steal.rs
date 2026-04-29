@@ -22,7 +22,8 @@
 //! `try_steal` splits the largest active chunk when a worker goes idle.
 //! `try_hedge` races a duplicate connection on the same remaining range when
 //! nothing is large enough to split. Write-at is idempotent so both workers
-//! writing the same bytes is safe; the first to finish snaps the original.
+//! writing the same bytes is safe; the caller can let a successful hedge stand
+//! in for the original worker.
 //!
 //! When the pending queue empties and a worker finishes, `try_steal` finds the
 //! active slot with the most remaining bytes and atomically splits it. The back
@@ -108,9 +109,9 @@ pub fn try_steal(
 /// Called when `try_steal` found nothing large enough to split.
 /// Typically at the tail of a download when a fast connection goes idle but the last chunk
 /// is too small to bisect cleanly. The hedge writes the same bytes via write_at
-/// (idempotent). The caller snaps the original's counter when the hedge finishes
-/// and kills it; the original then exits immediately on its next attempt because
-/// `byte_start >= chunk_end`.
+/// (idempotent). The caller snaps the original's counter only when the hedge
+/// succeeds and then kills it; the original exits immediately on its next
+/// attempt because `byte_start >= chunk_end`.
 ///
 /// Returns `Some((hedge_slot, original_slot))` on success, `None` if no slot
 /// has enough remaining bytes or the slot budget is exhausted.
