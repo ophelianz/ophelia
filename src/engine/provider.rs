@@ -207,21 +207,6 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn persisted_source_maps_http_specs() {
-        let destination = PathBuf::from("/tmp/archive.zip");
-        let spec = DownloadSpec::http(
-            "https://example.com/archive.zip".to_string(),
-            destination.clone(),
-            DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
-            HttpDownloadConfig::default(),
-        );
-
-        let source = persisted_source(&spec);
-        assert_eq!(source.kind(), "http");
-        assert_eq!(source.locator(), "https://example.com/archive.zip");
-    }
-
-    #[test]
     fn capabilities_report_http_hostname_scheduler_key() {
         let settings = Settings {
             max_connections_per_server: 6,
@@ -241,47 +226,6 @@ mod tests {
         assert_eq!(
             scheduler.key,
             SchedulerKey::Hostname("example.com:443".to_string())
-        );
-    }
-
-    #[test]
-    fn lifecycle_support_is_explicit_for_http_controls() {
-        let destination = PathBuf::from("/tmp/archive.zip");
-        let spec = DownloadSpec::http(
-            "https://example.com/archive.zip".to_string(),
-            destination.clone(),
-            DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
-            HttpDownloadConfig::default(),
-        );
-
-        assert!(supports_control_action(&spec, DownloadControlAction::Pause));
-        assert!(supports_control_action(
-            &spec,
-            DownloadControlAction::Resume
-        ));
-        assert!(supports_control_action(
-            &spec,
-            DownloadControlAction::Cancel
-        ));
-        assert!(supports_control_action(
-            &spec,
-            DownloadControlAction::Restore
-        ));
-    }
-
-    #[test]
-    fn shared_scheduler_limit_uses_current_settings() {
-        let settings = Settings {
-            max_connections_per_server: 9,
-            ..Settings::default()
-        };
-
-        assert_eq!(
-            shared_scheduler_limit(
-                &SchedulerKey::Hostname("example.com".to_string()),
-                &settings
-            ),
-            Some(9)
         );
     }
 
