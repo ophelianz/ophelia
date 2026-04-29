@@ -17,8 +17,14 @@ If you add user-visible strings, make sure you wire them thru `rust-i18n`.
 
 ## Make sure you to run
 
-- `cargo fmt`
-- `cargo check`
-- `cargo test`
+- `scripts/checkout_gpui_oe.sh`
+- `cargo fmt -p ophelia -- --check`
+- `cargo check --locked`
+- `cargo test --locked`
+
+If `cargo check --locked` says `Cargo.lock` needs to change after a GPUI fork update, regenerate it
+with the latest `../gpui-oe` checkout in place:
+
+- `cargo update -p gpui-ce`
 
 hey psst, use the kitty script.

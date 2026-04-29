@@ -17,12 +17,11 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Byte-range chunking in struct-of-arrays (SoA) layout.
+//! Byte-range chunking
 //!
-//! `ChunkList` stores chunk boundaries and state as parallel vecs rather than
-//! a vec of structs - cache-friendly for scanning operations across all chunks.
-//! The `split` function and this layout are protocol-agnostic: any resumable
-//! download protocol that supports byte ranges can use them.
+//! `ChunkList` stores byte-interval boundaries and progress as parallel vecs;
+//! It should fit providers that can fetch byte ranges
+//! (HTTP Range, FTP REST, SFTP offset reads)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]

@@ -251,17 +251,31 @@ async fn resolve_chunks(
             {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    tracing::warn!("part file already exists, another download may be active");
+                    tracing::warn!(
+                        path = %part_path.display(),
+                        "part file already exists, another download may be active"
+                    );
                     send(DownloadStatus::Error, 0, Some(total_bytes));
                     return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
-                Err(_) => {
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        path = %part_path.display(),
+                        "failed to create part file"
+                    );
                     send(DownloadStatus::Error, 0, Some(total_bytes));
                     return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
             };
 
-            if preallocate(&file, total_bytes).is_err() {
+            if let Err(error) = preallocate(&file, total_bytes) {
+                tracing::error!(
+                    ?error,
+                    path = %part_path.display(),
+                    total_bytes,
+                    "failed to preallocate part file"
+                );
                 send(DownloadStatus::Error, 0, Some(total_bytes));
                 return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
             }
