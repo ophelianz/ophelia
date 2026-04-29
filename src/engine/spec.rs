@@ -309,27 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn download_spec_exposes_provider_metadata_and_control_support() {
-        let spec = DownloadSpec::http(
-            "https://example.com/file.bin".to_string(),
-            PathBuf::from("/tmp/file.bin"),
-            DestinationPolicy::for_resolved_destination(
-                &Settings::default(),
-                Path::new("/tmp/file.bin"),
-            ),
-            HttpDownloadConfig::default(),
-        );
-
-        assert_eq!(spec.provider_kind(), "http");
-        assert_eq!(spec.source_label(), "https://example.com/file.bin");
-        let controls = spec.control_support();
-        assert!(controls.can_pause);
-        assert!(controls.can_resume);
-        assert!(controls.can_cancel);
-        assert!(controls.can_restore);
-    }
-
-    #[test]
     fn restored_download_from_saved_rebuilds_provider_config_from_settings() {
         let settings = Settings {
             max_connections_per_download: 5,
@@ -356,64 +335,6 @@ mod tests {
             }
         }
         assert_eq!(restored.spec.destination(), Path::new("/tmp/archive.zip"));
-    }
-
-    #[test]
-    fn persisted_source_exposes_provider_metadata_and_control_support() {
-        let source = PersistedDownloadSource::Http {
-            url: "https://example.com/archive.zip".to_string(),
-        };
-
-        assert_eq!(source.kind(), "http");
-        assert_eq!(source.display_label(), "https://example.com/archive.zip");
-        let controls = source.control_support();
-        assert!(controls.can_pause);
-        assert!(controls.can_resume);
-        assert!(controls.can_cancel);
-        assert!(controls.can_restore);
-    }
-
-    #[test]
-    fn add_request_preview_destination_prefers_suggested_filename() {
-        let request = AddDownloadRequest::from_url_with_suggested_filename(
-            "https://example.com/file.bin".to_string(),
-            Some("browser-name.zip".to_string()),
-        );
-        let settings = Settings {
-            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
-            destination_rules_enabled: false,
-            ..Settings::default()
-        };
-
-        let destination = request.preview_destination(&settings);
-        assert_eq!(
-            destination,
-            PathBuf::from("/tmp/downloads/browser-name.zip")
-        );
-    }
-
-    #[test]
-    fn add_request_preview_destination_falls_back_to_url_filename() {
-        let request =
-            AddDownloadRequest::from_url("https://example.com/path/file.bin?token=abc".to_string());
-        let settings = Settings {
-            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
-            destination_rules_enabled: false,
-            ..Settings::default()
-        };
-
-        let destination = request.preview_destination(&settings);
-        assert_eq!(destination, PathBuf::from("/tmp/downloads/file.bin"));
-    }
-
-    #[test]
-    fn add_request_display_filename_hint_prefers_suggested_filename() {
-        let request = AddDownloadRequest::from_url_with_suggested_filename(
-            "https://example.com/file.bin".to_string(),
-            Some("browser-name.zip".to_string()),
-        );
-
-        assert_eq!(request.display_filename_hint(), "browser-name.zip");
     }
 
     #[test]

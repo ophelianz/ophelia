@@ -135,49 +135,41 @@ mod tests {
     use crate::engine::destination::{DestinationOverrides, DestinationPolicy};
 
     #[test]
-    fn balanced_mode_always_resolves_to_balanced() {
-        let config = HttpDownloadConfig {
-            ordering_mode: HttpDownloadOrderingMode::Balanced,
-            sequential_extensions: vec![".mkv".into()],
-            ..HttpDownloadConfig::default()
-        };
+    fn ordering_modes_resolve_expected_transfer_order() {
+        let cases = [
+            (
+                HttpDownloadOrderingMode::Balanced,
+                "/tmp/movie.mkv",
+                ResolvedHttpDownloadOrdering::Balanced,
+            ),
+            (
+                HttpDownloadOrderingMode::Sequential,
+                "/tmp/readme.txt",
+                ResolvedHttpDownloadOrdering::Sequential,
+            ),
+            (
+                HttpDownloadOrderingMode::FileSpecific,
+                "/tmp/movie.MKV",
+                ResolvedHttpDownloadOrdering::Sequential,
+            ),
+            (
+                HttpDownloadOrderingMode::FileSpecific,
+                "/tmp/readme.txt",
+                ResolvedHttpDownloadOrdering::Balanced,
+            ),
+        ];
 
-        assert_eq!(
-            config.resolved_ordering_for_destination(Path::new("/tmp/movie.mkv")),
-            ResolvedHttpDownloadOrdering::Balanced
-        );
-    }
-
-    #[test]
-    fn sequential_mode_always_resolves_to_sequential() {
-        let config = HttpDownloadConfig {
-            ordering_mode: HttpDownloadOrderingMode::Sequential,
-            sequential_extensions: vec![],
-            ..HttpDownloadConfig::default()
-        };
-
-        assert_eq!(
-            config.resolved_ordering_for_destination(Path::new("/tmp/file.bin")),
-            ResolvedHttpDownloadOrdering::Sequential
-        );
-    }
-
-    #[test]
-    fn file_specific_mode_matches_extensions_case_insensitively() {
-        let config = HttpDownloadConfig {
-            ordering_mode: HttpDownloadOrderingMode::FileSpecific,
-            sequential_extensions: vec!["MKV".into()],
-            ..HttpDownloadConfig::default()
-        };
-
-        assert_eq!(
-            config.resolved_ordering_for_destination(Path::new("/tmp/movie.mkv")),
-            ResolvedHttpDownloadOrdering::Sequential
-        );
-        assert_eq!(
-            config.resolved_ordering_for_destination(Path::new("/tmp/readme.txt")),
-            ResolvedHttpDownloadOrdering::Balanced
-        );
+        for (ordering_mode, path, expected) in cases {
+            let config = HttpDownloadConfig {
+                ordering_mode,
+                sequential_extensions: vec!["mkv".into()],
+                ..HttpDownloadConfig::default()
+            };
+            assert_eq!(
+                config.resolved_ordering_for_destination(Path::new(path)),
+                expected
+            );
+        }
     }
 
     #[test]

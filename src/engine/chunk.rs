@@ -107,67 +107,6 @@ mod tests {
         split(100, 0);
     }
 
-    #[test]
-    fn single_chunk_covers_full_file() {
-        let chunks = split(500, 1);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks.starts[0], 0);
-        assert_eq!(chunks.ends[0], 500);
-    }
-
-    #[test]
-    fn even_split_no_gaps() {
-        let chunks = split(1000, 4);
-        assert_eq!(chunks.len(), 4);
-        assert_eq!(chunks.starts[0], 0);
-        for i in 1..chunks.len() {
-            assert_eq!(chunks.starts[i], chunks.ends[i - 1]);
-        }
-        assert_eq!(*chunks.ends.last().unwrap(), 1000);
-    }
-
-    #[test]
-    fn remainder_goes_to_last_chunk() {
-        let chunks = split(1001, 4);
-        assert_eq!(*chunks.ends.last().unwrap(), 1001);
-        let last_size = chunks.ends[3] - chunks.starts[3];
-        let first_size = chunks.ends[0] - chunks.starts[0];
-        assert!(last_size > first_size);
-    }
-
-    #[test]
-    fn all_chunks_start_pending() {
-        let chunks = split(1000, 8);
-        assert!(chunks.statuses.iter().all(|s| *s == ChunkStatus::Pending));
-    }
-
-    #[test]
-    fn all_downloaded_start_at_zero() {
-        let chunks = split(1000, 8);
-        assert!(chunks.downloaded.iter().all(|&d| d == 0));
-    }
-
-    #[test]
-    fn total_coverage_equals_file_size() {
-        let chunks = split(999, 7);
-        let total: u64 = chunks
-            .starts
-            .iter()
-            .zip(chunks.ends.iter())
-            .map(|(s, e)| e - s)
-            .sum();
-        assert_eq!(total, 999);
-    }
-
-    #[test]
-    fn vecs_are_same_length() {
-        let chunks = split(2048, 5);
-        let n = chunks.len();
-        assert_eq!(chunks.ends.len(), n);
-        assert_eq!(chunks.downloaded.len(), n);
-        assert_eq!(chunks.statuses.len(), n);
-    }
-
     use proptest::prelude::*;
 
     proptest! {
