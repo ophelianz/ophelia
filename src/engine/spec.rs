@@ -26,7 +26,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::engine::destination::{
-    DestinationOverrides, DestinationPolicy, fallback_filename_from_url, preview_auto_destination,
+    DestinationOverrides, DestinationPolicy, fallback_filename_from_url,
+    normalize_filename_component, preview_auto_destination,
 };
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
@@ -123,8 +124,6 @@ impl DownloadSpec {
         suggested_filename: Option<String>,
         settings: &Settings,
     ) -> io::Result<Self> {
-        // Future protocols can branch here on scheme or a richer add request.
-        let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
         let destination_policy = DestinationPolicy::automatic(settings);
         let destination = destination_policy
             .resolve_checked(&url, suggested_filename.as_deref())?
@@ -142,7 +141,6 @@ impl DownloadSpec {
         typed_destination: PathBuf,
         settings: &Settings,
     ) -> io::Result<Self> {
-        let _scheme = url.split_once(':').map(|(scheme, _)| scheme);
         let auto_preview = preview_auto_destination(&url, None, settings);
         let overrides =
             DestinationOverrides::from_user_destination(&typed_destination, &auto_preview)?;
@@ -273,12 +271,7 @@ impl RestoredDownload {
 }
 
 fn normalize_suggested_filename(filename: String) -> Option<String> {
-    let trimmed = filename.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    normalize_filename_component(&filename)
 }
 
 #[cfg(test)]
@@ -421,6 +414,39 @@ mod tests {
         );
 
         assert_eq!(request.display_filename_hint(), "browser-name.zip");
+    }
+
+    #[test]
+    fn add_request_sanitizes_suggested_filename_components() {
+        let request = AddDownloadRequest::from_url_with_suggested_filename(
+            "https://example.com/file.bin".to_string(),
+            Some("../nested/browser-name.zip\0".to_string()),
+        );
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            destination_rules_enabled: false,
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            request.suggested_filename.as_deref(),
+            Some("browser-name.zip")
+        );
+        assert_eq!(
+            request.preview_destination(&settings),
+            PathBuf::from("/tmp/downloads/browser-name.zip")
+        );
+    }
+
+    #[test]
+    fn add_request_drops_suggested_parent_directory_filename() {
+        let request = AddDownloadRequest::from_url_with_suggested_filename(
+            "https://example.com/file.bin".to_string(),
+            Some("..".to_string()),
+        );
+
+        assert_eq!(request.suggested_filename, None);
+        assert_eq!(request.display_filename_hint(), "file.bin");
     }
 
     #[test]

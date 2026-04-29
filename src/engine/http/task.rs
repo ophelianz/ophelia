@@ -210,34 +210,39 @@ async fn resolve_chunks(
             }
             let ordering = config.resolved_ordering_for_destination(&destination);
 
-            let total_bytes = match probe_result.content_length {
-                Some(len) => len,
-                None => {
-                    tracing::info!("no content-length, falling back to single stream");
-                    let _ = runtime_update_tx.send(TaskRuntimeUpdate::ControlSupportChanged {
-                        id,
-                        support: single_stream_control_support(),
-                    });
-                    let _ = runtime_update_tx.send(TaskRuntimeUpdate::ChunkMapStateChanged {
-                        id,
-                        state: crate::engine::TransferChunkMapState::Unsupported,
-                    });
-                    return Err(single_download(
-                        id,
-                        Arc::clone(chunk_client),
-                        url.to_owned(),
-                        ResolvedDestination {
-                            part_path,
-                            destination,
-                            finalize_strategy,
-                        },
-                        config.stall_timeout_secs,
-                        progress_tx.clone(),
-                        throttle,
-                    )
-                    .await);
-                }
-            };
+            if !probe_result.accepts_ranges || probe_result.content_length.is_none() {
+                tracing::info!(
+                    accepts_ranges = probe_result.accepts_ranges,
+                    has_content_length = probe_result.content_length.is_some(),
+                    "falling back to single stream"
+                );
+                let _ = runtime_update_tx.send(TaskRuntimeUpdate::ControlSupportChanged {
+                    id,
+                    support: single_stream_control_support(),
+                });
+                let _ = runtime_update_tx.send(TaskRuntimeUpdate::ChunkMapStateChanged {
+                    id,
+                    state: crate::engine::TransferChunkMapState::Unsupported,
+                });
+                return Err(single_download(
+                    id,
+                    Arc::clone(chunk_client),
+                    url.to_owned(),
+                    ResolvedDestination {
+                        part_path,
+                        destination,
+                        finalize_strategy,
+                    },
+                    config.stall_timeout_secs,
+                    progress_tx.clone(),
+                    throttle,
+                )
+                .await);
+            }
+
+            let total_bytes = probe_result
+                .content_length
+                .expect("content length checked before chunked download");
 
             let file = match std::fs::OpenOptions::new()
                 .write(true)
@@ -261,22 +266,12 @@ async fn resolve_chunks(
                 return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
             }
 
-            let num_chunks = if probe_result.accepts_ranges {
-                let mb = total_bytes as f64 / (1024.0 * 1024.0);
-                let sqrt_conns = mb.sqrt().round() as usize;
-                sqrt_conns.clamp(config.min_connections, config.max_connections)
-            } else {
-                1
-            };
+            let mb = total_bytes as f64 / (1024.0 * 1024.0);
+            let sqrt_conns = mb.sqrt().round() as usize;
+            let num_chunks = sqrt_conns.clamp(config.min_connections, config.max_connections);
 
             tracing::info!(total_bytes, num_chunks, "starting chunked download");
             let chunks = chunk::split(total_bytes, num_chunks);
-            if !probe_result.accepts_ranges {
-                let _ = runtime_update_tx.send(TaskRuntimeUpdate::ChunkMapStateChanged {
-                    id,
-                    state: crate::engine::TransferChunkMapState::Unsupported,
-                });
-            }
             Ok(ResolvedChunks {
                 total_bytes,
                 chunks,
@@ -713,11 +708,10 @@ pub async fn download_task(
     // stealing only on completion would miss cases where one chunk is much larger
     // than the others mid-download (Surge's balancer goroutine pattern).
     //
-    // HedgeWork: when try_steal finds nothing to split, spawn a duplicate connection
-    // on the same remaining range. write_at is idempotent so both workers writing
-    // the same bytes is safe. The first to finish snaps the original's counter to
-    // the full chunk size, causing the original to exit on its next attempt when it
-    // sees byte_start >= chunk_end.
+    // HedgeWork: when try_steal finds nothing to split, spawn a duplicate
+    // connection on the same remaining range. A successful hedge snaps the
+    // original's counter to the full chunk size; failed hedges are ignored
+    // because the original worker is still authoritative for that range.
     let mut paused = false;
     let mut hedge_for: HashMap<usize, usize> = HashMap::new(); // hedge_slot → original_slot
     let mut balancer = tokio::time::interval_at(
@@ -748,13 +742,23 @@ pub async fn download_task(
             active_shared.lock().unwrap().remove(&finished_i);
 
             if let Some(&original) = hedge_for.get(&finished_i) {
-                // Hedge finished first: snap original's counter to the full chunk
-                // range so its next attempt sees byte_start >= chunk_end and exits.
-                let range = slots.ends[original]
-                    .load(Ordering::Relaxed)
-                    .saturating_sub(slots.starts[original].load(Ordering::Relaxed));
-                slots.downloaded[original].store(range, Ordering::Relaxed);
-                slots.kill_tokens[original].lock().unwrap().cancel();
+                match outcome {
+                    ChunkOutcome::Finished => {
+                        let range = slots.ends[original]
+                            .load(Ordering::Relaxed)
+                            .saturating_sub(slots.starts[original].load(Ordering::Relaxed));
+                        slots.downloaded[original].store(range, Ordering::Relaxed);
+                        slots.kill_tokens[original].lock().unwrap().cancel();
+                    }
+                    ChunkOutcome::Paused => paused = true,
+                    ChunkOutcome::Failed => {
+                        tracing::debug!(
+                            hedge = finished_i,
+                            original,
+                            "hedge failed; keeping original worker active"
+                        );
+                    }
+                }
                 hedge_for.remove(&finished_i);
             } else {
                 // Original finished: cancel its hedge if one is running.

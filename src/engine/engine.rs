@@ -43,6 +43,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::engine::destination::part_path_for;
 use crate::engine::http::TokenBucket;
 use crate::engine::provider::{
     self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskDone,
@@ -872,10 +873,7 @@ fn snapshot_totals(resume_data: Option<&ProviderResumeData>) -> (u64, Option<u64
 }
 
 fn artifact_paths(destination: &Path) -> [PathBuf; 2] {
-    [
-        destination.to_path_buf(),
-        PathBuf::from(format!("{}.ophelia_part", destination.display())),
-    ]
+    [destination.to_path_buf(), part_path_for(destination)]
 }
 
 fn current_artifact_state(destination: &Path) -> ArtifactState {

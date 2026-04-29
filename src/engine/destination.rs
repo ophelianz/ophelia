@@ -133,8 +133,8 @@ impl DestinationPolicy {
             .overrides
             .explicit_filename
             .as_deref()
-            .and_then(normalize_filename)
-            .or_else(|| preferred_filename.and_then(normalize_filename))
+            .and_then(normalize_filename_component)
+            .or_else(|| preferred_filename.and_then(normalize_filename_component))
             .unwrap_or_else(|| fallback_filename_from_url(url));
         let target_dir = self.target_dir_for(&filename);
         let destination = match self.collision_strategy {
@@ -257,12 +257,21 @@ pub fn finalize_part_file(
     }
 }
 
-fn normalize_filename(filename: &str) -> Option<String> {
+pub(crate) fn normalize_filename_component(filename: &str) -> Option<String> {
     let trimmed = filename.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+        return None;
+    }
+
+    let base = trimmed
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(trimmed);
+    let cleaned: String = base.chars().filter(|&c| c != '\0').collect();
+    let cleaned = cleaned.trim();
+    match cleaned {
+        "" | "." | ".." => None,
+        _ => Some(cleaned.to_string()),
     }
 }
 
@@ -510,6 +519,16 @@ mod tests {
             root.path().join("Videos").join("movie.mkv")
         );
         assert_eq!(resolved.finalize_strategy, FinalizeStrategy::MoveNoReplace);
+    }
+
+    #[test]
+    fn preferred_filename_is_normalized_to_safe_component() {
+        assert_eq!(
+            normalize_filename_component("../folder/movie.mkv\0").as_deref(),
+            Some("movie.mkv")
+        );
+        assert_eq!(normalize_filename_component(".."), None);
+        assert_eq!(normalize_filename_component("."), None);
     }
 
     #[test]

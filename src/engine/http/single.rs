@@ -19,7 +19,6 @@
 
 //! Single-stream fallback for servers that don't support range requests or
 //! don't send Content-Length.
-//! Just stream to disk
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -81,6 +80,11 @@ pub async fn single_download(
             return task_state(DownloadStatus::Error, 0, None);
         }
     };
+    if !response.status().is_success() {
+        tracing::warn!(status = %response.status(), "single-stream request failed");
+        send(DownloadStatus::Error, 0, None, 0);
+        return task_state(DownloadStatus::Error, 0, None);
+    }
 
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(f) => f,
