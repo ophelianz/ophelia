@@ -3,29 +3,36 @@ set -euo pipefail
 
 repo="${GPUI_REPO_URL:-https://github.com/ophelianz/gpui-oe.git}"
 dest="${GPUI_CHECKOUT_DEST:-../gpui-oe}"
-ref_file="${GPUI_REF_FILE:-.github/gpui-oe-ref}"
+gpui_ref="${GPUI_REF:-}"
+ref_file="${GPUI_REF_FILE:-}"
 
-if [[ ! -f "${ref_file}" ]]; then
-    echo "missing gpui-oe ref file: ${ref_file}" >&2
-    exit 1
+if [[ -z "${gpui_ref}" && -n "${ref_file}" ]]; then
+    if [[ ! -f "${ref_file}" ]]; then
+        echo "missing gpui-oe ref file: ${ref_file}" >&2
+        exit 1
+    fi
+    gpui_ref="$(tr -d '[:space:]' < "${ref_file}")"
 fi
 
-gpui_ref="$(tr -d '[:space:]' < "${ref_file}")"
-
-if [[ ! "${gpui_ref}" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "gpui-oe ref must be a full 40-character commit SHA: ${gpui_ref}" >&2
-    exit 1
+if [[ -e "${dest}" ]]; then
+    if [[ -d "${dest}/.git" && -n "$(git -C "${dest}" status --porcelain)" && "${GPUI_FORCE_CLEAN:-}" != "1" ]]; then
+        echo "refusing to remove dirty gpui-oe checkout at ${dest}; set GPUI_FORCE_CLEAN=1 to replace it" >&2
+        exit 1
+    fi
+    rm -rf "${dest}"
 fi
 
-rm -rf "${dest}"
-git clone --filter=blob:none --no-checkout "${repo}" "${dest}"
-git -C "${dest}" fetch --depth 1 origin "${gpui_ref}"
-git -C "${dest}" checkout --detach "${gpui_ref}"
+if [[ -n "${gpui_ref}" ]]; then
+    git clone --filter=blob:none --no-checkout "${repo}" "${dest}"
+    git -C "${dest}" fetch --depth 1 origin "${gpui_ref}"
+    git -C "${dest}" checkout --detach FETCH_HEAD
+else
+    git clone --filter=blob:none --depth 1 "${repo}" "${dest}"
+fi
 
 resolved_ref="$(git -C "${dest}" rev-parse HEAD)"
-if [[ "${resolved_ref}" != "${gpui_ref}" ]]; then
-    echo "gpui-oe resolved to ${resolved_ref}, expected ${gpui_ref}" >&2
-    exit 1
+if [[ -n "${gpui_ref}" ]]; then
+    echo "Checked out ${repo} ref ${gpui_ref} at ${resolved_ref} into ${dest} (Cargo package remains gpui-ce)"
+else
+    echo "Checked out latest ${repo} at ${resolved_ref} into ${dest} (Cargo package remains gpui-ce)"
 fi
-
-echo "Checked out ${repo} at ${resolved_ref} into ${dest} (Cargo package remains gpui-ce)"
