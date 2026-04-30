@@ -22,6 +22,7 @@ use rust_i18n::t;
 
 use crate::app::{Downloads, TransferListRow};
 use crate::engine::{ChunkMapCellState, DownloadId, TransferChunkMapState};
+use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 
 #[derive(IntoElement)]
@@ -86,7 +87,11 @@ impl ChunkMapCardModel {
             },
             TransferChunkMapState::Http(snapshot) => Self {
                 filename,
-                total_size_label: Some(format_bytes(snapshot.total_bytes).into()),
+                total_size_label: Some(
+                    data(DataQuantity::Bytes(snapshot.total_bytes))
+                        .to_string()
+                        .into(),
+                ),
                 state: ChunkMapCardState::Http(chunk_rows(&snapshot.cells)),
             },
         }
@@ -279,22 +284,6 @@ fn chunk_rows(cells: &[ChunkMapCellState]) -> Vec<Vec<ChunkMapCellState>> {
         .collect()
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-    const KB: u64 = 1_000;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,14 +297,6 @@ mod tests {
 
         assert_eq!(rows.len(), 8);
         assert!(rows.iter().all(|row| row.len() == 16));
-    }
-
-    #[test]
-    fn format_bytes_uses_human_readable_units() {
-        assert_eq!(format_bytes(999), "999 B");
-        assert_eq!(format_bytes(12_300), "12 KB");
-        assert_eq!(format_bytes(4_500_000), "4.5 MB");
-        assert_eq!(format_bytes(2_300_000_000), "2.3 GB");
     }
 
     #[test]

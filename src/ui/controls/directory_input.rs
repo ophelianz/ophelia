@@ -117,7 +117,7 @@ impl Render for DirectoryInput {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pick_directory(cx);
                     }))
-                    .child(icon_sm(IconName::Folder, Colors::muted_foreground())),
+                    .child(IconBox::new(IconName::Folder, Colors::muted_foreground())),
             )
     }
 }

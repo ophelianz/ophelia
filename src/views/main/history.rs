@@ -24,6 +24,7 @@ use gpui::{
 
 use crate::app::{Downloads, HistoryListRow};
 use crate::engine::{ArtifactState, DownloadId, DownloadStatus, HistoryFilter};
+use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 
 use rust_i18n::t;
@@ -182,7 +183,11 @@ impl HistoryRowModel {
             subtitle,
             artifact_label: artifact_label.into(),
             artifact_color,
-            size_label: format_bytes(row.total_bytes.unwrap_or(row.downloaded_bytes)).into(),
+            size_label: data(DataQuantity::Bytes(
+                row.total_bytes.unwrap_or(row.downloaded_bytes),
+            ))
+            .to_string()
+            .into(),
             age_label: format_age(row.finished_at.unwrap_or(row.added_at)).into(),
         }
     }
@@ -211,11 +216,10 @@ impl RenderOnce for HistoryItemRow {
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .child(icon_sm(self.model.status_icon, self.model.status_color)),
-            )
+            .child(IconBox::new(
+                self.model.status_icon,
+                self.model.status_color,
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -277,21 +281,6 @@ impl RenderOnce for HistoryEmptyState {
             .text_sm()
             .text_color(Colors::muted_foreground())
             .child(t!("history.empty").to_string())
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-    const KB: u64 = 1_000;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }
 

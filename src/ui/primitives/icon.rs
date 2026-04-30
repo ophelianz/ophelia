@@ -17,7 +17,16 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{Hsla, Pixels, SharedString, Styled, Svg, px, svg};
+use gpui::{
+    App, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Svg, Window,
+    div, px, svg,
+};
+
+const ICON_FRAME_SM: f32 = 20.0;
+const ICON_GLYPH_SM: f32 = 16.0;
+const ICON_FRAME_MD: f32 = 24.0;
+const ICON_GLYPH_MD: f32 = 20.0;
+const ICON_ACTION_FRAME: f32 = 32.0;
 
 /// Icon names mapping to Lucide SVG files in assets/icons/
 #[derive(Debug, Clone, Copy)]
@@ -72,11 +81,54 @@ pub fn icon(name: IconName, size: Pixels, color: impl Into<Hsla>) -> Svg {
         .text_color(color)
 }
 
-/// Default 16px icon
-pub fn icon_sm(name: IconName, color: impl Into<Hsla>) -> Svg {
-    icon(name, px(16.0), color)
+/// A fixed geometry slot for icons.
+///
+/// The frame owns alignment and row participation; the glyph only owns its SVG
+/// path and color.
+#[derive(IntoElement, Clone)]
+pub struct IconBox {
+    name: IconName,
+    frame_size: Pixels,
+    glyph_size: Pixels,
+    color: Hsla,
 }
 
-pub fn icon_m(name: IconName, color: impl Into<Hsla>) -> Svg {
-    icon(name, px(20.0), color)
+impl IconBox {
+    pub fn new(name: IconName, color: impl Into<Hsla>) -> Self {
+        Self::custom(name, px(ICON_FRAME_SM), px(ICON_GLYPH_SM), color)
+    }
+
+    pub fn medium(name: IconName, color: impl Into<Hsla>) -> Self {
+        Self::custom(name, px(ICON_FRAME_MD), px(ICON_GLYPH_MD), color)
+    }
+
+    pub fn action(name: IconName, color: impl Into<Hsla>) -> Self {
+        Self::custom(name, px(ICON_ACTION_FRAME), px(ICON_GLYPH_SM), color)
+    }
+
+    pub fn custom(
+        name: IconName,
+        frame_size: Pixels,
+        glyph_size: Pixels,
+        color: impl Into<Hsla>,
+    ) -> Self {
+        Self {
+            name,
+            frame_size,
+            glyph_size,
+            color: color.into(),
+        }
+    }
+}
+
+impl RenderOnce for IconBox {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div()
+            .size(self.frame_size)
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .child(icon(self.name, self.glyph_size, self.color))
+    }
 }

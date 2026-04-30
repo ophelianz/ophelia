@@ -34,7 +34,7 @@ use crate::views::overlays::download_modal::DownloadModalLayer;
 
 use super::chunk_map::{ChunkMapCard, ChunkMapCardModel};
 use super::history::HistoryView;
-use super::sidebar::Sidebar;
+use super::sidebar::{Sidebar, SidebarMode};
 use super::stats_bar::StatsBar;
 use super::transfers_list::{TransferList, TransferListSelectionChanged};
 use super::update_button::UpdateHeaderButton;
@@ -120,7 +120,7 @@ impl MainWindow {
     }
 
     fn view_model(&self, cx: &App) -> MainWindowViewModel {
-        let active_nav = self.sidebar.read(cx).active_item;
+        let active_nav = self.sidebar.read(cx).active_item();
 
         let content = if active_nav == HISTORY_NAV_INDEX {
             MainContentViewModel::History
@@ -297,10 +297,7 @@ impl MainWindow {
         view_model: MainWindowViewModel,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let sidebar = self.sidebar.read(cx);
-        let sidebar_width = sidebar.expanded_width();
-        let collapsed = sidebar.is_collapsed();
-        let _ = sidebar;
+        let sidebar_layout = self.sidebar.read(cx).layout();
 
         let content = div()
             .id("main-content")
@@ -314,8 +311,8 @@ impl MainWindow {
             .py(px(Spacing::CONTENT_PADDING_Y))
             .child(self.render_content(view_model));
 
-        if collapsed {
-            h_flex()
+        match sidebar_layout.mode {
+            SidebarMode::Collapsed => h_flex()
                 .size_full()
                 .child(
                     div()
@@ -325,31 +322,32 @@ impl MainWindow {
                         .child(self.sidebar.clone()),
                 )
                 .child(content)
-                .into_any_element()
-        } else {
-            let sidebar_entity = self.sidebar.clone();
-            h_resizable("main-window-layout")
-                .with_state(&self.sidebar_layout)
-                .on_resize(move |state, _, cx| {
-                    let width = state
-                        .read(cx)
-                        .sizes()
-                        .first()
-                        .copied()
-                        .unwrap_or(px(Spacing::SIDEBAR_WIDTH));
-                    let _ = sidebar_entity.update(cx, |sidebar, cx| {
-                        sidebar.set_expanded_width(f32::from(width));
-                        cx.notify();
-                    });
-                })
-                .child(
-                    resizable_panel()
-                        .size(px(sidebar_width))
-                        .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
-                        .child(self.sidebar.clone()),
-                )
-                .child(resizable_panel().child(content))
-                .into_any_element()
+                .into_any_element(),
+            SidebarMode::Expanded => {
+                let sidebar_entity = self.sidebar.clone();
+                h_resizable("main-window-layout")
+                    .with_state(&self.sidebar_layout)
+                    .on_resize(move |state, _, cx| {
+                        let width = state
+                            .read(cx)
+                            .sizes()
+                            .first()
+                            .copied()
+                            .unwrap_or(px(Spacing::SIDEBAR_WIDTH));
+                        let _ = sidebar_entity.update(cx, |sidebar, cx| {
+                            sidebar.set_expanded_width(f32::from(width));
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        resizable_panel()
+                            .size(px(sidebar_layout.expanded_width))
+                            .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                            .child(self.sidebar.clone()),
+                    )
+                    .child(resizable_panel().child(content))
+                    .into_any_element()
+            }
         }
     }
 

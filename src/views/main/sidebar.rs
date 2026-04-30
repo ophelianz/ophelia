@@ -21,6 +21,7 @@ use std::rc::Rc;
 
 use crate::app::{Downloads, SidebarStorageSummary};
 use crate::app_menu;
+use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 use gpui::{
     App, Context, Entity, Hsla, Render, RenderOnce, SharedString, Window, div, prelude::*, px,
@@ -30,13 +31,34 @@ use rust_i18n::t;
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarMode {
+    Expanded,
+    Collapsed,
+}
+
+impl SidebarMode {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Expanded => Self::Collapsed,
+            Self::Collapsed => Self::Expanded,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SidebarLayout {
+    pub mode: SidebarMode,
+    pub expanded_width: f32,
+}
+
 /// Left sidebar
 /// logo, new HTTP download button, navigation, storage card
 pub struct Sidebar {
-    pub active_item: usize,
-    pub collapsed: bool,
-    pub expanded_width: f32,
-    pub downloads: Option<Entity<Downloads>>,
+    active_item: usize,
+    mode: SidebarMode,
+    expanded_width: f32,
+    downloads: Option<Entity<Downloads>>,
 }
 
 impl Sidebar {
@@ -44,31 +66,30 @@ impl Sidebar {
         cx.observe(&downloads, |_, _, cx| cx.notify()).detach();
         Self {
             active_item: 0,
-            collapsed: false,
+            mode: SidebarMode::Expanded,
             expanded_width: Spacing::SIDEBAR_WIDTH,
             downloads: Some(downloads),
         }
     }
 
-    pub fn is_collapsed(&self) -> bool {
-        self.collapsed
+    pub fn active_item(&self) -> usize {
+        self.active_item
     }
 
-    pub fn expanded_width(&self) -> f32 {
-        self.expanded_width
+    pub fn layout(&self) -> SidebarLayout {
+        SidebarLayout {
+            mode: self.mode,
+            expanded_width: self.expanded_width,
+        }
     }
 
     pub fn set_expanded_width(&mut self, width: f32) {
         self.expanded_width = width;
     }
 
-    pub fn toggle_collapsed(&mut self) {
-        self.collapsed = !self.collapsed;
-    }
-
     fn view_model(&self, cx: &App) -> SidebarViewModel {
         SidebarViewModel {
-            collapsed: self.collapsed,
+            mode: self.mode,
             nav_items: vec![
                 SidebarNavItemModel::new(
                     0,
@@ -102,7 +123,7 @@ impl Render for Sidebar {
             let weak = weak.clone();
             move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    this.toggle_collapsed();
+                    this.mode = this.mode.toggled();
                     cx.notify();
                 });
             }
@@ -121,13 +142,13 @@ impl Render for Sidebar {
             .border_r_1()
             .border_color(Colors::border())
             .bg(Colors::sidebar())
-            .child(SidebarBrand::new(vm.collapsed, Rc::clone(&toggle_sidebar)))
+            .child(SidebarBrand::new(vm.mode, Rc::clone(&toggle_sidebar)))
             .child(
                 div()
                     .mx(px(Spacing::SIDEBAR_SECTION_PADDING))
                     .mb(px(Spacing::SECTION_GAP))
                     .child(SidebarDownloadButton::new(
-                        vm.collapsed,
+                        vm.mode,
                         Rc::clone(&open_http_download),
                     )),
             )
@@ -147,24 +168,28 @@ impl Render for Sidebar {
                                 });
                             }
                         });
-                        SidebarNavItem::new(item, vm.collapsed, on_click)
+                        SidebarNavItem::new(item, vm.mode, on_click)
                     })),
             )
             .child(div().flex_1())
-            .when(!vm.collapsed, |this| {
-                this.child(
-                    div()
-                        .m(px(Spacing::SIDEBAR_SECTION_PADDING))
-                        .mt(px(Spacing::SECTION_GAP))
-                        .child(StorageCard::new(vm.storage)),
-                )
+            .child(match vm.mode {
+                SidebarMode::Expanded => div()
+                    .m(px(Spacing::SIDEBAR_SECTION_PADDING))
+                    .mt(px(Spacing::SECTION_GAP))
+                    .child(StorageCard::new(vm.storage, vm.mode))
+                    .into_any_element(),
+                SidebarMode::Collapsed => div()
+                    .mx(px(8.0))
+                    .mb(px(Spacing::SIDEBAR_SECTION_PADDING))
+                    .child(StorageCard::new(vm.storage, vm.mode))
+                    .into_any_element(),
             })
     }
 }
 
 #[derive(Clone)]
 struct SidebarViewModel {
-    collapsed: bool,
+    mode: SidebarMode,
     nav_items: Vec<SidebarNavItemModel>,
     storage: StorageCardModel,
 }
@@ -203,8 +228,8 @@ struct StorageCardModel {
 impl StorageCardModel {
     fn from_summary(summary: SidebarStorageSummary) -> Self {
         Self {
-            used: format_gb(summary.used_bytes),
-            total: format_gb(summary.total_bytes),
+            used: data(DataQuantity::StorageBytes(summary.used_bytes)).to_string(),
+            total: data(DataQuantity::StorageBytes(summary.total_bytes)).to_string(),
             fraction: summary.fraction,
         }
     }
@@ -212,22 +237,23 @@ impl StorageCardModel {
 
 #[derive(IntoElement)]
 struct SidebarBrand {
-    collapsed: bool,
+    mode: SidebarMode,
     on_toggle: ClickHandler,
 }
 
 impl SidebarBrand {
-    fn new(collapsed: bool, on_toggle: ClickHandler) -> Self {
-        Self {
-            collapsed,
-            on_toggle,
-        }
+    fn new(mode: SidebarMode, on_toggle: ClickHandler) -> Self {
+        Self { mode, on_toggle }
     }
 }
 
 impl RenderOnce for SidebarBrand {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let on_toggle = Rc::clone(&self.on_toggle);
+        let toggle_icon = match self.mode {
+            SidebarMode::Expanded => IconName::PanelLeftClose,
+            SidebarMode::Collapsed => IconName::PanelLeftOpen,
+        };
         let toggle = div()
             .id("collapse-toggle")
             .flex()
@@ -236,17 +262,10 @@ impl RenderOnce for SidebarBrand {
             .on_click(move |_, window, cx| {
                 on_toggle(window, cx);
             })
-            .child(icon_sm(
-                if self.collapsed {
-                    IconName::PanelLeftOpen
-                } else {
-                    IconName::PanelLeftClose
-                },
-                Colors::muted_foreground(),
-            ));
+            .child(IconBox::new(toggle_icon, Colors::muted_foreground()));
 
-        if self.collapsed {
-            div()
+        match self.mode {
+            SidebarMode::Collapsed => div()
                 .pt(px(Chrome::SIDEBAR_HEADER_TOP))
                 .mb(px(Chrome::SIDEBAR_HEADER_BOTTOM_MARGIN))
                 .flex()
@@ -255,9 +274,8 @@ impl RenderOnce for SidebarBrand {
                 .gap(px(Spacing::CONTROL_GAP))
                 .child(OpheliaLogo::new(44.0))
                 .child(toggle)
-                .into_any_element()
-        } else {
-            div()
+                .into_any_element(),
+            SidebarMode::Expanded => div()
                 .px(px(Spacing::SIDEBAR_SECTION_PADDING))
                 .pt(px(Chrome::SIDEBAR_HEADER_TOP))
                 .mb(px(Chrome::SIDEBAR_HEADER_BOTTOM_MARGIN))
@@ -279,35 +297,32 @@ impl RenderOnce for SidebarBrand {
                         ),
                 )
                 .child(toggle)
-                .into_any_element()
+                .into_any_element(),
         }
     }
 }
 
 #[derive(IntoElement)]
 struct SidebarDownloadButton {
-    collapsed: bool,
+    mode: SidebarMode,
     on_click: ClickHandler,
 }
 
 impl SidebarDownloadButton {
-    fn new(collapsed: bool, on_click: ClickHandler) -> Self {
-        Self {
-            collapsed,
-            on_click,
-        }
+    fn new(mode: SidebarMode, on_click: ClickHandler) -> Self {
+        Self { mode, on_click }
     }
 }
 
 impl RenderOnce for SidebarDownloadButton {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let on_click = Rc::clone(&self.on_click);
+        let id = match self.mode {
+            SidebarMode::Collapsed => "add-download-btn-collapsed",
+            SidebarMode::Expanded => "add-download-btn",
+        };
         let button = div()
-            .id(if self.collapsed {
-                "add-download-btn-collapsed"
-            } else {
-                "add-download-btn"
-            })
+            .id(id)
             .flex()
             .items_center()
             .justify_center()
@@ -321,21 +336,20 @@ impl RenderOnce for SidebarDownloadButton {
                 on_click(window, cx);
             });
 
-        if self.collapsed {
-            h_flex()
+        match self.mode {
+            SidebarMode::Collapsed => h_flex()
                 .justify_center()
                 .child(
                     button
                         .w(px(Chrome::SIDEBAR_BUTTON_SIZE))
-                        .child(icon_sm(IconName::Plus, Colors::background())),
+                        .child(IconBox::new(IconName::Plus, Colors::background())),
                 )
-                .into_any_element()
-        } else {
-            button
+                .into_any_element(),
+            SidebarMode::Expanded => button
                 .w_full()
                 .text_base()
                 .child(t!("sidebar.add_download").to_string())
-                .into_any_element()
+                .into_any_element(),
         }
     }
 }
@@ -343,15 +357,15 @@ impl RenderOnce for SidebarDownloadButton {
 #[derive(IntoElement)]
 struct SidebarNavItem {
     item: SidebarNavItemModel,
-    collapsed: bool,
+    mode: SidebarMode,
     on_click: ClickHandler,
 }
 
 impl SidebarNavItem {
-    fn new(item: SidebarNavItemModel, collapsed: bool, on_click: ClickHandler) -> Self {
+    fn new(item: SidebarNavItemModel, mode: SidebarMode, on_click: ClickHandler) -> Self {
         Self {
             item,
-            collapsed,
+            mode,
             on_click,
         }
     }
@@ -375,7 +389,9 @@ impl RenderOnce for SidebarNavItem {
             .id(("sidebar-nav-item", self.item.index))
             .flex()
             .items_center()
-            .when(self.collapsed, |this| this.justify_center())
+            .when(matches!(self.mode, SidebarMode::Collapsed), |this| {
+                this.justify_center()
+            })
             .gap(px(Chrome::HEADER_GAP))
             .px(px(Chrome::SIDEBAR_NAV_ITEM_PADDING_X))
             .py(px(Chrome::SIDEBAR_NAV_ITEM_PADDING_Y))
@@ -391,106 +407,117 @@ impl RenderOnce for SidebarNavItem {
             .on_click(move |_, window, cx| {
                 on_click(window, cx);
             })
-            .child(icon(self.item.icon_name, px(20.0), text))
-            .when(!self.collapsed, |this| this.child(self.item.label))
+            .child(IconBox::medium(self.item.icon_name, text))
+            .when(matches!(self.mode, SidebarMode::Expanded), |this| {
+                this.child(self.item.label)
+            })
     }
 }
 
 #[derive(IntoElement)]
 struct StorageCard {
     model: StorageCardModel,
+    mode: SidebarMode,
 }
 
 impl StorageCard {
-    fn new(model: StorageCardModel) -> Self {
-        Self { model }
+    fn new(model: StorageCardModel, mode: SidebarMode) -> Self {
+        Self { model, mode }
     }
 }
 
 impl RenderOnce for StorageCard {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(Spacing::LIST_GAP))
-            .p(px(Spacing::ROW_PADDING_Y))
-            .rounded(px(Chrome::BUTTON_RADIUS))
-            .border_1()
-            .border_color(Colors::border())
-            .bg(Colors::card())
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(Colors::finished())
-                    .child(icon_sm(IconName::Database, Colors::finished()))
-                    .child(t!("sidebar.storage").to_string()),
-            )
-            .child(
-                h_flex()
-                    .items_end()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(Colors::foreground())
-                            .child(self.model.used),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(Colors::muted_foreground())
-                            .mb(px(1.0))
-                            .child("/"),
-                    )
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(Colors::muted_foreground())
-                            .child(self.model.total),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(Colors::finished())
-                    .child(t!("sidebar.storage_used").to_string()),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h(px(Chrome::STORAGE_BAR_HEIGHT))
-                    .rounded_full()
-                    .bg(Colors::muted())
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded_full()
-                            .bg(Colors::finished())
-                            .w(relative(self.model.fraction)),
-                    ),
-            )
+        match self.mode {
+            SidebarMode::Expanded => div()
+                .flex()
+                .flex_col()
+                .gap(px(Spacing::LIST_GAP))
+                .p(px(Spacing::ROW_PADDING_Y))
+                .rounded(px(Chrome::BUTTON_RADIUS))
+                .border_1()
+                .border_color(Colors::border())
+                .bg(Colors::background())
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::finished())
+                        .child(IconBox::new(IconName::Database, Colors::finished()))
+                        .child(t!("sidebar.storage").to_string()),
+                )
+                .child(
+                    h_flex()
+                        .items_end()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(Colors::foreground())
+                                .child(self.model.used),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(Colors::muted_foreground())
+                                .mb(px(1.0))
+                                .child("/"),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(Colors::muted_foreground())
+                                .child(self.model.total),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(Colors::finished())
+                        .child(t!("sidebar.storage_used").to_string()),
+                )
+                .child(storage_progress_bar(self.model.fraction)),
+            SidebarMode::Collapsed => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(7.0))
+                .px(px(8.0))
+                .py(px(10.0))
+                .rounded(px(Chrome::BUTTON_RADIUS))
+                .border_1()
+                .border_color(Colors::border())
+                .bg(Colors::background())
+                .overflow_hidden()
+                .child(IconBox::new(IconName::Database, Colors::finished()))
+                .child(storage_progress_bar(self.model.fraction)),
+        }
     }
+}
+
+fn storage_progress_bar(fraction: f32) -> gpui::Div {
+    div()
+        .w_full()
+        .h(px(Chrome::STORAGE_BAR_HEIGHT))
+        .rounded_full()
+        .bg(Colors::muted())
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .bg(Colors::finished())
+                .w(relative(fraction.clamp(0.0, 1.0))),
+        )
 }
 
 fn sidebar_separator() -> gpui::Div {
     div().mb(px(10.0)).h(px(1.0)).bg(Colors::border())
-}
-
-fn format_gb(bytes: u64) -> String {
-    const GB: f64 = 1_000_000_000.0;
-    const TB: f64 = 1_000_000_000_000.0;
-    let b = bytes as f64;
-    if b >= TB {
-        format!("{:.1} TB", b / TB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
 }
 
 #[cfg(test)]
@@ -501,17 +528,19 @@ mod tests {
     fn collapse_preserves_last_expanded_width() {
         let mut sidebar = Sidebar {
             active_item: 0,
-            collapsed: false,
+            mode: SidebarMode::Expanded,
             expanded_width: 280.0,
             downloads: None,
         };
 
-        sidebar.toggle_collapsed();
-        assert!(sidebar.is_collapsed());
-        assert_eq!(sidebar.expanded_width(), 280.0);
+        sidebar.mode = sidebar.mode.toggled();
+        let layout = sidebar.layout();
+        assert_eq!(layout.mode, SidebarMode::Collapsed);
+        assert_eq!(layout.expanded_width, 280.0);
 
-        sidebar.toggle_collapsed();
-        assert!(!sidebar.is_collapsed());
-        assert_eq!(sidebar.expanded_width(), 280.0);
+        sidebar.mode = sidebar.mode.toggled();
+        let layout = sidebar.layout();
+        assert_eq!(layout.mode, SidebarMode::Expanded);
+        assert_eq!(layout.expanded_width, 280.0);
     }
 }

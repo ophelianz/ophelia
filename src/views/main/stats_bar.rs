@@ -17,6 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
+use crate::format::{DataLabel, DataQuantity, data};
 use crate::ui::prelude::*;
 use gpui::{
     App, Background, Hsla, PathBuilder, Window, canvas, div, linear_color_stop, linear_gradient,
@@ -37,7 +38,7 @@ pub struct StatsBar {
 
 impl RenderOnce for StatsBar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let download_speed = format_speed_value(self.download_speed);
+        let download_speed = data(DataQuantity::MegabytesPerSecond(self.download_speed));
 
         div()
             .size_full()
@@ -268,7 +269,9 @@ fn graph_label_max(samples: &[f32]) -> f32 {
     samples.iter().copied().fold(0.0_f32, f32::max)
 }
 
-fn primary_speed_metric(label: String, value: String, caption: String) -> impl IntoElement {
+fn primary_speed_metric(label: String, value: DataLabel, caption: String) -> impl IntoElement {
+    let unit = value.unit;
+
     v_flex()
         .flex_1()
         .min_w_0()
@@ -289,7 +292,7 @@ fn primary_speed_metric(label: String, value: String, caption: String) -> impl I
                         .text_size(px(28.0))
                         .font_weight(gpui::FontWeight::EXTRA_BOLD)
                         .text_color(Colors::foreground())
-                        .child(value),
+                        .child(value.value),
                 )
                 .child(
                     div()
@@ -297,7 +300,7 @@ fn primary_speed_metric(label: String, value: String, caption: String) -> impl I
                         .text_sm()
                         .font_weight(gpui::FontWeight::LIGHT)
                         .text_color(Colors::muted_foreground())
-                        .child("MB/s"),
+                        .child(unit),
                 ),
         )
         .child(
@@ -318,7 +321,10 @@ fn disk_io_metric(
         .items_start()
         .gap(px(Spacing::CONTROL_GAP))
         .flex_shrink_0()
-        .child(icon_m(IconName::Storage, Colors::muted_foreground()))
+        .child(IconBox::medium(
+            IconName::Storage,
+            Colors::muted_foreground(),
+        ))
         .child(
             v_flex()
                 .gap(px(6.0))
@@ -340,6 +346,10 @@ fn disk_io_metric(
 }
 
 fn io_metric(label: String, speed: Option<f32>) -> impl IntoElement {
+    let value = speed
+        .map(|speed| data(DataQuantity::MegabytesPerSecond(speed)).to_string())
+        .unwrap_or_else(|| "—".to_string());
+
     v_flex()
         .gap(px(2.0))
         .child(
@@ -358,7 +368,7 @@ fn io_metric(label: String, speed: Option<f32>) -> impl IntoElement {
                 } else {
                     Colors::muted_foreground()
                 })
-                .child(format_optional_speed(speed)),
+                .child(value),
         )
 }
 
@@ -380,31 +390,4 @@ fn count_metric(label: &str, value: &str, color: Hsla) -> impl IntoElement {
                 .text_color(color)
                 .child(value.to_string()),
         )
-}
-
-fn format_speed_value(speed: f32) -> String {
-    format!("{speed:.1}")
-}
-
-fn format_optional_speed(speed: Option<f32>) -> String {
-    speed
-        .map(|speed| format!("{speed:.1} MB/s"))
-        .unwrap_or_else(|| "—".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_speed_value_uses_one_decimal_place() {
-        assert_eq!(format_speed_value(12.34), "12.3");
-        assert_eq!(format_speed_value(0.0), "0.0");
-    }
-
-    #[test]
-    fn format_optional_speed_uses_placeholder_when_missing() {
-        assert_eq!(format_optional_speed(None), "—");
-        assert_eq!(format_optional_speed(Some(5.26)), "5.3 MB/s");
-    }
 }

@@ -17,13 +17,11 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{
-    App, ElementId, Hsla, MouseButton, RenderOnce, SharedString, Window, div, prelude::*, px,
-    relative,
-};
+use gpui::{App, ElementId, Hsla, RenderOnce, SharedString, Window, div, prelude::*, px, relative};
 
 use crate::app::TransferDisplayState;
 use crate::engine::DownloadId;
+use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 
 impl TransferDisplayState {
@@ -327,31 +325,12 @@ fn row_action_button(
     icon_name: IconName,
     on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let button = div()
-        .id(id)
-        .size(px(32.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .border_color(Colors::border())
-        .bg(Colors::background())
-        .cursor_pointer()
-        .hover(|style| style.border_color(Colors::input_border()))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            window.prevent_default();
-        })
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            window.prevent_default();
-            on_click(window, cx);
-        })
-        .child(icon_sm(icon_name, Colors::muted_foreground()));
+    let button = IconButton::new(id, icon_name)
+        .stop_propagation()
+        .on_click(move |_, window, cx| on_click(window, cx));
 
     if let Some(debug_selector) = debug_selector {
-        button.debug_selector(|| debug_selector.to_string())
+        button.debug_selector(debug_selector)
     } else {
         button
     }
@@ -373,7 +352,7 @@ fn progress_bar(progress: f32, color: Hsla) -> gpui::Div {
 }
 
 fn format_size_label(downloaded_bytes: u64, total_bytes: Option<u64>) -> String {
-    format_bytes(total_bytes.unwrap_or(downloaded_bytes))
+    data(DataQuantity::Bytes(total_bytes.unwrap_or(downloaded_bytes))).to_string()
 }
 
 fn progress_percentage_label(progress: f32) -> String {
@@ -413,22 +392,6 @@ pub(crate) fn default_transfer_icon_name_for_filename(filename: &str) -> &'stati
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-    const KB: u64 = 1_000;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::ops::Deref;
@@ -439,16 +402,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn known_total_size_uses_total_bytes() {
-        assert_eq!(format_size_label(1_000, Some(12_500)), "12 KB");
-    }
-
-    #[test]
-    fn unknown_total_size_uses_downloaded_bytes() {
-        assert_eq!(format_size_label(4_500_000, None), "4.5 MB");
-    }
 
     #[test]
     fn percentage_label_is_clamped_and_rounded() {

@@ -19,6 +19,7 @@
 
 pub mod build_info;
 pub mod engine;
+pub mod format;
 pub mod ipc;
 pub mod platform;
 pub mod settings;
