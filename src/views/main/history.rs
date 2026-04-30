@@ -211,11 +211,10 @@ impl RenderOnce for HistoryItemRow {
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .child(icon_sm(self.model.status_icon, self.model.status_color)),
-            )
+            .child(IconBox::new(
+                self.model.status_icon,
+                self.model.status_color,
+            ))
             .child(
                 v_flex()
                     .flex_1()

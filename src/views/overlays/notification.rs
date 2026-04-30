@@ -70,7 +70,7 @@ impl Render for Notification {
             .border_1()
             .border_color(Colors::border())
             .bg(Colors::card())
-            .child(icon_m(icon, accent))
+            .child(IconBox::medium(icon, accent))
             .child(
                 v_flex()
                     .gap(px(2.))
