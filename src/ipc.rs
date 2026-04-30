@@ -61,6 +61,13 @@ impl IpcServer {
         Self { runtime, rx }
     }
 
+    #[cfg(test)]
+    pub fn disabled() -> Self {
+        let runtime = Runtime::new().expect("failed to create IPC runtime");
+        let (_tx, rx) = mpsc::unbounded_channel();
+        Self { runtime, rx }
+    }
+
     pub fn try_recv(&mut self) -> Option<AddDownloadRequest> {
         self.rx.try_recv().ok()
     }
