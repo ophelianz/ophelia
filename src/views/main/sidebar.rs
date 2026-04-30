@@ -21,6 +21,7 @@ use std::rc::Rc;
 
 use crate::app::{Downloads, SidebarStorageSummary};
 use crate::app_menu;
+use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 use gpui::{
     App, Context, Entity, Hsla, Render, RenderOnce, SharedString, Window, div, prelude::*, px,
@@ -227,8 +228,8 @@ struct StorageCardModel {
 impl StorageCardModel {
     fn from_summary(summary: SidebarStorageSummary) -> Self {
         Self {
-            used: format_gb(summary.used_bytes),
-            total: format_gb(summary.total_bytes),
+            used: data(DataQuantity::StorageBytes(summary.used_bytes)).to_string(),
+            total: data(DataQuantity::StorageBytes(summary.total_bytes)).to_string(),
             fraction: summary.fraction,
         }
     }
@@ -517,17 +518,6 @@ fn storage_progress_bar(fraction: f32) -> gpui::Div {
 
 fn sidebar_separator() -> gpui::Div {
     div().mb(px(10.0)).h(px(1.0)).bg(Colors::border())
-}
-
-fn format_gb(bytes: u64) -> String {
-    const GB: f64 = 1_000_000_000.0;
-    const TB: f64 = 1_000_000_000_000.0;
-    let b = bytes as f64;
-    if b >= TB {
-        format!("{:.1} TB", b / TB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
 }
 
 #[cfg(test)]

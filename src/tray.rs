@@ -19,10 +19,11 @@
 
 use std::time::Duration;
 
-use gpui::{App, Image, ImageFormat, SharedString, Tray, TrayIntent, TrayMenuItem};
+use gpui::{App, Image, ImageFormat, Tray, TrayIntent, TrayMenuItem};
 use rust_i18n::t;
 
 use crate::app_actions;
+use crate::format::{DataQuantity, data};
 
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/logo.svg");
 const TRAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -120,28 +121,11 @@ fn drain_tray_intents(cx: &mut App) {
 }
 
 fn format_tray_title(speed_bps: u64) -> String {
-    format!("\u{2193} {}", format_speed(speed_bps))
+    format!("\u{2193} {}", data(DataQuantity::BytesPerSecond(speed_bps)))
 }
 
 fn tray_title_for_speed(speed_bps: u64) -> Option<String> {
     (speed_bps > 0).then(|| format_tray_title(speed_bps))
-}
-
-fn format_speed(speed_bps: u64) -> SharedString {
-    const KB: f64 = 1_000.0;
-    const MB: f64 = 1_000_000.0;
-    const GB: f64 = 1_000_000_000.0;
-
-    let speed = speed_bps as f64;
-    if speed >= GB {
-        format!("{:.1} GB/s", speed / GB).into()
-    } else if speed >= MB {
-        format!("{:.1} MB/s", speed / MB).into()
-    } else if speed >= KB {
-        format!("{:.1} KB/s", speed / KB).into()
-    } else {
-        format!("{speed_bps} B/s").into()
-    }
 }
 
 #[cfg(test)]
@@ -149,13 +133,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_title_hides_zero_and_formats_human_speed() {
+    fn tray_title_hides_zero_and_prefixes_active_speed() {
         assert_eq!(tray_title_for_speed(0), None);
         assert_eq!(tray_title_for_speed(512).as_deref(), Some("↓ 512 B/s"));
-        assert_eq!(tray_title_for_speed(1_500).as_deref(), Some("↓ 1.5 KB/s"));
-        assert_eq!(
-            tray_title_for_speed(12_300_000).as_deref(),
-            Some("↓ 12.3 MB/s")
-        );
     }
 }
