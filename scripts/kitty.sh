@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_PATH="scripts/kitty.sh"
-DEFAULT_MESSAGE="bugs behave plz"
+DEFAULT_MESSAGE="bugs behave plz, we're all trying our best"
 DEFAULT_TAB_SIZE="4"
 
 usage() {
@@ -11,10 +11,10 @@ Usage:
   scripts/kitty.sh [--message "cute message"] [--tab-size N] [file-or-directory ...]
 
 Behavior:
-  - With file paths, prepends the Ophelia header to each file.
-  - With directory paths, recursively updates every `.rs` file inside them.
-  - If a file already starts with one or more Ophelia headers, they are collapsed into one.
-  - With no file paths, prints the generated header to stdout.
+  - With file paths, writes the Ophelia header to each file
+  - With directory paths, recursively updates every `.rs` file inside them
+  - If a file already starts with one or more Ophelia headers, they are collapsed into one
+  - With no file paths, prints the header to stdout
 EOF
 }
 
@@ -55,8 +55,12 @@ generate_header() {
     local header_message="$1"
 
     printf '/***************************************************\n'
-    printf '** This file is part of Ophelia, distributed under the\n'
-    printf '** terms of the GPL License, version 3 or later.\n'
+    printf '** This file is part of Ophelia.\n'
+    printf '** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>\n'
+    printf '** Released under the GPL License, version 3 or later.\n'
+    printf '**\n'
+    printf '** If you found a weird little bug in here, tell the cat:\n'
+    printf '** viktor@hystericca.dev\n'
     printf '**\n'
     kittysay --think --tab-size "$tab_size" "$header_message" | sed '/^$/d' | sed 's/^/** /'
     printf '**************************************************/\n'
@@ -83,6 +87,15 @@ apply_header() {
             in_block = 0
         }
 
+        function update_header_markers(line) {
+            if (line ~ /This file is part of Ophelia/) {
+                saw_ophelia = 1
+            }
+            if (line ~ /(GPL License|terms of the GPL License|Released under the GPL License)/) {
+                saw_license = 1
+            }
+        }
+
         BEGIN {
             while ((getline line < header_path) > 0) {
                 header = header line ORS
@@ -94,23 +107,20 @@ apply_header() {
             body = ""
             block = ""
             block_is_ophelia = 0
+            saw_ophelia = 0
+            saw_license = 0
         }
 
         {
             if (at_top) {
                 if (in_block) {
                     block = block $0 ORS
-                    if ($0 ~ /This file is part of Ophelia, distributed under the/) {
-                        saw_ophelia = 1
-                    }
-                    if ($0 ~ /terms of the GPL License, version 3 or later\./) {
-                        saw_gpl = 1
-                    }
+                    update_header_markers($0)
                     if ($0 ~ /\*\/[[:space:]]*$/) {
-                        block_is_ophelia = saw_ophelia && saw_gpl
+                        block_is_ophelia = saw_ophelia && saw_license
                         flush_block()
                         saw_ophelia = 0
-                        saw_gpl = 0
+                        saw_license = 0
                     }
                     next
                 }
@@ -122,13 +132,14 @@ apply_header() {
                 if ($0 ~ /^\/\*/) {
                     in_block = 1
                     block = $0 ORS
-                    saw_ophelia = ($0 ~ /This file is part of Ophelia, distributed under the/)
-                    saw_gpl = ($0 ~ /terms of the GPL License, version 3 or later\./)
+                    saw_ophelia = 0
+                    saw_license = 0
+                    update_header_markers($0)
                     if ($0 ~ /\*\/[[:space:]]*$/) {
-                        block_is_ophelia = saw_ophelia && saw_gpl
+                        block_is_ophelia = saw_ophelia && saw_license
                         flush_block()
                         saw_ophelia = 0
-                        saw_gpl = 0
+                        saw_license = 0
                     }
                     next
                 }
