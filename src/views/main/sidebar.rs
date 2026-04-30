@@ -171,13 +171,17 @@ impl Render for Sidebar {
                     })),
             )
             .child(div().flex_1())
-            .when(matches!(vm.mode, SidebarMode::Expanded), |this| {
-                this.child(
-                    div()
-                        .m(px(Spacing::SIDEBAR_SECTION_PADDING))
-                        .mt(px(Spacing::SECTION_GAP))
-                        .child(StorageCard::new(vm.storage)),
-                )
+            .child(match vm.mode {
+                SidebarMode::Expanded => div()
+                    .m(px(Spacing::SIDEBAR_SECTION_PADDING))
+                    .mt(px(Spacing::SECTION_GAP))
+                    .child(StorageCard::new(vm.storage, vm.mode))
+                    .into_any_element(),
+                SidebarMode::Collapsed => div()
+                    .mx(px(8.0))
+                    .mb(px(Spacing::SIDEBAR_SECTION_PADDING))
+                    .child(StorageCard::new(vm.storage, vm.mode))
+                    .into_any_element(),
             })
     }
 }
@@ -412,83 +416,103 @@ impl RenderOnce for SidebarNavItem {
 #[derive(IntoElement)]
 struct StorageCard {
     model: StorageCardModel,
+    mode: SidebarMode,
 }
 
 impl StorageCard {
-    fn new(model: StorageCardModel) -> Self {
-        Self { model }
+    fn new(model: StorageCardModel, mode: SidebarMode) -> Self {
+        Self { model, mode }
     }
 }
 
 impl RenderOnce for StorageCard {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(Spacing::LIST_GAP))
-            .p(px(Spacing::ROW_PADDING_Y))
-            .rounded(px(Chrome::BUTTON_RADIUS))
-            .border_1()
-            .border_color(Colors::border())
-            .bg(Colors::card())
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(Colors::finished())
-                    .child(IconBox::new(IconName::Database, Colors::finished()))
-                    .child(t!("sidebar.storage").to_string()),
-            )
-            .child(
-                h_flex()
-                    .items_end()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(Colors::foreground())
-                            .child(self.model.used),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(Colors::muted_foreground())
-                            .mb(px(1.0))
-                            .child("/"),
-                    )
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(Colors::muted_foreground())
-                            .child(self.model.total),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(Colors::finished())
-                    .child(t!("sidebar.storage_used").to_string()),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h(px(Chrome::STORAGE_BAR_HEIGHT))
-                    .rounded_full()
-                    .bg(Colors::muted())
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded_full()
-                            .bg(Colors::finished())
-                            .w(relative(self.model.fraction)),
-                    ),
-            )
+        match self.mode {
+            SidebarMode::Expanded => div()
+                .flex()
+                .flex_col()
+                .gap(px(Spacing::LIST_GAP))
+                .p(px(Spacing::ROW_PADDING_Y))
+                .rounded(px(Chrome::BUTTON_RADIUS))
+                .border_1()
+                .border_color(Colors::border())
+                .bg(Colors::background())
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::finished())
+                        .child(IconBox::new(IconName::Database, Colors::finished()))
+                        .child(t!("sidebar.storage").to_string()),
+                )
+                .child(
+                    h_flex()
+                        .items_end()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(Colors::foreground())
+                                .child(self.model.used),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(Colors::muted_foreground())
+                                .mb(px(1.0))
+                                .child("/"),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(Colors::muted_foreground())
+                                .child(self.model.total),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(Colors::finished())
+                        .child(t!("sidebar.storage_used").to_string()),
+                )
+                .child(storage_progress_bar(self.model.fraction)),
+            SidebarMode::Collapsed => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(7.0))
+                .px(px(8.0))
+                .py(px(10.0))
+                .rounded(px(Chrome::BUTTON_RADIUS))
+                .border_1()
+                .border_color(Colors::border())
+                .bg(Colors::background())
+                .overflow_hidden()
+                .child(IconBox::new(IconName::Database, Colors::finished()))
+                .child(storage_progress_bar(self.model.fraction)),
+        }
     }
+}
+
+fn storage_progress_bar(fraction: f32) -> gpui::Div {
+    div()
+        .w_full()
+        .h(px(Chrome::STORAGE_BAR_HEIGHT))
+        .rounded_full()
+        .bg(Colors::muted())
+        .child(
+            div()
+                .h_full()
+                .rounded_full()
+                .bg(Colors::finished())
+                .w(relative(fraction.clamp(0.0, 1.0))),
+        )
 }
 
 fn sidebar_separator() -> gpui::Div {
