@@ -17,23 +17,31 @@
 **       じしf_,)ノ
 **************************************************/
 
-// use gpui::{Bounds, Pixels, Size, WindowBounds, WindowOptions};
+use gpui::{Bounds, Pixels, Size, WindowBounds, WindowOptions};
 
-// use crate::platform::WindowChrome;
+use crate::platform::WindowChrome;
 
-// pub fn window_chrome() -> WindowChrome {
-//     WindowChrome {
-//         height: 40.0,
-//         leading_padding: 20.0,
-//         horizontal_padding: 20.0,
-//     }
-// }
+pub fn window_chrome() -> WindowChrome {
+    WindowChrome {
+        height: 40.0,
+        leading_padding: 20.0,
+        horizontal_padding: 20.0,
+    }
+}
 
-// pub fn window_options(bounds: Bounds<Pixels>, min_size: Size<Pixels>) -> WindowOptions {
-//     WindowOptions {
-//         window_bounds: Some(WindowBounds::Windowed(bounds)),
-//         titlebar: None,
-//         window_min_size: Some(min_size),
-//         ..Default::default()
-//     }
-// }
+pub fn window_options(bounds: Bounds<Pixels>, min_size: Size<Pixels>) -> WindowOptions {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        window_min_size: Some(min_size),
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "linux")]
+    let options = WindowOptions {
+        window_decorations: Some(gpui::WindowDecorations::Client),
+        ..options
+    };
+
+    options
+}

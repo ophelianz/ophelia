@@ -94,7 +94,7 @@ mod imp {
             }
         }
 
-        // F_PREALLOCATE reserves blocks but does not update the file size.
+        // F_PREALLOCATE reserves blocks but doesn't update the file size
         file.set_len(size)
     }
 
