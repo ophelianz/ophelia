@@ -205,6 +205,12 @@ impl DownloadEngine {
     }
 }
 
+impl Drop for DownloadEngine {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+    }
+}
+
 // --- actor ---------------------------------------------------------------
 
 /// Owns all mutable engine state and handles commands on the tokio runtime.

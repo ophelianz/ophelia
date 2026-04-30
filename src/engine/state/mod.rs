@@ -25,7 +25,6 @@ pub use db::HistoryReader;
 use crate::engine::types::{DbEvent, SavedDownload};
 
 pub struct DbWorkerHandle {
-    #[allow(dead_code)] // kept to tie worker lifetime to the owner in non-test builds
     join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -42,17 +41,40 @@ impl DbWorkerHandle {
     }
 }
 
+impl Drop for DbWorkerHandle {
+    fn drop(&mut self) {
+        if let Some(join) = self.join.take()
+            && let Err(error) = join.join()
+        {
+            tracing::error!("db worker thread panicked: {error:?}");
+        }
+    }
+}
+
 pub struct StateBootstrap {
     pub db_tx: std::sync::mpsc::Sender<DbEvent>,
     pub history_reader: HistoryReader,
     pub saved_downloads: Vec<SavedDownload>,
     pub next_download_id: u64,
-    #[allow(dead_code)] // kept alive for worker lifetime
-    worker: DbWorkerHandle,
+    #[allow(dead_code)] // Downloads takes this to keep the DB worker alive until shutdown
+    pub(crate) worker: DbWorkerHandle,
 }
 
 pub fn bootstrap() -> rusqlite::Result<StateBootstrap> {
     let db = Db::open()?;
+    let history_reader = HistoryReader::open()?;
+    bootstrap_from(db, history_reader)
+}
+
+#[cfg(test)]
+pub fn bootstrap_at(path: impl AsRef<std::path::Path>) -> rusqlite::Result<StateBootstrap> {
+    let path = path.as_ref();
+    let db = Db::open_at(path)?;
+    let history_reader = HistoryReader::open_at(path)?;
+    bootstrap_from(db, history_reader)
+}
+
+fn bootstrap_from(db: Db, history_reader: HistoryReader) -> rusqlite::Result<StateBootstrap> {
     if let Err(error) = db.normalize_stale() {
         tracing::warn!("normalize stale: {error}");
     }
@@ -66,7 +88,7 @@ pub fn bootstrap() -> rusqlite::Result<StateBootstrap> {
 
     Ok(StateBootstrap {
         db_tx,
-        history_reader: HistoryReader::open()?,
+        history_reader,
         saved_downloads,
         next_download_id: max_id + 1,
         worker,

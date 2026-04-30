@@ -358,7 +358,7 @@ mod tests {
     fn setup_app() -> TestApp {
         let mut app = TestApp::new();
         app.update(|cx| {
-            let downloads = cx.new(Downloads::new);
+            let downloads = cx.new(Downloads::new_for_test);
             init(downloads, cx);
         });
         app

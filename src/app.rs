@@ -52,6 +52,7 @@ use crate::views::overlays::notification::NotificationKind;
 /// One vec per field, all vecs share the same index space.
 pub struct Downloads {
     engine: DownloadEngine,
+    _db_worker: state::DbWorkerHandle,
     ipc: IpcServer,
     pub settings: Settings,
 
@@ -80,6 +81,9 @@ pub struct Downloads {
     history_reader: HistoryReader,
     pub history: Vec<HistoryRow>,
     pub history_filter: HistoryFilter,
+
+    #[cfg(test)]
+    _test_db_dir: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,16 +316,40 @@ impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
         let bootstrap = state::bootstrap().expect("failed to bootstrap backend state");
-        let history_reader = bootstrap.history_reader;
-        let engine = DownloadEngine::new(
-            settings.clone(),
-            bootstrap.db_tx,
-            bootstrap.next_download_id,
-        );
         let ipc = IpcServer::start(settings.ipc_port);
+        Self::from_bootstrap(settings, bootstrap, ipc, cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(cx: &mut Context<Self>) -> Self {
+        let db_dir = tempfile::tempdir().expect("failed to create test database directory");
+        let db_path = db_dir.path().join("downloads.db");
+        let bootstrap =
+            state::bootstrap_at(&db_path).expect("failed to bootstrap test backend state");
+        let mut model =
+            Self::from_bootstrap(Settings::default(), bootstrap, IpcServer::disabled(), cx);
+        model._test_db_dir = Some(db_dir);
+        model
+    }
+
+    fn from_bootstrap(
+        settings: Settings,
+        bootstrap: state::StateBootstrap,
+        ipc: IpcServer,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let state::StateBootstrap {
+            db_tx,
+            history_reader,
+            saved_downloads,
+            next_download_id,
+            worker,
+        } = bootstrap;
+        let engine = DownloadEngine::new(settings.clone(), db_tx, next_download_id);
 
         let mut model = Self {
             engine,
+            _db_worker: worker,
             ipc,
             settings,
             ids: Vec::new(),
@@ -342,9 +370,11 @@ impl Downloads {
             history_reader,
             history: Vec::new(),
             history_filter: HistoryFilter::All,
+            #[cfg(test)]
+            _test_db_dir: None,
         };
 
-        for saved_dl in &bootstrap.saved_downloads {
+        for saved_dl in &saved_downloads {
             model
                 .engine
                 .restore(RestoredDownload::from_saved(saved_dl, &model.settings));
