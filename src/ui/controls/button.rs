@@ -25,8 +25,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
+    App, ClickEvent, ElementId, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::*, px,
 };
 
 use crate::ui::prelude::*;
@@ -142,7 +143,7 @@ impl RenderOnce for Button {
                     .active(|style| style.bg(Colors::card()))
             })
             .when_some(self.icon, |this, icon| {
-                this.child(icon_sm(icon, text_color))
+                this.child(IconBox::new(icon, text_color))
             })
             .child(div().child(self.label))
             .when_some(
@@ -151,5 +152,86 @@ impl RenderOnce for Button {
                     this.on_click(move |event, window, cx| on_click(event, window, cx))
                 },
             )
+    }
+}
+
+#[derive(IntoElement)]
+pub struct IconButton {
+    id: ElementId,
+    icon: IconName,
+    stop_propagation: bool,
+    debug_selector: Option<&'static str>,
+    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+}
+
+impl IconButton {
+    pub fn new(id: impl Into<ElementId>, icon: IconName) -> Self {
+        Self {
+            id: id.into(),
+            icon,
+            stop_propagation: false,
+            debug_selector: None,
+            on_click: None,
+        }
+    }
+
+    pub fn stop_propagation(mut self) -> Self {
+        self.stop_propagation = true;
+        self
+    }
+
+    pub fn debug_selector(mut self, debug_selector: &'static str) -> Self {
+        self.debug_selector = Some(debug_selector);
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for IconButton {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let stop_propagation = self.stop_propagation;
+        let has_click = self.on_click.is_some();
+
+        div()
+            .id(self.id)
+            .size(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .rounded_full()
+            .border_1()
+            .border_color(Colors::border())
+            .bg(Colors::background())
+            .when(has_click, |this| {
+                this.cursor_pointer()
+                    .hover(|style| style.border_color(Colors::input_border()))
+            })
+            .child(IconBox::action(self.icon, Colors::muted_foreground()))
+            .when(stop_propagation, |this| {
+                this.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                })
+            })
+            .when_some(self.on_click, |this, on_click| {
+                this.on_click(move |event, window, cx| {
+                    if stop_propagation {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    }
+                    on_click(event, window, cx);
+                })
+            })
+            .when_some(self.debug_selector, |this, debug_selector| {
+                this.debug_selector(move || debug_selector.to_string())
+            })
     }
 }

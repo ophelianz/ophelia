@@ -494,7 +494,7 @@ impl SettingsWindow {
                         this.active = section;
                         cx.notify();
                     }))
-                    .child(icon_m(section.icon(), section.icon_color()))
+                    .child(IconBox::medium(section.icon(), section.icon_color()))
                     .child(label)
             })
             .collect::<Vec<_>>();

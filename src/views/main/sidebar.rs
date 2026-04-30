@@ -236,7 +236,7 @@ impl RenderOnce for SidebarBrand {
             .on_click(move |_, window, cx| {
                 on_toggle(window, cx);
             })
-            .child(icon_sm(
+            .child(IconBox::new(
                 if self.collapsed {
                     IconName::PanelLeftOpen
                 } else {
@@ -327,7 +327,7 @@ impl RenderOnce for SidebarDownloadButton {
                 .child(
                     button
                         .w(px(Chrome::SIDEBAR_BUTTON_SIZE))
-                        .child(icon_sm(IconName::Plus, Colors::background())),
+                        .child(IconBox::new(IconName::Plus, Colors::background())),
                 )
                 .into_any_element()
         } else {
@@ -391,7 +391,7 @@ impl RenderOnce for SidebarNavItem {
             .on_click(move |_, window, cx| {
                 on_click(window, cx);
             })
-            .child(icon(self.item.icon_name, px(20.0), text))
+            .child(IconBox::medium(self.item.icon_name, text))
             .when(!self.collapsed, |this| this.child(self.item.label))
     }
 }
@@ -425,7 +425,7 @@ impl RenderOnce for StorageCard {
                     .text_sm()
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(Colors::finished())
-                    .child(icon_sm(IconName::Database, Colors::finished()))
+                    .child(IconBox::new(IconName::Database, Colors::finished()))
                     .child(t!("sidebar.storage").to_string()),
             )
             .child(

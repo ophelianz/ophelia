@@ -17,10 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-use gpui::{
-    App, ElementId, Hsla, MouseButton, RenderOnce, SharedString, Window, div, prelude::*, px,
-    relative,
-};
+use gpui::{App, ElementId, Hsla, RenderOnce, SharedString, Window, div, prelude::*, px, relative};
 
 use crate::app::TransferDisplayState;
 use crate::engine::DownloadId;
@@ -327,31 +324,12 @@ fn row_action_button(
     icon_name: IconName,
     on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let button = div()
-        .id(id)
-        .size(px(32.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .border_color(Colors::border())
-        .bg(Colors::background())
-        .cursor_pointer()
-        .hover(|style| style.border_color(Colors::input_border()))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            window.prevent_default();
-        })
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            window.prevent_default();
-            on_click(window, cx);
-        })
-        .child(icon_sm(icon_name, Colors::muted_foreground()));
+    let button = IconButton::new(id, icon_name)
+        .stop_propagation()
+        .on_click(move |_, window, cx| on_click(window, cx));
 
     if let Some(debug_selector) = debug_selector {
-        button.debug_selector(|| debug_selector.to_string())
+        button.debug_selector(debug_selector)
     } else {
         button
     }

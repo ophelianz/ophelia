@@ -318,7 +318,10 @@ fn disk_io_metric(
         .items_start()
         .gap(px(Spacing::CONTROL_GAP))
         .flex_shrink_0()
-        .child(icon_m(IconName::Storage, Colors::muted_foreground()))
+        .child(IconBox::medium(
+            IconName::Storage,
+            Colors::muted_foreground(),
+        ))
         .child(
             v_flex()
                 .gap(px(6.0))
