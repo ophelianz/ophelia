@@ -29,7 +29,8 @@ Notarization environment:
 Minisign environment:
   MINISIGN_PRIVATE_KEY           Minisign private key text.
   MINISIGN_KEY_PATH              Path to minisign private key. Used if MINISIGN_PRIVATE_KEY is empty.
-  OPHELIA_MINISIGN_PUBKEY        Optional public key used to verify generated signatures.
+  OPHELIA_MINISIGN_PUBKEY        Optional public key used to verify generated signatures. Accepts
+                                  the raw updater key or full minisign public key file contents.
 EOF
 }
 
@@ -469,8 +470,26 @@ prepare_minisign_key() {
 
     if [[ -n "${OPHELIA_MINISIGN_PUBKEY:-}" ]]; then
         minisign_public_key_path="${work_dir}/ophelia-minisign.pub"
-        printf '%s\n' "${OPHELIA_MINISIGN_PUBKEY}" > "${minisign_public_key_path}"
+        write_minisign_public_key "${OPHELIA_MINISIGN_PUBKEY}" "${minisign_public_key_path}"
     fi
+}
+
+write_minisign_public_key() {
+    local public_key="$1"
+    local output="$2"
+
+    public_key="${public_key//$'\r'/}"
+    if [[ "${public_key}" == untrusted\ comment:* ]]; then
+        printf '%s\n' "${public_key}" > "${output}"
+        return
+    fi
+
+    public_key="$(printf '%s' "${public_key}" | tr -d '[:space:]')"
+    [[ -n "${public_key}" ]] || die "OPHELIA_MINISIGN_PUBKEY was set but empty after trimming."
+    {
+        printf 'untrusted comment: ophelia minisign public key\n'
+        printf '%s\n' "${public_key}"
+    } > "${output}"
 }
 
 minisign_artifact() {

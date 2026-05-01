@@ -54,41 +54,71 @@ async fn wait_for_matching_event(
     engine: &mut DownloadEngine,
     mut predicate: impl FnMut(&EngineEvent) -> bool,
 ) -> EngineEvent {
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let notification = engine
-                .next_event()
-                .await
-                .expect("engine notification channel closed");
-            if predicate(&notification) {
-                return notification;
-            }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut seen = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "timed out waiting for matching engine event\nseen events:\n{}",
+                seen.join("\n")
+            );
         }
-    })
-    .await
-    .expect("timed out waiting for matching engine notification")
+
+        let event = tokio::time::timeout(remaining, engine.next_event())
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "timed out waiting for matching engine event: {error:?}\nseen events:\n{}",
+                    seen.join("\n")
+                )
+            })
+            .expect("engine event channel closed");
+
+        if predicate(&event) {
+            return event;
+        }
+
+        seen.push(format!("{event:?}"));
+    }
 }
 
 async fn wait_for_matching_progress(
     engine: &mut DownloadEngine,
     mut predicate: impl FnMut(&ophelia::engine::ProgressUpdate) -> bool,
 ) -> ophelia::engine::ProgressUpdate {
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let event = engine
-                .next_event()
-                .await
-                .expect("engine progress channel closed");
-            let EngineEvent::Progress(update) = event else {
-                continue;
-            };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut seen = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "timed out waiting for matching progress update\nseen events:\n{}",
+                seen.join("\n")
+            );
+        }
+
+        let event = tokio::time::timeout(remaining, engine.next_event())
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "timed out waiting for matching progress update: {error:?}\nseen events:\n{}",
+                    seen.join("\n")
+                )
+            })
+            .expect("engine event channel closed");
+        let event_debug = format!("{event:?}");
+
+        if let EngineEvent::Progress(update) = event {
             if predicate(&update) {
                 return update;
             }
         }
-    })
-    .await
-    .expect("timed out waiting for matching progress update")
+
+        seen.push(event_debug);
+    }
 }
 
 fn spawn_no_content_length_server(body: Vec<u8>) -> std::net::SocketAddr {
