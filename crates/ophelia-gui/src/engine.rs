@@ -17,13 +17,13 @@
 **       じしf_,)ノ
 **************************************************/
 
-rust_i18n::i18n!("locales", fallback = "en");
+//! Thin GUI-facing facade over the backend crate.
+//!
+//! Keeping this module lets the split GUI crate keep its existing
+//! `crate::engine::*` imports while the real engine logic lives in `ophelia`.
 
-pub mod build_info;
-pub mod engine;
-pub mod engine_bridge;
-pub mod format;
-pub mod ipc;
-pub mod platform;
-pub mod runtime;
-pub mod settings;
+pub use ophelia::engine::*;
+
+pub mod state {
+    pub use ophelia::engine::state::*;
+}

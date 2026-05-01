@@ -25,10 +25,12 @@ mod app_menu;
 mod assets;
 mod build_info;
 mod engine;
+mod engine_bridge;
 mod format;
 mod ipc;
 mod logging;
 mod platform;
+mod runtime;
 mod settings;
 mod theme;
 mod tray;
@@ -37,7 +39,8 @@ mod updater;
 mod views;
 
 use assets::Assets;
-use gpui::{App, ApplicationActivationPolicy, QuitMode, application, prelude::*};
+use gpui::{App, ApplicationActivationPolicy, QuitMode, prelude::*};
+use gpui_platform::application;
 
 fn run() {
     let app = application()
@@ -48,6 +51,8 @@ fn run() {
         let _ = app_actions::ensure_main_window(cx);
     });
     app.run(|cx: &mut App| {
+        runtime::init(cx);
+
         let initial_settings = settings::Settings::load();
         rust_i18n::set_locale(initial_settings.resolved_language());
 

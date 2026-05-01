@@ -3,10 +3,12 @@
 - `ui/`: reusable UI building blocks that are not tied to a specific product screen
 - `views/`: app-specific compositions such as windows, panels, lists, and overlays
 - `theme.rs`: shared design tokens and visual constants
-- `app.rs`: app-layer bridge between GPUI and the backend engine
+- `app.rs`: GPUI-facing download rows, history rows, and stats view state
+- `engine_bridge.rs`: Tokio-owned backend engine bridge and lightweight UI command client
 - `app_menu.rs` / `app_actions.rs` / `tray.rs`: app-level actions, shortcuts, tray integration, and shell wiring
 - `platform/`: shared OS integration such as window chrome and app path policy
-- `engine/`: download engine, persistence, provider-specific backend logic
+- `runtime.rs`: GPUI-owned Tokio runtime for app services
+- `engine.rs`: thin facade over the backend crate named `ophelia`
 - `ipc.rs`: local ingress for browser-extension download handoff
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
     - also stores destination-policy settings such as collision strategy and extension-based routing rules
@@ -55,24 +57,19 @@
 
 ### Backend-adjacent root
 
-- `app.rs`: GPUI-facing download model type, backend service owner, progress polling, and history bridge
-    - current remove/delete behavior is backend-owned: the app bridge asks the engine to delete artifacts, removes the live row on engine notification, and keeps history intact
-    - also caches provider kind, source label, control support, HTTP chunk-map state, and an `id -> index` side map for each live row
-    - backend notifications now distinguish cancel-transfer from delete-artifact even though the current UI still handles both as “remove the live row and refresh history”
-    - backend state now supports a frontend model of one `Transfers` surface with internal status filters plus a separate global `History` surface
+- `app.rs`: GPUI download model type, live row arrays, history reader, and stats sampler
+    - does not own `DownloadEngine`
+    - consumes `EngineEvent` from `engine_bridge.rs` and upserts/removes live rows by `DownloadId`
+    - caches provider kind, source label, control support, HTTP chunk-map state, and an `id -> index` side map for each live row
+- `engine_bridge.rs`: single owner of backend `DownloadEngine`
+    - sends async engine commands from `EngineClient`
+    - continuously drains `next_event()` and forwards events into GPUI state
+- `runtime.rs`: Zed-shaped GPUI global that owns a Tokio runtime/handle for app services
 - `app_actions.rs`: app-shell owner for the global `Downloads` entity handle, main/settings window reuse, overlay visibility state, and macOS dock/tray mode transitions
 - `tray.rs`: macOS tray/menu-bar bridge that refreshes aggregate speed and routes queued tray intents into `app_actions`
-- `ipc.rs`: local Axum server plus app-owned IPC ingress handle
+- `ipc.rs`: local Axum server plus app-owned IPC ingress handle, spawned on the shared app runtime
 - `platform/`
     - `mod.rs`: platform module root and window-chrome entry points
     - `paths.rs`: shared app config/data/log/download directory policy plus legacy path helpers
 - `settings/`
-    - `mod.rs`: persisted settings model and atomic load/save, including destination-policy and HTTP ordering-mode settings
-- `engine/`
-    - `engine.rs`: `DownloadEngine` handle and `EngineActor`
-    - `destination.rs`: shared destination resolution, collision handling, and final-file commit helpers
-    - `provider.rs`: internal provider dispatch, provider lifecycle capabilities, and scheduler-key mapping between the generic scheduler and concrete provider modules
-    - `spec.rs`: provider-neutral add/restore request shapes, ingress normalization, and settings-driven provider/config plus destination-policy mapping
-    - `types.rs`: shared engine-facing types, persisted source/resume data, provider-aware history read models, progress updates, and engine notifications
-    - `state/`: SQLite persistence, provider-kind-aware storage/bootstrap, provider-specific resume-state helpers, DB worker, and history reader
-    - `http/`: HTTP-specific executor pipeline, including live chunk-map snapshot reporting and ordering-mode-aware scheduling for active chunked transfers
+    - `mod.rs`: persisted settings model and atomic load/save, including destination-policy, HTTP ordering-mode settings, and conversion into backend `CoreConfig` / `CorePaths`

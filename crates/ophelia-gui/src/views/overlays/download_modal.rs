@@ -17,8 +17,6 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Add Download modal overlay.
-
 use std::path::PathBuf;
 
 use gpui::{Context, Entity, EventEmitter, IntoElement, Render, Window, div, prelude::*, px};
@@ -158,6 +156,7 @@ impl DownloadModal {
         preferred.or_else(|| Some(lines.swap_remove(0)))
     }
 
+    // TODO: fix ts
     fn looks_like_download_source(text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
         lower.contains("://")
@@ -179,7 +178,10 @@ impl DownloadModal {
         if url.is_empty() {
             return None;
         }
-        Some(AddDownloadRequest::from_url(url.to_string()).preview_destination(settings))
+        Some(
+            AddDownloadRequest::from_url(url.to_string())
+                .preview_destination(&settings.core_config().destination),
+        )
     }
 
     fn form_values(&self, cx: &mut Context<Self>) -> (String, String) {
