@@ -8,6 +8,29 @@ permissions:
   contents: read
 
 jobs:
+  workflow-scripts:
+    name: ci / workflow scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install lint tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          actionlint_version="1.7.7"
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/actionlint_${actionlint_version}_linux_amd64.tar.gz" -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo mv /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: ShellCheck scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Actionlint workflows
+        run: actionlint
+
   checks:
     name: ci / macos
     runs-on: ${{ matrix.os }}
@@ -26,17 +49,23 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
-          components: rustfmt
+          toolchain: 1.95.0
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt -p ophelia -- --check
+        run: cargo fmt --check --all
 
       - name: Cargo check
-        run: cargo check --locked
+        run: cargo check --locked --workspace --all-targets
 
-      - name: Cargo test
-        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test backend
+        run: cargo test --locked -p ophelia
+
+      - name: Test GUI
+        run: cargo test --locked -p ophelia-gui

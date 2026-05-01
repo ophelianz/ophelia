@@ -39,7 +39,6 @@ use crate::engine::{
     ArtifactState, DownloadControlAction, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
     TransferChunkMapState, TransferControlSupport, TransferSnapshot,
 };
-use crate::engine_bridge::{EngineBridge, EngineBridgeEvent, EngineClient, EngineCommandKind};
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
 use crate::views::overlays::notification::NotificationKind;

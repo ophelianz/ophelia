@@ -522,11 +522,9 @@ async fn destination_change_event_arrives_before_finished_progress() {
                 EngineEvent::DestinationChanged {
                     id: changed,
                     destination,
-                } => {
-                    if changed == id {
-                        assert_eq!(destination, server_destination);
-                        saw_destination_change = true;
-                    }
+                } if changed == id => {
+                    assert_eq!(destination, server_destination);
+                    saw_destination_change = true;
                 }
                 EngineEvent::Progress(update)
                     if update.id == id && update.status == DownloadStatus::Finished =>

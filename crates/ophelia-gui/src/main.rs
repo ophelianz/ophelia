@@ -42,14 +42,15 @@ use gpui::{App, ApplicationActivationPolicy, QuitMode, prelude::*};
 use gpui_platform::application;
 
 fn run() {
+    let assets = Assets::new();
     let app = application()
-        .with_assets(Assets::new())
+        .with_assets(assets.clone())
         .with_quit_mode(QuitMode::Explicit)
         .with_activation_policy(ApplicationActivationPolicy::Regular);
     app.on_reopen(|cx| {
         let _ = app_actions::ensure_main_window(cx);
     });
-    app.run(|cx: &mut App| {
+    app.run(move |cx: &mut App| {
         runtime::init(cx);
 
         let initial_settings = settings::Settings::load();
@@ -77,13 +78,7 @@ fn run() {
                 ]
                 .into_iter()
                 .map(|filename| {
-                    std::borrow::Cow::Owned(
-                        std::fs::read(format!(
-                            "{}/assets/fonts/{filename}",
-                            env!("CARGO_MANIFEST_DIR")
-                        ))
-                        .unwrap(),
-                    )
+                    std::borrow::Cow::Owned(assets.read(format!("fonts/{filename}")).unwrap())
                 })
                 .collect(),
             )

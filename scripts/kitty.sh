@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_PATH="scripts/kitty.sh"
 DEFAULT_MESSAGE="bugs behave plz, we're all trying our best"
 DEFAULT_TAB_SIZE="4"
 

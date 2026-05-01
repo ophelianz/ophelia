@@ -32,7 +32,7 @@ fi
 
 resolved_ref="$(git -C "${dest}" rev-parse HEAD)"
 if [[ -n "${gpui_ref}" ]]; then
-    echo "Checked out ${repo} ref ${gpui_ref} at ${resolved_ref} into ${dest} (Cargo package remains gpui-ce)"
+    echo "Checked out ${repo} ref ${gpui_ref} at ${resolved_ref} into ${dest} (Cargo packages: gpui, gpui_platform)"
 else
-    echo "Checked out latest ${repo} at ${resolved_ref} into ${dest} (Cargo package remains gpui-ce)"
+    echo "Checked out latest ${repo} at ${resolved_ref} into ${dest} (Cargo packages: gpui, gpui_platform)"
 fi

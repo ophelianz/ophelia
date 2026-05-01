@@ -10,6 +10,42 @@ build = "build.rs"
 name = "ophelia"
 path = "src/main.rs"
 
+[package.metadata.bundle]
+name = "Ophelia"
+identifier = "nz.ophelia.app"
+icon = ["assets/AppIcon.icns"]
+category = "public.app-category.utilities"
+resources = [
+    "assets/fonts/*.ttf",
+    "assets/icons/**/*.svg",
+    "assets/logo.svg",
+    "locales/*.yml",
+]
+
+[package.metadata.bundle-stable]
+name = "Ophelia"
+identifier = "nz.ophelia.app"
+icon = ["assets/AppIcon.icns"]
+category = "public.app-category.utilities"
+resources = [
+    "assets/fonts/*.ttf",
+    "assets/icons/**/*.svg",
+    "assets/logo.svg",
+    "locales/*.yml",
+]
+
+[package.metadata.bundle-nightly]
+name = "Ophelia"
+identifier = "nz.ophelia.app"
+icon = ["assets/AppIcon.icns"]
+category = "public.app-category.utilities"
+resources = [
+    "assets/fonts/*.ttf",
+    "assets/icons/**/*.svg",
+    "assets/logo.svg",
+    "locales/*.yml",
+]
+
 [dependencies]
 axum = "0.8.7"
 futures = "0.3.32"
