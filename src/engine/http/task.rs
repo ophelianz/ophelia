@@ -47,7 +47,7 @@ use super::config::RangeOrdering;
 use super::probe::probe;
 use super::range_runner::{RangeDownloadConfig, run_range_download};
 use super::resume::RangeResumeSnapshot;
-use super::single::single_download;
+use super::single::{SingleDownloadRequest, single_download};
 
 const RANGE_WORK_UNIT_SIZE: u64 = 2 * 1024 * 1024;
 const STEAL_ALIGN: u64 = 4096;
@@ -57,6 +57,22 @@ pub struct TaskFinalState {
     pub status: DownloadStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
+}
+
+pub struct DownloadTaskRequest {
+    pub id: DownloadId,
+    pub url: String,
+    pub destination: PathBuf,
+    pub destination_policy: DestinationPolicy,
+    pub config: HttpDownloadConfig,
+    pub progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+    pub pause_token: CancellationToken,
+    pub pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
+    pub destination_sink: Arc<Mutex<Option<PathBuf>>>,
+    pub resume_from: Option<Vec<ChunkSnapshot>>,
+    pub server_semaphore: Arc<Semaphore>,
+    pub global_throttle: Arc<TokenBucket>,
+    pub runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
 }
 
 fn task_state(
@@ -95,21 +111,40 @@ struct RangeDownloadPlan {
     strategies: HttpRangeStrategyConfig,
 }
 
-async fn resolve_chunks(
+struct ResolveChunksRequest<'a> {
     resume_from: Option<Vec<ChunkSnapshot>>,
-    probe_client: &reqwest::Client,
-    chunk_client: &Arc<reqwest::Client>,
-    url: &str,
+    probe_client: &'a reqwest::Client,
+    chunk_client: &'a Arc<reqwest::Client>,
+    url: &'a str,
     destination: PathBuf,
-    destination_policy: &DestinationPolicy,
-    config: &HttpDownloadConfig,
+    destination_policy: &'a DestinationPolicy,
+    config: &'a HttpDownloadConfig,
     id: DownloadId,
-    progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
-    runtime_update_tx: &mpsc::UnboundedSender<TaskRuntimeUpdate>,
-    destination_sink: &Arc<Mutex<Option<PathBuf>>>,
-    pause_token: &CancellationToken,
+    progress_tx: &'a mpsc::UnboundedSender<ProgressUpdate>,
+    runtime_update_tx: &'a mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    destination_sink: &'a Arc<Mutex<Option<PathBuf>>>,
+    pause_token: &'a CancellationToken,
     throttle: Arc<Throttle>,
+}
+
+async fn resolve_chunks(
+    request: ResolveChunksRequest<'_>,
 ) -> Result<ResolvedChunks, TaskFinalState> {
+    let ResolveChunksRequest {
+        resume_from,
+        probe_client,
+        chunk_client,
+        url,
+        destination,
+        destination_policy,
+        config,
+        id,
+        progress_tx,
+        runtime_update_tx,
+        destination_sink,
+        pause_token,
+        throttle,
+    } = request;
     let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
         let _ = progress_tx.send(ProgressUpdate {
             id,
@@ -231,21 +266,21 @@ async fn resolve_chunks(
                     id,
                     state: crate::engine::TransferChunkMapState::Unsupported,
                 });
-                return Err(single_download(
+                return Err(single_download(SingleDownloadRequest {
                     id,
-                    Arc::clone(chunk_client),
-                    url.to_owned(),
-                    ResolvedDestination {
+                    client: Arc::clone(chunk_client),
+                    url: url.to_owned(),
+                    resolved_destination: ResolvedDestination {
                         part_path,
                         destination,
                         finalize_strategy,
                     },
-                    config.stall_timeout_secs,
-                    progress_tx.clone(),
-                    runtime_update_tx.clone(),
-                    pause_token.clone(),
+                    stall_timeout_secs: config.stall_timeout_secs,
+                    progress_tx: progress_tx.clone(),
+                    runtime_update_tx: runtime_update_tx.clone(),
+                    pause_token: pause_token.clone(),
                     throttle,
-                )
+                })
                 .await);
             }
 
@@ -374,23 +409,25 @@ fn chunk_list_from_snapshots(snapshots: &[ChunkSnapshot]) -> chunk::ChunkList {
 #[tracing::instrument(
     name = "download",
     skip_all,
-    fields(id = id.0, %url)
+    fields(id = request.id.0, url = %request.url)
 )]
-pub async fn download_task(
-    id: DownloadId,
-    url: String,
-    destination: PathBuf,
-    destination_policy: DestinationPolicy,
-    config: HttpDownloadConfig,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    pause_token: CancellationToken,
-    pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
-    destination_sink: Arc<Mutex<Option<PathBuf>>>,
-    resume_from: Option<Vec<ChunkSnapshot>>,
-    server_semaphore: Arc<Semaphore>,
-    global_throttle: Arc<TokenBucket>,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
-) -> TaskFinalState {
+pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
+    let DownloadTaskRequest {
+        id,
+        url,
+        destination,
+        destination_policy,
+        config,
+        progress_tx,
+        pause_token,
+        pause_sink,
+        destination_sink,
+        resume_from,
+        server_semaphore,
+        global_throttle,
+        runtime_update_tx,
+    } = request;
+
     // Probe uses a normal client
     // Range workers use HTTP/1.1 so each request can get its own connection
     let probe_client = reqwest::Client::new();
@@ -410,21 +447,21 @@ pub async fn download_task(
     // Find the path, file handle, and ranges
     //
     // This may (?) end early on probe failure or single-stream fallback
-    let resolved = match resolve_chunks(
+    let resolved = match resolve_chunks(ResolveChunksRequest {
         resume_from,
-        &probe_client,
-        &chunk_client,
-        &url,
+        probe_client: &probe_client,
+        chunk_client: &chunk_client,
+        url: &url,
         destination,
-        &destination_policy,
-        &config,
+        destination_policy: &destination_policy,
+        config: &config,
         id,
-        &progress_tx,
-        &runtime_update_tx,
-        &destination_sink,
-        &pause_token,
-        Arc::clone(&throttle),
-    )
+        progress_tx: &progress_tx,
+        runtime_update_tx: &runtime_update_tx,
+        destination_sink: &destination_sink,
+        pause_token: &pause_token,
+        throttle: Arc::clone(&throttle),
+    })
     .await
     {
         Ok(v) => v,
@@ -489,6 +526,15 @@ pub async fn download_task(
         runtime_update_tx,
     })
     .await
+}
+
+fn single_stream_control_support() -> TransferControlSupport {
+    TransferControlSupport {
+        can_pause: false,
+        can_resume: false,
+        can_cancel: true,
+        can_restore: false,
+    }
 }
 
 #[cfg(test)]
@@ -558,14 +604,5 @@ mod tests {
         let plan = range_download_plan(RangeOrdering::Balanced, chunks, &config);
 
         assert_eq!(plan.strategies, HttpRangeStrategyConfig::default());
-    }
-}
-
-fn single_stream_control_support() -> TransferControlSupport {
-    TransferControlSupport {
-        can_pause: false,
-        can_resume: false,
-        can_cancel: true,
-        can_restore: false,
     }
 }

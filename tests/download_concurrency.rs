@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-use ophelia::engine::http::{HttpDownloadConfig, download_task};
+use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::types::{DownloadId, DownloadStatus};
 
 #[tokio::test(flavor = "multi_thread")]

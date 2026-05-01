@@ -123,9 +123,7 @@ impl RangeScheduler {
         let completed = clip_completed_to_total(total_bytes, completed);
         let pending: Vec<_> = RangeSet::remaining_from_completed(total_bytes, &completed)
             .ranges()
-            .iter()
-            .copied()
-            .collect();
+            .to_vec();
         Self::from_completed_and_pending(total_bytes, completed, pending)
     }
 

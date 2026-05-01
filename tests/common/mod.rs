@@ -19,16 +19,19 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use ophelia::engine::destination::DestinationPolicy;
-use ophelia::engine::http::TokenBucket;
-use ophelia::engine::types::{DownloadStatus, ProgressUpdate, TaskRuntimeUpdate};
+use ophelia::engine::http::{DownloadTaskRequest, HttpDownloadConfig, TokenBucket};
+use ophelia::engine::types::{
+    ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
+};
 use ophelia::settings::Settings;
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
@@ -41,6 +44,40 @@ pub fn unlimited_throttle() -> Arc<TokenBucket> {
 
 pub fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
     DestinationPolicy::for_resolved_destination(&Settings::default(), destination)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn download_task(
+    id: DownloadId,
+    url: String,
+    destination: std::path::PathBuf,
+    destination_policy: DestinationPolicy,
+    config: HttpDownloadConfig,
+    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+    pause_token: CancellationToken,
+    pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
+    destination_sink: Arc<Mutex<Option<std::path::PathBuf>>>,
+    resume_from: Option<Vec<ChunkSnapshot>>,
+    server_semaphore: Arc<Semaphore>,
+    global_throttle: Arc<TokenBucket>,
+    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+) -> ophelia::engine::http::TaskFinalState {
+    ophelia::engine::http::download_task(DownloadTaskRequest {
+        id,
+        url,
+        destination,
+        destination_policy,
+        config,
+        progress_tx,
+        pause_token,
+        pause_sink,
+        destination_sink,
+        resume_from,
+        server_semaphore,
+        global_throttle,
+        runtime_update_tx,
+    })
+    .await
 }
 
 pub fn runtime_updates_channel() -> (

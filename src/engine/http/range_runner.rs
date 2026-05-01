@@ -520,10 +520,10 @@ impl RangeDownload {
         }
 
         for (attempt, speed) in eligible {
-            if speed < mean * HEALTH_SLOW_FACTOR {
-                if let Some(control) = self.attempts.get(&attempt) {
-                    control.health_retry_token.cancel();
-                }
+            if speed < mean * HEALTH_SLOW_FACTOR
+                && let Some(control) = self.attempts.get(&attempt)
+            {
+                control.health_retry_token.cancel();
             }
         }
     }
