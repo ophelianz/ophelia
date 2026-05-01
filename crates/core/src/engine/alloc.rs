@@ -154,8 +154,3 @@ mod imp {
         file.set_len(size)
     }
 }
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-compile_error!(
-    "Ophelia core currently supports download preallocation on Linux, macOS, and Windows only"
-);
