@@ -299,7 +299,27 @@ pub struct ProgressUpdate {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferSnapshot {
+    pub id: DownloadId,
+    pub provider_kind: String,
+    pub source_label: String,
+    pub destination: PathBuf,
+    pub status: DownloadStatus,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub speed_bytes_per_sec: u64,
+    pub control_support: TransferControlSupport,
+    pub chunk_map_state: TransferChunkMapState,
+}
+
+#[derive(Debug, Clone)]
 pub enum EngineEvent {
+    TransferAdded {
+        snapshot: TransferSnapshot,
+    },
+    TransferRestored {
+        snapshot: TransferSnapshot,
+    },
     Progress(ProgressUpdate),
     DownloadBytesWritten {
         id: DownloadId,
@@ -331,12 +351,23 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineError {
     Closed,
+    NotFound {
+        id: DownloadId,
+    },
+    Unsupported {
+        id: DownloadId,
+        action: DownloadControlAction,
+    },
 }
 
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "download engine is closed"),
+            Self::NotFound { id } => write!(f, "download {} was not found", id.0),
+            Self::Unsupported { id, action } => {
+                write!(f, "download {} does not support {action:?}", id.0)
+            }
         }
     }
 }
@@ -356,6 +387,12 @@ pub enum LiveTransferRemovalAction {
 #[derive(Debug, Clone)]
 pub enum TaskRuntimeUpdate {
     Progress(ProgressUpdate),
+    Done {
+        id: DownloadId,
+        status: DownloadStatus,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
     DownloadBytesWritten {
         id: DownloadId,
         bytes: u64,

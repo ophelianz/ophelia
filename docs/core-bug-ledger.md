@@ -54,30 +54,94 @@ Keep engine tests on `#[tokio::test]` and avoid adding `Runtime::new` back to co
 
 Priority: closed
 
-## High
-
-### Active Pause Can Stall The Engine Actor
+### Active Pause Could Deadlock The Engine Actor
 
 Exact behavior:
 
-`EngineActor::run` handles `Pause` by awaiting `handle_pause`. `handle_pause` cancels the download token and then awaits the download task. While that await is pending, the actor is not polling other commands, task completions, or runtime updates.
+Fixed. Active pause used to cancel the download token and then await the task from inside `EngineActor::run`. The task could be waiting to send runtime updates or final state through bounded channels that only the actor drained.
 
 Files involved:
 
 - `crates/core/src/engine/actor.rs`
 - `crates/core/src/engine/provider.rs`
-- `crates/core/src/engine/http/range_runner.rs`
-- `crates/core/src/engine/http/range_worker.rs`
+- `crates/core/src/engine/types.rs`
 
 Why it matters:
 
-A slow pause can block unrelated engine work. This gets worse if the task is draining slow disk writes.
+The actor must stay responsive while a task drains network buffers or disk writes. It now cancels the token, keeps polling the task update channel, and handles pause when `TaskRuntimeUpdate::Done` arrives.
 
 Likely test:
 
-Pause one active range download while another download sends runtime updates or completes. Assert the actor still processes the other message within a short timeout.
+Keep `pausing_active_http_starts_next_queued_download` and add a heavier backpressure test once the disk writer exists.
 
-Priority: high
+Priority: closed
+
+### Unknown Delete Could Remove A Caller Path
+
+Exact behavior:
+
+Fixed. `DownloadEngine::delete_artifact` now takes only a download id. If the actor does not know that id, it returns `EngineError::NotFound` and does not touch the filesystem.
+
+Files involved:
+
+- `crates/core/src/engine/actor.rs`
+- `crates/core/tests/engine_notifications.rs`
+
+Why it matters:
+
+A core API should not delete an arbitrary path supplied by the frontend when id lookup fails.
+
+Likely test:
+
+`unknown_delete_rejects_id_and_leaves_caller_path_alone`
+
+Priority: closed
+
+### Task Done Could Overtake Late Task Updates
+
+Exact behavior:
+
+Fixed. Task final state now travels as `TaskRuntimeUpdate::Done` on the same channel as progress, write stats, destination changes, control changes, and chunk maps.
+
+Files involved:
+
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/provider.rs`
+- `crates/core/src/engine/types.rs`
+
+Why it matters:
+
+The actor should not remove an active task before it has seen the task's own final write stats or destination update.
+
+Likely test:
+
+Keep destination-before-finished and write-stat tests. Add a synthetic bounded-channel ordering test if this path changes again.
+
+Priority: closed
+
+### Event Stream Needed Seed State
+
+Exact behavior:
+
+Partly fixed. Add and restore now emit `TransferSnapshot` events. Frontends can seed rows from core events instead of inventing their own initial live-transfer state.
+
+Files involved:
+
+- `crates/core/src/engine/types.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/tests/engine_notifications.rs`
+
+Why it matters:
+
+The core event stream should become a useful read model for GUI and CLI adapters.
+
+Likely test:
+
+`add_emits_transfer_snapshot_for_frontends` and `restore_emits_transfer_snapshot_for_frontends`
+
+Priority: partly closed
+
+## High
 
 ### Range Workers Do Sync Disk Writes Inside Tokio Tasks
 
@@ -106,7 +170,7 @@ Priority: high
 
 Exact behavior:
 
-The core now uses bounded Tokio channels for engine commands, public events, task done events, task runtime updates, and worker events.
+The core now uses bounded Tokio channels for engine commands, public events, task runtime updates, and worker events.
 
 Files involved:
 

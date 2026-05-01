@@ -35,11 +35,6 @@ use crate::engine::{
     PersistedDownloadSource, ProviderResumeData, TaskRuntimeUpdate, TransferControlSupport,
 };
 
-pub(super) struct TaskDone {
-    pub(super) id: DownloadId,
-    pub(super) final_state: TaskFinalState,
-}
-
 pub(super) struct SpawnedTask {
     pub(super) handle: JoinHandle<TaskFinalState>,
     pub(super) pause_sink: TaskPauseSink,
@@ -104,7 +99,6 @@ pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &CoreConfig) ->
 pub(super) fn spawn_task(
     id: DownloadId,
     spec: &DownloadSpec,
-    done_tx: mpsc::Sender<TaskDone>,
     pause_token: CancellationToken,
     resume_data: Option<ProviderResumeData>,
     runtime: ProviderRuntimeContext,
@@ -147,10 +141,18 @@ pub(super) fn spawn_task(
                         resume_from,
                         server_semaphore: shared_scheduler_semaphore,
                         global_throttle: gt_,
-                        runtime_update_tx: ru_,
+                        runtime_update_tx: ru_.clone(),
                     })
                     .await;
-                    let _ = done_tx.send(TaskDone { id, final_state }).await;
+                    // Keep final state behind the task's own runtime updates
+                    let _ = ru_
+                        .send(TaskRuntimeUpdate::Done {
+                            id,
+                            status: final_state.status,
+                            downloaded_bytes: final_state.downloaded_bytes,
+                            total_bytes: final_state.total_bytes,
+                        })
+                        .await;
                     final_state
                 }
             });

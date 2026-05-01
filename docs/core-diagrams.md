@@ -40,6 +40,7 @@ flowchart TD
   Url["URL request"] --> Spec["DownloadSpec from CoreConfig"]
   Spec --> EngineAdd["DownloadEngine::add"]
   EngineAdd --> Actor["EngineActor"]
+  Actor --> Seed["EngineEvent::TransferAdded"]
   Actor --> Provider["provider::spawn_task"]
   Provider --> Task["http::download_task"]
   Task --> Probe["probe server"]
@@ -54,8 +55,10 @@ flowchart TD
   Event --> Scheduler
   Scheduler --> Progress["ProgressUpdate and runtime update"]
   Progress --> Actor
-  Actor --> App["Downloads polling loop"]
-  App --> Rows["transfer rows, history, stats graph"]
+  Actor --> Events["EngineEvent stream"]
+  Seed --> Events
+  Events --> Frontend["GUI or CLI adapter"]
+  Frontend --> Rows["rows, progress, history, stats graph"]
   Runner --> Finalize["finalize_part_file"]
   Single --> Finalize
   Finalize --> Disk["file on disk"]
@@ -92,7 +95,8 @@ flowchart LR
   Actor --> Providers
   Actor --> Store
   Providers --> DiskWriter
-  Actor --> EventsToRows
+  Actor --> EngineEvents["EngineEvent stream"]
+  EngineEvents --> EventsToRows
   EventsToRows --> Gui
   EventsToRows --> Cli
 ```
@@ -184,17 +188,22 @@ graph TD
 flowchart TD
   Command["EngineCommand"] --> Actor["engine task"]
   Actor --> Task["provider task"]
-  Task --> Event{"what happened?"}
-  Event -->|"bytes written"| WriteStats["TransferWriteStats"]
-  Event -->|"progress tick"| Progress["TransferProgress"]
-  Event -->|"pause saved"| Paused["TransferPaused"]
-  Event -->|"rename done"| Finished["TransferFinished"]
-  Event -->|"error"| Failed["TransferFailed"]
-  Event -->|"chunk map dirty"| ChunkMap["TransferChunkMapChanged"]
+  Task --> Runtime["TaskRuntimeUpdate"]
+  Runtime -->|"progress tick"| Progress["EngineEvent::Progress"]
+  Runtime -->|"bytes written"| WriteStats["EngineEvent::DownloadBytesWritten"]
+  Runtime -->|"destination changed"| Destination["EngineEvent::DestinationChanged"]
+  Runtime -->|"control support changed"| Support["EngineEvent::ControlSupportChanged"]
+  Runtime -->|"chunk map changed"| ChunkMap["EngineEvent::ChunkMapChanged"]
+  Runtime -->|"done"| Done["finish DB state and start next queued task"]
+  Actor --> Seed["EngineEvent::TransferAdded or TransferRestored"]
+  Actor --> Removal["EngineEvent::LiveTransferRemoved"]
   WriteStats --> Frontend["frontend adapter"]
   Progress --> Frontend
-  Paused --> Frontend
-  Finished --> Frontend
-  Failed --> Frontend
+  Destination --> Frontend
+  Support --> Frontend
   ChunkMap --> Frontend
+  Seed --> Frontend
+  Removal --> Frontend
+  Done --> Actor
+  Actor --> Reply
 ```

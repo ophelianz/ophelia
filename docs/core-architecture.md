@@ -79,6 +79,8 @@ The GUI can still save a larger `Settings` struct later. The adapter should turn
 
 Current event groups:
 
+- `TransferAdded`
+- `TransferRestored`
 - `Progress`
 - `DownloadBytesWritten`
 - `DestinationChanged`
@@ -100,7 +102,7 @@ The target remains:
 - core tasks run on the runtime given by the frontend
 - shutdown uses cancel tokens and waits for tasks where cleanup matters
 
-The current actor has one high-risk pause path: active pause waits inside the actor loop. If the download task takes time to drain, the actor is not polling other engine messages.
+Active pause no longer waits inside the actor loop. The actor cancels the task token, keeps polling commands and task updates, then handles the pause when the task sends `TaskRuntimeUpdate::Done`.
 
 ## Persistence Ownership
 
@@ -173,6 +175,10 @@ Neither frontend should own HTTP range scheduling, DB schema, resume logic, or d
 - Core does not import GPUI, views, IPC, updater, tray, or GUI row types
 - Core does not accept the full GUI `Settings`
 - Frontends pass paths into core
+- Commands return real results from the actor, not only channel-send success
+- Artifact deletion is id-owned. Unknown ids return `EngineError::NotFound`
+- Task final state travels through `TaskRuntimeUpdate::Done` after earlier task updates
+- Add and restore emit a `TransferSnapshot` so frontends can seed rows from core events
 - Correctness events are lossless
 - UI progress can be coalesced
 - Bytes are counted as written after the write succeeds

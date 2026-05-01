@@ -33,7 +33,7 @@ The engine imported `Settings` and app platform paths. Slice 2 fixed this by add
 
 Async runtime lane at audit time:
 
-The engine created its own Tokio runtime. Slice 3 fixed that. Active pause still waits inside the actor loop, which can block other engine messages while the task drains.
+The engine created its own Tokio runtime. Slice 3 fixed that. The audit also found that active pause waited inside the actor loop. Slice 5 fixed that by letting task final state flow through `TaskRuntimeUpdate::Done`.
 
 Disk I/O lane:
 
@@ -86,9 +86,9 @@ rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/
 
 No matches remain.
 
-## Remaining Risks After Slice 2
+## Risks Listed After Slice 2
 
-- Active pause can block the actor loop
+- Active pause could block the actor loop. Slice 5 closed this
 - Range workers can block Tokio worker threads with sync file writes
 - Hot progress tracking uses `RangeSet` insert, sort, and merge
 - GUI adapter is not wired as a package yet
@@ -109,9 +109,9 @@ Removed:
 - the runtime field inside `DownloadEngine`
 - sync polling loops from engine notification tests
 
-Remaining runtime issue:
+Runtime issue found next:
 
-Active pause still awaits the download task inside the actor loop. Runtime ownership is fixed, but actor responsiveness during pause still needs its own slice.
+Active pause waited for the download task inside the actor loop. Slice 5 later moved task final state into the task update channel so the actor can keep polling.
 
 ## Next Slice
 
@@ -138,7 +138,7 @@ Added:
 - `EngineEvent`
 - `DownloadEngine::next_event`
 - `EngineError::Closed`
-- bounded async channels for engine commands, public events, task done, task runtime updates, and worker events
+- bounded async channels for engine commands, public events, task runtime updates, and worker events
 - `TaskRuntimeUpdate::Progress`, so download tasks report progress through the actor
 
 Removed:
@@ -152,13 +152,30 @@ Current capacities:
 
 - engine commands: 64
 - public events: 512
-- task done: 64
 - task runtime updates: 256
 - worker events: 256
 
-Remaining runtime issue:
+Follow-up found after review:
 
-Active pause still awaits the download task inside the actor loop. This is now easier to see because all public events leave through the actor.
+The first version still had two bugs in the new shape. Active pause awaited the task from inside the actor, and task final state used a separate channel that could race ahead of late task updates.
+
+## Slice 5 Result
+
+The event-stream slice now has the missing backpressure fixes.
+
+Changed:
+
+- command methods wait for actor replies through oneshot replies
+- unknown ids now return `EngineError::NotFound`
+- unsupported controls now return `EngineError::Unsupported`
+- artifact deletion takes only a download id
+- task final state now uses `TaskRuntimeUpdate::Done`
+- active pause only cancels the pause token, then the actor keeps draining updates
+- add and restore emit `TransferSnapshot` events
+
+Why this matters:
+
+Commands now tell the caller whether the actor accepted or rejected the request. Pause acceptance is not the same as paused-on-disk; the paused state still arrives later as an event. Delete-by-id cannot fall back to a frontend path. Task updates and final task state stay ordered on one channel.
 
 ## Check Log
 
@@ -194,6 +211,16 @@ Slice 4 event stream and backpressure check:
 - `cargo fmt --check -p ophelia` passed
 - `git diff --check` passed
 - stale event/channel scan returned no matches
+- core GUI-import scan returned no matches
+- `cargo clippy -p ophelia --all-targets` passed
+- `cargo test -p ophelia --tests` passed
+- `cargo bench -p ophelia --bench http_range_data --no-run` passed
+
+Slice 5 actor correctness check:
+
+- `cargo fmt --check -p ophelia` passed
+- `git diff --check` passed
+- stale task-final and old event API scan returned no matches
 - core GUI-import scan returned no matches
 - `cargo clippy -p ophelia --all-targets` passed
 - `cargo test -p ophelia --tests` passed
