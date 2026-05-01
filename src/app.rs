@@ -22,7 +22,7 @@
 //! Downloads owns the engine and the live transfer lists
 //! A background task drains engine updates every 100ms and asks GPUI to redraw
 //!
-//! Startup sequence:
+//! Startup sequence (bitch I'm NASA):
 //!   1. Load saved settings
 //!   2. Start SQLite state, DB worker, and history reader
 //!   3. Start the local IPC server
@@ -148,7 +148,7 @@ pub struct TransferListRow {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub progress: f32,
-    #[allow(dead_code)] // retained for future richer transfer rows and stats drill-downs.
+    #[allow(dead_code)] // keeping this for possible (?) ui changes
     pub speed_bps: u64,
     pub display_state: TransferDisplayState,
     pub available_actions: TransferAvailableActions,
@@ -569,9 +569,8 @@ impl Downloads {
     }
 
     /// Current download-file read rate
-    /// Nothing reports file reads yet, so keep the UI slot visible but honest
     pub fn disk_read_speed_bps(&self) -> Option<u64> {
-        Some(0)
+        Some(0) // nothing for now, it looks good i'd rather keep it
     }
 
     /// Current rate of bytes successfully written by download tasks

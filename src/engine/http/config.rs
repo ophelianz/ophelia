@@ -73,8 +73,8 @@ pub struct HttpDownloadConfig {
     pub ordering_mode: HttpDownloadOrderingMode,
     /// Extensions that use sequential range downloads in file-specific mode
     pub sequential_extensions: Vec<String>,
-    /// Optional live range strategies
-    /// Off by default
+    /// Live strategies for balanced range downloads
+    /// Sequential downloads turn these off in `task.rs`
     pub range_strategies: HttpRangeStrategyConfig,
 }
 
@@ -91,7 +91,7 @@ impl Default for HttpDownloadConfig {
             speed_limit_bps: 0,
             ordering_mode: HttpDownloadOrderingMode::Balanced,
             sequential_extensions: crate::settings::default_sequential_download_extensions(),
-            range_strategies: HttpRangeStrategyConfig::default(),
+            range_strategies: HttpRangeStrategyConfig::live_balancer(),
         }
     }
 }
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn range_strategies_are_off_by_default() {
+    fn bare_range_strategy_config_is_off() {
         assert_eq!(
             HttpRangeStrategyConfig::default(),
             HttpRangeStrategyConfig {
@@ -251,10 +251,18 @@ mod tests {
                 health_retry: false,
             }
         );
+    }
+
+    #[test]
+    fn http_downloads_default_to_live_balancer() {
         assert!(
-            !HttpDownloadConfig::default()
+            HttpDownloadConfig::default()
                 .range_strategies
                 .can_create_extra_work()
+        );
+        assert_eq!(
+            HttpDownloadConfig::default().range_strategies,
+            HttpRangeStrategyConfig::live_balancer()
         );
     }
 

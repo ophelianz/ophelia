@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn balanced_plan_defaults_to_small_work_units_and_no_live_strategies() {
+    fn balanced_plan_defaults_to_small_work_units_and_live_strategies() {
         let config = HttpDownloadConfig::default();
         let chunks = planned_chunks(mib(5) + 1, RangeOrdering::Balanced, &config);
         let plan = range_download_plan(RangeOrdering::Balanced, chunks, &config);
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(plan.ordering, RangeOrdering::Balanced);
         assert_eq!(plan.chunks.len(), 3);
         assert_eq!(plan.connection_limit, 3);
-        assert_eq!(plan.strategies, HttpRangeStrategyConfig::default());
+        assert_eq!(plan.strategies, HttpRangeStrategyConfig::live_balancer());
     }
 
     #[test]
@@ -549,15 +549,15 @@ mod tests {
     }
 
     #[test]
-    fn balanced_plan_keeps_requested_live_strategies() {
+    fn balanced_plan_respects_live_strategies_being_turned_off() {
         let config = HttpDownloadConfig {
-            range_strategies: HttpRangeStrategyConfig::live_balancer(),
+            range_strategies: HttpRangeStrategyConfig::default(),
             ..HttpDownloadConfig::default()
         };
         let chunks = planned_chunks(mib(5), RangeOrdering::Balanced, &config);
         let plan = range_download_plan(RangeOrdering::Balanced, chunks, &config);
 
-        assert_eq!(plan.strategies, HttpRangeStrategyConfig::live_balancer());
+        assert_eq!(plan.strategies, HttpRangeStrategyConfig::default());
     }
 }
 

@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
-use ophelia::engine::http::{HttpDownloadConfig, HttpRangeStrategyConfig, download_task};
+use ophelia::engine::http::{HttpDownloadConfig, download_task};
 use ophelia::engine::types::{
     ChunkSnapshot, DownloadId, DownloadStatus, HttpResumeData, ProgressUpdate,
 };
@@ -112,7 +112,6 @@ async fn progress_never_exceeds_total_during_hedged_ranges() {
             max_connections: 2,
             min_steal_bytes: 10 * 1024,
             progress_interval_ms: 10,
-            range_strategies: HttpRangeStrategyConfig::live_balancer(),
             ..HttpDownloadConfig::default()
         },
         tx,
