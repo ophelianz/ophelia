@@ -29,6 +29,7 @@ use crate::ui::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationKind {
+    #[allow(dead_code)]
     Started,
     Success,
     Error,

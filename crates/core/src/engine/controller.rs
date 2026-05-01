@@ -216,6 +216,10 @@ impl DownloadEngine {
         self.event_rx.recv().await
     }
 
+    pub fn try_next_event(&mut self) -> Option<EngineEvent> {
+        self.event_rx.try_recv().ok()
+    }
+
     pub async fn shutdown(mut self) -> Result<(), EngineError> {
         let send_result = self
             .command_reply(|reply| EngineCommand::Shutdown { reply: Some(reply) })

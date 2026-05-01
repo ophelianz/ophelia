@@ -23,10 +23,12 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DownloadId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadStatus {
     Pending,
     Downloading,
@@ -37,7 +39,7 @@ pub enum DownloadStatus {
 }
 
 /// Controls the engine can ask a download to perform
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadControlAction {
     Pause,
     Resume,
@@ -46,7 +48,7 @@ pub enum DownloadControlAction {
 }
 
 /// Controls this transfer supports
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferControlSupport {
     pub can_pause: bool,
     pub can_resume: bool,
@@ -75,27 +77,27 @@ impl TransferControlSupport {
 }
 
 /// File state for history rows
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArtifactState {
     Present,
     Deleted,
     Missing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChunkMapCellState {
     Empty,
     Partial,
     Complete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpChunkMapSnapshot {
     pub total_bytes: u64,
     pub cells: Vec<ChunkMapCellState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferChunkMapState {
     Unsupported,
     Loading,
@@ -145,7 +147,7 @@ pub enum DbEvent {
 }
 
 /// Filter for the history view
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryFilter {
     All,
     Finished,
@@ -155,7 +157,7 @@ pub enum HistoryFilter {
 }
 
 /// One download shown in history
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryRow {
     pub id: DownloadId,
     /// Source kind saved in the database
@@ -289,7 +291,7 @@ impl ProviderResumeData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressUpdate {
     pub id: DownloadId,
     pub status: DownloadStatus,
@@ -298,7 +300,7 @@ pub struct ProgressUpdate {
     pub speed_bytes_per_sec: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferSnapshot {
     pub id: DownloadId,
     pub provider_kind: String,
@@ -312,7 +314,7 @@ pub struct TransferSnapshot {
     pub chunk_map_state: TransferChunkMapState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
     TransferAdded {
         snapshot: TransferSnapshot,
@@ -348,7 +350,7 @@ pub enum EngineEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineError {
     Closed,
     NotFound {
@@ -375,7 +377,7 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 /// Why a live transfer row left the Transfers view
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveTransferRemovalAction {
     Cancelled,
     DeleteArtifact,

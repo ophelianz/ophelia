@@ -25,7 +25,6 @@ mod app_menu;
 mod assets;
 mod build_info;
 mod engine;
-mod engine_bridge;
 mod format;
 mod ipc;
 mod logging;
