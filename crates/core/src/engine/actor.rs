@@ -19,7 +19,7 @@
 
 //! Download engine actor
 //!
-//! Sits between the UI thread and download tasks
+//! Sits between frontends and download tasks
 //! Commands come in through a channel and progress goes back through another channel
 //!
 //! Queue flow:
@@ -38,7 +38,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -119,8 +119,7 @@ struct QueuedTask {
 // --- public engine handle ------------------------------------------------
 
 pub struct DownloadEngine {
-    #[allow(dead_code)] // must be held to keep the tokio runtime alive
-    runtime: Runtime,
+    actor: Option<JoinHandle<()>>,
     cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     progress_rx: mpsc::UnboundedReceiver<ProgressUpdate>,
     notification_rx: mpsc::UnboundedReceiver<EngineNotification>,
@@ -128,19 +127,19 @@ pub struct DownloadEngine {
 }
 
 impl DownloadEngine {
-    pub fn new(
+    pub fn spawn_on(
+        runtime: &Handle,
         config: CoreConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         initial_next_id: u64,
     ) -> Self {
-        let runtime = Runtime::new().expect("failed to create tokio runtime");
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (notification_tx, notification_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = mpsc::unbounded_channel::<TaskDone>();
         let (runtime_update_tx, runtime_update_rx) = mpsc::unbounded_channel::<TaskRuntimeUpdate>();
 
-        runtime.spawn(
+        let actor = runtime.spawn(
             EngineActor::new(
                 progress_tx,
                 notification_tx,
@@ -153,7 +152,7 @@ impl DownloadEngine {
         );
 
         Self {
-            runtime,
+            actor: Some(actor),
             cmd_tx,
             progress_rx,
             notification_rx,
@@ -197,12 +196,19 @@ impl DownloadEngine {
         let _ = self.cmd_tx.send(EngineCommand::UpdateConfig { config });
     }
 
-    pub fn poll_progress(&mut self) -> Option<ProgressUpdate> {
-        self.progress_rx.try_recv().ok()
+    pub async fn next_progress(&mut self) -> Option<ProgressUpdate> {
+        self.progress_rx.recv().await
     }
 
-    pub fn poll_notification(&mut self) -> Option<EngineNotification> {
-        self.notification_rx.try_recv().ok()
+    pub async fn next_notification(&mut self) -> Option<EngineNotification> {
+        self.notification_rx.recv().await
+    }
+
+    pub async fn shutdown(mut self) {
+        let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+        if let Some(actor) = self.actor.take() {
+            let _ = actor.await;
+        }
     }
 }
 

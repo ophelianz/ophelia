@@ -31,7 +31,7 @@ Today the workspace builds the core package by default. The core lives in `crate
 
 The old GUI source is parked in `crates/ophelia-gui`, but it is not a package yet. That means the GUI is intentionally behind the core rewrite right now.
 
-`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. It still creates a Tokio runtime, starts one engine actor, sends commands through an unbounded channel, and exposes polling methods for progress and notifications.
+`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. The caller gives it a Tokio `Handle`, and it spawns one engine actor on that runtime. Commands still go through an unbounded channel. Progress and notifications are now read with async `next_progress` and `next_notification` calls.
 
 The range runner is already much cleaner than the old slot model. Workers report events. The scheduler owns pending ranges, completed ranges, active attempts, optional stealing state, and optional hedge state.
 
@@ -43,7 +43,7 @@ The old `Settings` and platform path leaks are gone from core. The scan to keep 
 rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/src crates/core/benches
 ```
 
-The remaining large leak is runtime ownership. Core still hides a Tokio runtime inside `DownloadEngine::new`. That is useful for the old GUI bridge, but it is not the final shape.
+The remaining large leaks are event shape and hot-path ownership. Core still has separate progress and notification queues, and range workers still write to disk directly.
 
 ## Target Core Inputs
 
@@ -95,9 +95,9 @@ The GUI can convert those into `TransferListRow` and `HistoryListRow`. The CLI c
 
 ## Runtime Ownership
 
-The final core should expose async APIs. It should not secretly create the only Tokio runtime.
+The core now uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle and starts the engine actor there.
 
-The current GUI needs a sync-ish handle, so we can keep a GUI bridge around while rewriting. The target is:
+The target remains:
 
 - GUI owns the runtime bridge it needs
 - CLI uses `tokio::main`

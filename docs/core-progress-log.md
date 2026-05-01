@@ -31,9 +31,9 @@ Boundary/API lane at audit time:
 
 The engine imported `Settings` and app platform paths. Slice 2 fixed this by adding core config and path types.
 
-Async runtime lane:
+Async runtime lane at audit time:
 
-The engine creates its own Tokio runtime today. Active pause waits inside the actor loop, which can block other engine messages while the task drains.
+The engine created its own Tokio runtime. Slice 3 fixed that. Active pause still waits inside the actor loop, which can block other engine messages while the task drains.
 
 Disk I/O lane:
 
@@ -93,17 +93,35 @@ No matches remain.
 - Hot progress tracking uses `RangeSet` insert, sort, and merge
 - Unbounded channels are used in hot event paths
 - GUI adapter is not wired as a package yet
-- Runtime ownership is still hidden inside `DownloadEngine`
 - Restored downloads still rebuild provider config from current core config
+
+## Slice 3 Result
+
+Runtime ownership is now caller-owned. `DownloadEngine::spawn_on` takes a Tokio `Handle` instead of creating a runtime internally.
+
+Core engine tests now run under Tokio tests and wait on async engine output:
+
+- `next_progress`
+- `next_notification`
+
+Removed:
+
+- hidden `Runtime::new`
+- the runtime field inside `DownloadEngine`
+- sync polling loops from engine notification tests
+
+Remaining runtime issue:
+
+Active pause still awaits the download task inside the actor loop. Runtime ownership is fixed, but actor responsiveness during pause still needs its own slice.
 
 ## Next Slice
 
-Make runtime ownership honest.
+Fix event shape before deeper hot-path rewrites.
 
 Work items:
 
-- Replace hidden runtime ownership with async core APIs
-- Decide the command/event channel shape before adding the CLI
+- Replace separate progress and notification channels with one ordered event stream
+- Decide what events must be lossless and what can be coalesced
 - Keep a small sync bridge only if it lives outside the core package
 - Keep documenting GUI breakage instead of bending core around it
 - Add a scan or test proving core files stay free of GUI imports
@@ -131,3 +149,12 @@ Slice 2 core extraction check:
 - `cargo test -p ophelia --tests` passed
 - `cargo bench -p ophelia --bench http_range_data --no-run` passed
 - `cargo clippy -p ophelia --all-targets` passed
+
+Slice 3 runtime ownership check:
+
+- `cargo fmt --check -p ophelia` passed
+- `git diff --check` passed
+- stale core import/runtime scan returned no matches
+- `cargo clippy -p ophelia --all-targets` passed
+- `cargo test -p ophelia --tests` passed
+- `cargo bench -p ophelia --bench http_range_data --no-run` passed

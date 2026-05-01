@@ -18,7 +18,7 @@ The GUI files are parked under `crates/ophelia-gui`, but there is no GUI package
 
 The core no longer imports GUI `Settings` or app platform path helpers. Engine code receives `CoreConfig`, `DestinationPolicyConfig`, `HttpCoreConfig`, and `CorePaths`.
 
-The current engine owns a Tokio runtime internally. `DownloadEngine::new` creates the runtime, starts the actor, and exposes sync polling methods for progress and notifications.
+The current engine uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle, starts the actor, and exposes async waits for progress and notifications.
 
 ## Ground Rules
 
@@ -93,9 +93,9 @@ The extracted core does not depend on GPUI, views, IPC, updater, tray, platform 
 
 ## Slice 4: Runtime Ownership
 
-Core should expose async APIs. The GUI should own the Tokio bridge it needs, and the CLI can use `tokio::main`.
+Core now exposes an async-first engine handle. The GUI should own the Tokio bridge it needs, and the CLI can use `tokio::main`.
 
-The current engine creates its own Tokio runtime in `DownloadEngine::new`. That is a good bridge for the current GUI, but it is not the final core shape.
+`DownloadEngine::spawn_on` takes a Tokio `Handle`. That means core can spawn work without creating its own runtime. The next cleanup is event shape: one ordered event stream is easier to reason about than separate progress and notification queues.
 
 ## Slice 5: Persistence
 

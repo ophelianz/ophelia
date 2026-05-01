@@ -33,6 +33,27 @@ rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/
 
 Priority: closed
 
+### Core Created Its Own Tokio Runtime
+
+Exact behavior:
+
+Fixed. `DownloadEngine` used to call `Runtime::new` internally. Core now takes a caller-owned Tokio `Handle` through `DownloadEngine::spawn_on`.
+
+Files involved:
+
+- `crates/core/src/engine/actor.rs`
+- `crates/core/tests/engine_notifications.rs`
+
+Why it matters:
+
+Core should not decide how the frontend runs async work. The CLI can use `tokio::main`, and the GUI can own its own runtime bridge.
+
+Likely test:
+
+Keep engine tests on `#[tokio::test]` and avoid adding `Runtime::new` back to core.
+
+Priority: closed
+
 ## High
 
 ### Active Pause Can Stall The Engine Actor

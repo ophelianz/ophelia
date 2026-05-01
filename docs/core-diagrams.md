@@ -101,14 +101,15 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  CurrentGui["current GUI"] --> CurrentEngine["DownloadEngine::new"]
-  CurrentEngine --> HiddenRuntime["creates Tokio runtime"]
-  HiddenRuntime --> CurrentActor["spawns EngineActor"]
+  CurrentCaller["caller-owned Tokio runtime"] --> Handle["tokio runtime Handle"]
+  Handle --> CurrentEngine["DownloadEngine::spawn_on"]
+  CurrentEngine --> CurrentActor["spawns EngineActor"]
 
   TargetGui["target GUI"] --> GuiRuntime["GUI-owned runtime bridge"]
   TargetCli["target CLI"] --> CliRuntime["tokio::main"]
-  GuiRuntime --> AsyncCore["core async API"]
-  CliRuntime --> AsyncCore
+  GuiRuntime --> Handle
+  CliRuntime --> Handle
+  CurrentEngine --> AsyncCore["core async output"]
   AsyncCore --> CoreTasks["core tasks"]
   CoreTasks --> Shutdown["cancel and wait where cleanup matters"]
 ```
