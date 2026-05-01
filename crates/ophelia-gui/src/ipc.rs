@@ -71,14 +71,6 @@ impl Drop for IpcServer {
     }
 }
 
-impl Drop for IpcServer {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct HealthResponse {
     app: &'static str,

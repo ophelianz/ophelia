@@ -23,6 +23,7 @@ use gpui::{App, Image, ImageFormat, Tray, TrayIntent, TrayMenuItem};
 use rust_i18n::t;
 
 use crate::app_actions;
+use crate::assets::Assets;
 use crate::format::{DataQuantity, data};
 
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/logo.svg");
@@ -72,12 +73,12 @@ pub fn refresh(cx: &mut App, force: bool) {
 }
 
 fn build_tray(title: Option<String>) -> Tray {
+    let icon_bytes = Assets::new()
+        .read("logo.svg")
+        .unwrap_or_else(|_| TRAY_ICON_BYTES.to_vec());
     let mut tray = Tray::new()
         .tooltip(t!("app.name").to_string())
-        .icon(Image::from_bytes(
-            ImageFormat::Svg,
-            TRAY_ICON_BYTES.to_vec(),
-        ))
+        .icon(Image::from_bytes(ImageFormat::Svg, icon_bytes))
         .icon_template(true)
         .menu_items(build_menu());
 

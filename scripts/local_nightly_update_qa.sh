@@ -72,9 +72,23 @@ print((datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0).i
 PY
 )"
 
+qa_arch="$(uname -m)"
+case "${qa_arch}" in
+    arm64|aarch64)
+        qa_arch="arm64"
+        ;;
+    x86_64|amd64)
+        qa_arch="x86_64"
+        ;;
+    *)
+        echo "unsupported macOS architecture for updater QA: ${qa_arch}" >&2
+        exit 1
+        ;;
+esac
+
 site_dir="${lab_dir}/site"
 env_file="${lab_dir}/qa-env.sh"
-mkdir -p "${site_dir}/updates/macos/arm64"
+mkdir -p "${site_dir}/updates/macos/${qa_arch}"
 mkdir -p "$(dirname "${qa_app_path}")"
 
 cat > "${env_file}" <<EOF
@@ -82,6 +96,7 @@ export LAB_DIR='${lab_dir}'
 export SITE_DIR='${site_dir}'
 export BASE_URL='${manifest_base_url}'
 export QA_APP_PATH='${qa_app_path}'
+export QA_ARCH='${qa_arch}'
 export OLD_TS='${old_ts}'
 export NEW_TS='${new_ts}'
 export OLD_COMMIT='qa-old'
@@ -102,21 +117,16 @@ If you still need a local minisign keypair:
   minisign -G -p "${lab_dir}/ophelia.pub" -s "${lab_dir}/ophelia.key"
 
 1. Build and install the older Nightly bundle:
-  OPHELIA_BUILD_COMMIT="\$OLD_COMMIT" OPHELIA_BUILD_TIMESTAMP="\$OLD_TS" cargo bundle --release
-  cp -R target/release/bundle/osx/Ophelia.app "\$QA_APP_PATH"
+  OPHELIA_BUILD_COMMIT="\$OLD_COMMIT" OPHELIA_BUILD_TIMESTAMP="\$OLD_TS" \\
+    scripts/bundle_macos.sh --channel nightly --arch "\$QA_ARCH" --output-dir "\$LAB_DIR/old" --no-sign --no-notarize --no-minisign
+  rm -rf "\$QA_APP_PATH"
+  cp -R "\$LAB_DIR/old/Ophelia.app" "\$QA_APP_PATH"
 
 2. Build the newer Nightly bundle:
-  OPHELIA_BUILD_COMMIT="\$NEW_COMMIT" OPHELIA_BUILD_TIMESTAMP="\$NEW_TS" cargo bundle --release
+  OPHELIA_BUILD_COMMIT="\$NEW_COMMIT" OPHELIA_BUILD_TIMESTAMP="\$NEW_TS" MINISIGN_KEY_PATH="\$LAB_DIR/ophelia.key" \\
+    scripts/bundle_macos.sh --channel nightly --arch "\$QA_ARCH" --output-dir "\$SITE_DIR" --sign --notarize --minisign
 
-3. Sign, notarize, staple, and prepare the updater ZIP:
-  APP_BUNDLE="\$(find target/release/bundle -name 'Ophelia.app' | head -n 1)"
-  codesign --force --deep --options runtime --sign "\$IDENTITY" "\$APP_BUNDLE"
-  ditto -c -k --keepParent --rsrc --sequesterRsrc "\$APP_BUNDLE" "\$LAB_DIR/Ophelia-notary.zip"
-  xcrun notarytool submit "\$LAB_DIR/Ophelia-notary.zip" --keychain-profile <profile> --wait
-  xcrun stapler staple "\$APP_BUNDLE"
-  xcrun stapler validate "\$APP_BUNDLE"
-  ditto -c -k --keepParent --rsrc --sequesterRsrc "\$APP_BUNDLE" "\$SITE_DIR/Ophelia-macos-arm64.zip"
-  minisign -S -s "\$LAB_DIR/ophelia.key" -m "\$SITE_DIR/Ophelia-macos-arm64.zip"
+3. The bundle script signs, notarizes, staples, builds the updater ZIP and DMG, and minisigns both files.
 
 4. Regenerate the local manifest:
   python3 scripts/update_manifest.py \\
@@ -125,11 +135,11 @@ If you still need a local minisign keypair:
     --pub-date "\$NEW_TS" \\
     --commit "\$NEW_COMMIT" \\
     --notes-url "http://127.0.0.1:8000/notes" \\
-    --asset-url "http://127.0.0.1:8000/Ophelia-macos-arm64.zip" \\
-    --asset-size "\$(stat -f%z "\$SITE_DIR/Ophelia-macos-arm64.zip")" \\
-    --sha256 "\$(shasum -a 256 "\$SITE_DIR/Ophelia-macos-arm64.zip" | awk '{print \$1}')" \\
-    --minisign-url "http://127.0.0.1:8000/Ophelia-macos-arm64.zip.minisig" \\
-    --output "\$SITE_DIR/updates/macos/arm64/nightly.json"
+    --asset-url "http://127.0.0.1:8000/Ophelia-macos-\$QA_ARCH.zip" \\
+    --asset-size "\$(stat -f%z "\$SITE_DIR/Ophelia-macos-\$QA_ARCH.zip")" \\
+    --sha256 "\$(shasum -a 256 "\$SITE_DIR/Ophelia-macos-\$QA_ARCH.zip" | awk '{print \$1}')" \\
+    --minisign-url "http://127.0.0.1:8000/Ophelia-macos-\$QA_ARCH.zip.minisig" \\
+    --output "\$SITE_DIR/updates/macos/\$QA_ARCH/nightly.json"
 
 5. Serve the update site and launch the installed QA app:
   python3 -m http.server 8000 --directory "\$SITE_DIR"
