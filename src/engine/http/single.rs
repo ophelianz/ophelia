@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -144,10 +145,7 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
             return task_state(DownloadStatus::Error, downloaded, None);
         };
 
-        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-            .await
-            .is_err()
-        {
+        if file.write_all(&chunk).await.is_err() {
             send(DownloadStatus::Error, downloaded, None, 0);
             return task_state(DownloadStatus::Error, downloaded, None);
         }
@@ -183,6 +181,10 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
         );
     }
 
+    if file.flush().await.is_err() {
+        send(DownloadStatus::Error, downloaded, None, 0);
+        return task_state(DownloadStatus::Error, downloaded, None);
+    }
     drop(file);
     match finalize_part_file(&part_path, &destination, finalize_strategy) {
         Ok(()) => {

@@ -135,6 +135,8 @@ struct RangeDownload {
     progress_tick: Interval,
     retry_cooldown_until: Option<TokioInstant>,
     speed: ProgressSpeed,
+    pending_written_bytes: u64,
+    chunk_map_dirty: bool,
     failed: bool,
     paused: bool,
 }
@@ -226,6 +228,8 @@ impl RangeDownload {
             ),
             retry_cooldown_until: None,
             speed: ProgressSpeed::new(initial_downloaded),
+            pending_written_bytes: 0,
+            chunk_map_dirty: false,
             failed: false,
             paused: false,
         }
@@ -402,6 +406,7 @@ impl RangeDownload {
             }
             _ = self.progress_tick.tick() => {
                 self.send_progress(DownloadStatus::Downloading);
+                self.flush_runtime_updates();
             }
             _ = retry_cooldown_sleep(self.retry_cooldown_until), if self.retry_cooldown_until.is_some() => {
                 self.retry_cooldown_until = None;
@@ -426,8 +431,7 @@ impl RangeDownload {
         match action {
             SchedulerAction::Nothing => {}
             SchedulerAction::CountedProgress { .. } => {
-                self.send_progress(DownloadStatus::Downloading);
-                self.send_chunk_map();
+                self.chunk_map_dirty = true;
             }
             SchedulerAction::Requeued { range, retry_after } => {
                 self.record_retry(range);
@@ -458,19 +462,14 @@ impl RangeDownload {
         true
     }
 
-    fn track_bytes_written(&self, event: &WorkerEvent) {
+    fn track_bytes_written(&mut self, event: &WorkerEvent) {
         let WorkerEvent::BytesWritten { attempt, written } = event else {
             return;
         };
         if !self.attempts.contains_key(attempt) {
             return;
         }
-        let _ = self
-            .runtime_update_tx
-            .send(TaskRuntimeUpdate::DownloadBytesWritten {
-                id: self.id,
-                bytes: written.len(),
-            });
+        self.pending_written_bytes = self.pending_written_bytes.saturating_add(written.len());
     }
 
     fn cancel_attempt_as_hedge_loser(&self, attempt: AttemptId) {
@@ -574,22 +573,26 @@ impl RangeDownload {
     fn finish(mut self) -> super::task::TaskFinalState {
         if self.paused {
             self.save_pause_snapshot();
+            self.flush_runtime_updates();
             self.send_progress(DownloadStatus::Paused);
             return self.task_state(DownloadStatus::Paused);
         }
 
         if self.failed || !self.scheduler.is_complete() {
+            self.flush_runtime_updates();
             self.send_progress(DownloadStatus::Error);
             return self.task_state(DownloadStatus::Error);
         }
 
         match finalize_part_file(&self.part_path, &self.destination, self.finalize_strategy) {
             Ok(()) => {
+                self.flush_runtime_updates();
                 self.send_progress(DownloadStatus::Finished);
                 self.task_state(DownloadStatus::Finished)
             }
             Err(error) => {
                 tracing::error!(err = %error, "rename failed after range download");
+                self.flush_runtime_updates();
                 self.send_progress(DownloadStatus::Error);
                 self.task_state(DownloadStatus::Error)
             }
@@ -641,6 +644,32 @@ impl RangeDownload {
         } else {
             self.scheduler.downloaded_bytes()
         }
+    }
+
+    fn flush_runtime_updates(&mut self) {
+        self.flush_written_bytes();
+        self.send_dirty_chunk_map();
+    }
+
+    fn flush_written_bytes(&mut self) {
+        if self.pending_written_bytes == 0 {
+            return;
+        }
+
+        let bytes = self.pending_written_bytes;
+        self.pending_written_bytes = 0;
+        let _ = self
+            .runtime_update_tx
+            .send(TaskRuntimeUpdate::DownloadBytesWritten { id: self.id, bytes });
+    }
+
+    fn send_dirty_chunk_map(&mut self) {
+        if !self.chunk_map_dirty {
+            return;
+        }
+
+        self.chunk_map_dirty = false;
+        self.send_chunk_map();
     }
 
     fn send_chunk_map(&self) {

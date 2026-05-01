@@ -217,6 +217,57 @@ async fn chunked_http_emits_chunk_map_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn chunked_http_batches_write_stat_updates() {
+    let data = test_data(256 * 1024);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file.bin"))
+        .respond_with(RangeResponder { data: data.clone() })
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/file.bin", server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("file.bin");
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
+    download_task(
+        DownloadId(0),
+        url,
+        dest,
+        exact_destination_policy(&dir.path().join("file.bin")),
+        HttpDownloadConfig {
+            write_buffer_size: 512,
+            progress_interval_ms: 60_000,
+            ..HttpDownloadConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+        runtime_tx,
+    )
+    .await;
+
+    let mut write_updates = 0;
+    let mut written = 0_u64;
+    while let Ok(update) = runtime_rx.try_recv() {
+        if let TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } = update {
+            write_updates += 1;
+            written = written.saturating_add(bytes);
+        }
+    }
+
+    assert_eq!(written, data.len() as u64);
+    assert_eq!(write_updates, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn single_stream_fallback_no_range_support() {
     let data = test_data(5_000);
     let expected_hash = sha256(&data);
