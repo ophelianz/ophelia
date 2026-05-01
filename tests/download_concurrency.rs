@@ -28,13 +28,12 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-use ophelia::engine::http::{HttpDownloadConfig, HttpRangeStrategyConfig, download_task};
+use ophelia::engine::http::{HttpDownloadConfig, download_task};
 use ophelia::engine::types::{DownloadId, DownloadStatus};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn work_stealing_produces_correct_output() {
-    // Live stealing is opt-in. min_steal_bytes is lowered so this small test
-    // file can still exercise the path once an active range has spare tail work.
+    // min_steal_bytes is lowered so this small file can still hit stealing
     let data = test_data(128 * 1024);
     let expected_hash = sha256(&data);
 
@@ -54,7 +53,6 @@ async fn work_stealing_produces_correct_output() {
     let config = HttpDownloadConfig {
         min_connections: 4,
         min_steal_bytes: 4 * 1024,
-        range_strategies: HttpRangeStrategyConfig::live_balancer(),
         ..HttpDownloadConfig::default()
     };
     download_task(
@@ -83,7 +81,7 @@ async fn work_stealing_produces_correct_output() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn balanced_default_uses_plain_range_work_units() {
+async fn balanced_default_downloads_with_live_strategy_defaults() {
     let data = test_data(128 * 1024);
     let expected_hash = sha256(&data);
 
@@ -154,7 +152,6 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         min_connections: 2,
         max_connections: 2,
         min_steal_bytes: 10 * 1024,
-        range_strategies: HttpRangeStrategyConfig::live_balancer(),
         ..HttpDownloadConfig::default()
     };
     download_task(
@@ -210,7 +207,6 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
         min_connections: 2,
         max_connections: 2,
         min_steal_bytes: 10 * 1024,
-        range_strategies: HttpRangeStrategyConfig::live_balancer(),
         ..HttpDownloadConfig::default()
     };
     download_task(
