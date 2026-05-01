@@ -27,12 +27,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use ophelia::engine::DestinationPolicyConfig;
 use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::{DownloadTaskRequest, HttpDownloadConfig, TokenBucket};
 use ophelia::engine::types::{
     ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
 };
-use ophelia::settings::Settings;
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(Semaphore::MAX_PERMITS))
@@ -43,7 +43,7 @@ pub fn unlimited_throttle() -> Arc<TokenBucket> {
 }
 
 pub fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
-    DestinationPolicy::for_resolved_destination(&Settings::default(), destination)
+    DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
 }
 
 #[allow(clippy::too_many_arguments)]

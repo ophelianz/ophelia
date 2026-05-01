@@ -25,7 +25,7 @@ use std::ffi::OsStr;
 use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use crate::settings::{CollisionStrategy, DestinationRule, Settings};
+use crate::config::{CollisionPolicy, DestinationPolicyConfig, DestinationRuleConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStrategy {
@@ -97,30 +97,33 @@ impl DestinationOverrides {
 #[derive(Debug, Clone)]
 pub struct DestinationPolicy {
     default_download_dir: PathBuf,
-    collision_strategy: CollisionStrategy,
+    collision_strategy: CollisionPolicy,
     rules_enabled: bool,
-    rules: Vec<DestinationRule>,
+    rules: Vec<DestinationRuleConfig>,
     overrides: DestinationOverrides,
 }
 
 impl DestinationPolicy {
-    pub fn automatic(settings: &Settings) -> Self {
-        Self::with_overrides(settings, DestinationOverrides::default())
+    pub fn automatic(config: &DestinationPolicyConfig) -> Self {
+        Self::with_overrides(config, DestinationOverrides::default())
     }
 
-    pub fn with_overrides(settings: &Settings, overrides: DestinationOverrides) -> Self {
+    pub fn with_overrides(
+        config: &DestinationPolicyConfig,
+        overrides: DestinationOverrides,
+    ) -> Self {
         Self {
-            default_download_dir: settings.download_dir(),
-            collision_strategy: settings.collision_strategy,
-            rules_enabled: settings.destination_rules_enabled,
-            rules: settings.destination_rules.clone(),
+            default_download_dir: config.default_download_dir.clone(),
+            collision_strategy: config.collision_strategy,
+            rules_enabled: config.rules_enabled,
+            rules: config.rules.clone(),
             overrides,
         }
     }
 
-    pub fn for_resolved_destination(settings: &Settings, destination: &Path) -> Self {
+    pub fn for_resolved_destination(config: &DestinationPolicyConfig, destination: &Path) -> Self {
         Self::with_overrides(
-            settings,
+            config,
             DestinationOverrides::for_resolved_destination(destination),
         )
     }
@@ -135,14 +138,12 @@ impl DestinationPolicy {
             .unwrap_or_else(|| fallback_filename_from_url(url));
         let target_dir = self.target_dir_for(&filename);
         let destination = match self.collision_strategy {
-            CollisionStrategy::Rename => {
-                unique_destination(join_destination(&target_dir, &filename))
-            }
-            CollisionStrategy::Replace => join_destination(&target_dir, &filename),
+            CollisionPolicy::Rename => unique_destination(join_destination(&target_dir, &filename)),
+            CollisionPolicy::Replace => join_destination(&target_dir, &filename),
         };
         let finalize_strategy = match self.collision_strategy {
-            CollisionStrategy::Rename => FinalizeStrategy::MoveNoReplace,
-            CollisionStrategy::Replace => FinalizeStrategy::ReplaceExisting,
+            CollisionPolicy::Rename => FinalizeStrategy::MoveNoReplace,
+            CollisionPolicy::Replace => FinalizeStrategy::ReplaceExisting,
         };
         ResolvedDestination {
             part_path: part_path_for(&destination),
@@ -163,8 +164,8 @@ impl DestinationPolicy {
 
     pub fn finalize_strategy(&self) -> FinalizeStrategy {
         match self.collision_strategy {
-            CollisionStrategy::Rename => FinalizeStrategy::MoveNoReplace,
-            CollisionStrategy::Replace => FinalizeStrategy::ReplaceExisting,
+            CollisionPolicy::Rename => FinalizeStrategy::MoveNoReplace,
+            CollisionPolicy::Replace => FinalizeStrategy::ReplaceExisting,
         }
     }
 
@@ -190,9 +191,9 @@ impl DestinationPolicy {
 pub fn preview_auto_destination(
     url: &str,
     suggested_filename: Option<&str>,
-    settings: &Settings,
+    config: &DestinationPolicyConfig,
 ) -> PathBuf {
-    DestinationPolicy::automatic(settings)
+    DestinationPolicy::automatic(config)
         .resolve(url, suggested_filename)
         .destination
 }
@@ -268,7 +269,7 @@ pub(crate) fn normalize_filename_component(filename: &str) -> Option<String> {
     }
 }
 
-fn rule_matches_extension(rule: &DestinationRule, filename: &str) -> bool {
+fn rule_matches_extension(rule: &DestinationRuleConfig, filename: &str) -> bool {
     let Some(extension) = normalized_extension(filename) else {
         return false;
     };
@@ -400,42 +401,36 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    fn settings_for(dir: &Path) -> Settings {
-        Settings {
-            default_download_dir: Some(dir.to_path_buf()),
-            destination_rules_enabled: false,
-            ..Settings::default()
+    fn config_for(dir: &Path) -> DestinationPolicyConfig {
+        DestinationPolicyConfig {
+            default_download_dir: dir.to_path_buf(),
+            rules_enabled: false,
+            ..DestinationPolicyConfig::default()
         }
     }
 
     #[test]
     fn first_enabled_matching_rule_wins_case_insensitively() {
         let root = temp_dir();
-        let settings = Settings {
-            default_download_dir: Some(root.path().join("Downloads")),
-            destination_rules_enabled: true,
-            destination_rules: vec![
-                DestinationRule {
-                    id: "movies".into(),
-                    label: "Movies".into(),
+        let config = DestinationPolicyConfig {
+            default_download_dir: root.path().join("Downloads"),
+            rules_enabled: true,
+            rules: vec![
+                DestinationRuleConfig {
                     enabled: true,
                     target_dir: root.path().join("Movies"),
                     extensions: vec![".mkv".into(), ".mp4".into()],
-                    icon_name: None,
                 },
-                DestinationRule {
-                    id: "videos".into(),
-                    label: "Videos".into(),
+                DestinationRuleConfig {
                     enabled: true,
                     target_dir: root.path().join("Videos"),
                     extensions: vec!["MP4".into()],
-                    icon_name: None,
                 },
             ],
-            ..Settings::default()
+            ..DestinationPolicyConfig::default()
         };
 
-        let resolved = DestinationPolicy::automatic(&settings)
+        let resolved = DestinationPolicy::automatic(&config)
             .resolve("https://example.com/trailer.mp4", Some("Trailer.MP4"));
 
         assert_eq!(
@@ -447,22 +442,19 @@ mod tests {
     #[test]
     fn no_matching_rule_falls_back_to_default_download_dir() {
         let root = temp_dir();
-        let settings = Settings {
-            default_download_dir: Some(root.path().join("Downloads")),
-            destination_rules_enabled: true,
-            destination_rules: vec![DestinationRule {
-                id: "music".into(),
-                label: "Music".into(),
+        let config = DestinationPolicyConfig {
+            default_download_dir: root.path().join("Downloads"),
+            rules_enabled: true,
+            rules: vec![DestinationRuleConfig {
                 enabled: true,
                 target_dir: root.path().join("Music"),
                 extensions: vec![".flac".into()],
-                icon_name: None,
             }],
-            ..Settings::default()
+            ..DestinationPolicyConfig::default()
         };
 
-        let resolved = DestinationPolicy::automatic(&settings)
-            .resolve("https://example.com/archive.zip", None);
+        let resolved =
+            DestinationPolicy::automatic(&config).resolve("https://example.com/archive.zip", None);
 
         assert_eq!(
             resolved.destination,
@@ -473,38 +465,32 @@ mod tests {
     #[test]
     fn user_overrides_only_filename_and_keeps_directory_automatic() {
         let root = temp_dir();
-        let settings = Settings {
-            default_download_dir: Some(root.path().join("Downloads")),
-            destination_rules_enabled: true,
-            destination_rules: vec![
-                DestinationRule {
-                    id: "music".into(),
-                    label: "Music".into(),
+        let config = DestinationPolicyConfig {
+            default_download_dir: root.path().join("Downloads"),
+            rules_enabled: true,
+            rules: vec![
+                DestinationRuleConfig {
                     enabled: true,
                     target_dir: root.path().join("Music"),
                     extensions: vec![".mp3".into()],
-                    icon_name: None,
                 },
-                DestinationRule {
-                    id: "videos".into(),
-                    label: "Videos".into(),
+                DestinationRuleConfig {
                     enabled: true,
                     target_dir: root.path().join("Videos"),
                     extensions: vec![".mkv".into()],
-                    icon_name: None,
                 },
             ],
-            ..Settings::default()
+            ..DestinationPolicyConfig::default()
         };
         let auto_destination =
-            preview_auto_destination("https://example.com/song.mp3", None, &settings);
+            preview_auto_destination("https://example.com/song.mp3", None, &config);
 
         let overrides = DestinationOverrides::from_user_destination(
             &root.path().join("Music").join("movie.mkv"),
             &auto_destination,
         )
         .unwrap();
-        let resolved = DestinationPolicy::with_overrides(&settings, overrides)
+        let resolved = DestinationPolicy::with_overrides(&config, overrides)
             .resolve("https://example.com/song.mp3", None);
 
         assert_eq!(
@@ -527,16 +513,16 @@ mod tests {
     #[test]
     fn user_overrides_only_directory_and_keeps_filename_backend_driven() {
         let root = temp_dir();
-        let settings = settings_for(&root.path().join("Downloads"));
+        let config = config_for(&root.path().join("Downloads"));
         let auto_destination =
-            preview_auto_destination("https://example.com/song.mp3", None, &settings);
+            preview_auto_destination("https://example.com/song.mp3", None, &config);
 
         let overrides = DestinationOverrides::from_user_destination(
             &root.path().join("Custom").join("song.mp3"),
             &auto_destination,
         )
         .unwrap();
-        let resolved = DestinationPolicy::with_overrides(&settings, overrides)
+        let resolved = DestinationPolicy::with_overrides(&config, overrides)
             .resolve("https://example.com/song.mp3", Some("renamed.flac"));
 
         assert_eq!(
@@ -561,7 +547,7 @@ mod tests {
         let preview = preview_auto_destination(
             "https://example.com/file.bin",
             None,
-            &settings_for(&downloads),
+            &config_for(&downloads),
         );
 
         assert_eq!(preview, downloads.join("file.bin"));
@@ -575,7 +561,7 @@ mod tests {
         std::fs::create_dir_all(&downloads).unwrap();
         std::fs::write(downloads.join("movie.mkv"), b"old").unwrap();
 
-        let resolved = DestinationPolicy::automatic(&settings_for(&downloads))
+        let resolved = DestinationPolicy::automatic(&config_for(&downloads))
             .resolve("https://example.com/movie.mkv", None);
 
         assert_eq!(resolved.destination, downloads.join("movie (1).mkv"));
@@ -587,7 +573,7 @@ mod tests {
         let root = temp_dir();
         let downloads = root.path().join("Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
-        let resolved = DestinationPolicy::automatic(&settings_for(&downloads))
+        let resolved = DestinationPolicy::automatic(&config_for(&downloads))
             .resolve("https://example.com/file.bin", None);
         std::fs::write(&resolved.part_path, b"partial").unwrap();
 
@@ -616,21 +602,18 @@ mod tests {
     #[test]
     fn resolve_checked_creates_missing_rule_directories() {
         let root = temp_dir();
-        let settings = Settings {
-            default_download_dir: Some(root.path().join("Downloads")),
-            destination_rules_enabled: true,
-            destination_rules: vec![DestinationRule {
-                id: "videos".into(),
-                label: "Videos".into(),
+        let config = DestinationPolicyConfig {
+            default_download_dir: root.path().join("Downloads"),
+            rules_enabled: true,
+            rules: vec![DestinationRuleConfig {
                 enabled: true,
                 target_dir: root.path().join("Videos"),
                 extensions: vec![".mp4".into()],
-                icon_name: None,
             }],
-            ..Settings::default()
+            ..DestinationPolicyConfig::default()
         };
 
-        let resolved = DestinationPolicy::automatic(&settings)
+        let resolved = DestinationPolicy::automatic(&config)
             .resolve_checked("https://example.com/movie.mp4", None)
             .unwrap();
 

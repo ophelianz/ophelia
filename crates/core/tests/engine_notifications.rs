@@ -25,7 +25,18 @@ use ophelia::engine::{
     ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineNotification,
     LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
 };
-use ophelia::settings::Settings;
+use ophelia::engine::{CoreConfig, DestinationPolicyConfig};
+
+fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
+    DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
+}
+
+fn engine_config(max_concurrent_downloads: usize) -> CoreConfig {
+    CoreConfig {
+        max_concurrent_downloads,
+        ..CoreConfig::default()
+    }
+}
 
 fn wait_for_matching_notification(
     engine: &mut DownloadEngine,
@@ -170,18 +181,14 @@ fn spawn_slow_range_server(
 #[test]
 fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let settings = Settings {
-        max_concurrent_downloads: 0,
-        ..Settings::default()
-    };
-    let mut engine = DownloadEngine::new(settings, db_tx, 1);
+    let mut engine = DownloadEngine::new(engine_config(0), db_tx, 1);
 
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig::default(),
     ));
 
@@ -241,7 +248,7 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let id = engine.add(DownloadSpec::http(
         "https://example.com/file.bin".to_string(),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig::default(),
     ));
     std::fs::write(&destination, b"partial").unwrap();
@@ -271,13 +278,13 @@ fn single_stream_http_emits_runtime_control_support_narrowing() {
     let server = spawn_no_content_length_server(vec![7u8; 2048]);
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         format!("http://{server}/file.bin"),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig::default(),
     ));
 
@@ -311,13 +318,13 @@ fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         format!("http://{server}/file.bin"),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig::default(),
     ));
 
@@ -335,13 +342,13 @@ fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let server = spawn_slow_range_server(vec![5u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         format!("http://{server}/file.bin"),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig {
             speed_limit_bps: 20_000,
             write_buffer_size: 1024,
@@ -406,13 +413,13 @@ fn pausing_active_http_clears_chunk_map_to_unsupported() {
     let server = spawn_slow_range_server(vec![9u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
         format!("http://{server}/file.bin"),
         destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        exact_destination_policy(&destination),
         HttpDownloadConfig {
             speed_limit_bps: 20_000,
             write_buffer_size: 1024,
@@ -456,11 +463,7 @@ fn pausing_active_http_starts_next_queued_download() {
         spawn_slow_range_server(vec![2u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let settings = Settings {
-        max_concurrent_downloads: 1,
-        ..Settings::default()
-    };
-    let mut engine = DownloadEngine::new(settings, db_tx, 1);
+    let mut engine = DownloadEngine::new(engine_config(1), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let first_destination = tempdir.path().join("first.bin");
     let second_destination = tempdir.path().join("second.bin");
@@ -468,7 +471,7 @@ fn pausing_active_http_starts_next_queued_download() {
     let first_id = engine.add(DownloadSpec::http(
         format!("http://{first_server}/first.bin"),
         first_destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &first_destination),
+        exact_destination_policy(&first_destination),
         HttpDownloadConfig {
             speed_limit_bps: 20_000,
             write_buffer_size: 1024,
@@ -478,7 +481,7 @@ fn pausing_active_http_starts_next_queued_download() {
     let second_id = engine.add(DownloadSpec::http(
         format!("http://{second_server}/second.bin"),
         second_destination.clone(),
-        DestinationPolicy::for_resolved_destination(&Settings::default(), &second_destination),
+        exact_destination_policy(&second_destination),
         HttpDownloadConfig {
             speed_limit_bps: 20_000,
             write_buffer_size: 1024,
@@ -521,7 +524,7 @@ fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
     let server = spawn_slow_range_server(data.clone(), 8192, Duration::from_millis(0));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let part_path = part_path_for(&destination);
@@ -532,7 +535,7 @@ fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
         id,
         format!("http://{server}/file.bin"),
         destination.clone(),
-        &Settings::default(),
+        &DestinationPolicyConfig::default(),
         HttpDownloadConfig::default(),
         None,
     ));

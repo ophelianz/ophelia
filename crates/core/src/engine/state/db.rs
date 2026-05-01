@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
+use crate::config::CorePaths;
 use crate::engine::destination::part_path_for;
 use crate::engine::state::http;
 use crate::engine::types::{
     ArtifactState, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
     PersistedDownloadSource, ProviderResumeData, SavedDownload,
 };
-use crate::platform::paths::{app_data_dir, legacy_app_support_dir};
 
 #[cfg(test)]
 const HTTP_PROVIDER_KIND: &str = "http";
@@ -38,15 +38,14 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open() -> rusqlite::Result<Self> {
-        let path = db_path();
-        if let Err(error) = ensure_canonical_db_path(&path) {
+    pub fn open(paths: &CorePaths) -> rusqlite::Result<Self> {
+        if let Err(error) = ensure_canonical_db_path(paths) {
             tracing::warn!(
-                destination = %path.display(),
+                destination = %paths.database_path.display(),
                 "failed to migrate legacy database location: {error}"
             );
         }
-        Self::open_at(path)
+        Self::open_at(&paths.database_path)
     }
 
     pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
@@ -343,18 +342,11 @@ impl Db {
     }
 }
 
-pub fn db_path() -> PathBuf {
-    app_data_dir().join("Ophelia").join("downloads.db")
-}
-
-fn ensure_canonical_db_path(canonical_path: &Path) -> io::Result<()> {
-    migrate_legacy_db_files(&legacy_db_path(), canonical_path)
-}
-
-fn legacy_db_path() -> PathBuf {
-    legacy_app_support_dir()
-        .join("Ophelia")
-        .join("downloads.db")
+fn ensure_canonical_db_path(paths: &CorePaths) -> io::Result<()> {
+    let Some(legacy_path) = &paths.legacy_database_path else {
+        return Ok(());
+    };
+    migrate_legacy_db_files(legacy_path, &paths.database_path)
 }
 
 fn migrate_legacy_db_files(legacy_path: &Path, canonical_path: &Path) -> io::Result<()> {
@@ -417,8 +409,8 @@ pub struct HistoryReader {
 }
 
 impl HistoryReader {
-    pub fn open() -> rusqlite::Result<Self> {
-        Self::open_at(db_path())
+    pub fn open(paths: &CorePaths) -> rusqlite::Result<Self> {
+        Self::open_at(&paths.database_path)
     }
 
     pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
@@ -690,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_changed_updates_restore_and_history_views() {
+    fn destination_changed_updates_restore_and_history_rows() {
         let (_dir, db_path) = temp_db_path();
         let db = Db::open_at(&db_path).unwrap();
 

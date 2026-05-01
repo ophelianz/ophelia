@@ -22,6 +22,7 @@ mod http;
 use db::Db;
 pub use db::HistoryReader;
 
+use crate::config::CorePaths;
 use crate::engine::types::{DbEvent, SavedDownload};
 
 pub struct DbWorkerHandle {
@@ -60,9 +61,9 @@ pub struct StateBootstrap {
     pub(crate) worker: DbWorkerHandle,
 }
 
-pub fn bootstrap() -> rusqlite::Result<StateBootstrap> {
-    let db = Db::open()?;
-    let history_reader = HistoryReader::open()?;
+pub fn bootstrap(paths: &CorePaths) -> rusqlite::Result<StateBootstrap> {
+    let db = Db::open(paths)?;
+    let history_reader = HistoryReader::open(paths)?;
     bootstrap_from(db, history_reader)
 }
 
