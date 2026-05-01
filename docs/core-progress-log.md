@@ -68,16 +68,22 @@ A tiny CLI can drive the engine without `app::Downloads`. The clean path is a co
 
 ## Next Slice
 
-Define the core boundary in place.
+Build the core-first boundary.
 
 Work items:
 
-- Add core-facing config and path types inside the current crate
+- Create the workspace shape earlier if that makes core cleaner
+- Make `ophelia-core` compile without GPUI as soon as practical
+- Add core-facing config and path types
 - Convert GUI `Settings` into those types at the app boundary
 - Change engine entry points to accept core config, not `Settings`
-- Keep the GUI working
+- Document any temporary GUI breakage instead of bending core around it
 - Add tests for settings-to-core conversion
 - Add a scan or test proving engine files no longer import `crate::settings`
+
+Policy update:
+
+Core quality, measured performance, and clean async Rust are the hard constraints. The GUI does not need to keep working after every core slice.
 
 ## Check Log
 
