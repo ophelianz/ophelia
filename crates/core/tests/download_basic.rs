@@ -23,7 +23,9 @@ use common::*;
 use std::sync::{Arc, Mutex};
 
 use ophelia::engine::destination::DestinationPolicy;
-use ophelia::settings::{CollisionStrategy, DestinationRule, HttpDownloadOrderingMode, Settings};
+use ophelia::engine::{
+    CollisionPolicy, DestinationPolicyConfig, DestinationRuleConfig, HttpOrderingMode,
+};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
@@ -417,21 +419,18 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
         .await;
 
     let root = tempfile::tempdir().unwrap();
-    let settings = Settings {
-        default_download_dir: Some(root.path().join("Downloads")),
-        destination_rules_enabled: true,
-        destination_rules: vec![DestinationRule {
-            id: "movies".into(),
-            label: "Movies".into(),
+    let destination_config = DestinationPolicyConfig {
+        default_download_dir: root.path().join("Downloads"),
+        rules_enabled: true,
+        rules: vec![DestinationRuleConfig {
             enabled: true,
             target_dir: root.path().join("Movies"),
             extensions: vec![".mp4".into()],
-            icon_name: None,
         }],
-        ..Settings::default()
+        ..DestinationPolicyConfig::default()
     };
     let url = format!("{}/download", server.uri());
-    let initial_destination = settings.download_dir().join("download");
+    let initial_destination = destination_config.default_download_dir.join("download");
     let destination_sink = Arc::new(Mutex::new(None));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, _runtime_rx) = runtime_updates_channel();
@@ -440,7 +439,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
         DownloadId(0),
         url,
         initial_destination,
-        DestinationPolicy::automatic(&settings),
+        DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
         tx,
         CancellationToken::new(),
@@ -476,12 +475,12 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
         .await;
 
     let root = tempfile::tempdir().unwrap();
-    let settings = Settings {
-        default_download_dir: Some(root.path().join("Downloads")),
-        collision_strategy: CollisionStrategy::Replace,
-        ..Settings::default()
+    let destination_config = DestinationPolicyConfig {
+        default_download_dir: root.path().join("Downloads"),
+        collision_strategy: CollisionPolicy::Replace,
+        ..DestinationPolicyConfig::default()
     };
-    let destination = settings.download_dir().join("file.bin");
+    let destination = destination_config.default_download_dir.join("file.bin");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, b"old").unwrap();
 
@@ -491,7 +490,7 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
-        DestinationPolicy::automatic(&settings),
+        DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
         tx,
         CancellationToken::new(),
@@ -521,12 +520,12 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
         .await;
 
     let root = tempfile::tempdir().unwrap();
-    let settings = Settings {
-        default_download_dir: Some(root.path().join("Downloads")),
-        collision_strategy: CollisionStrategy::Replace,
-        ..Settings::default()
+    let destination_config = DestinationPolicyConfig {
+        default_download_dir: root.path().join("Downloads"),
+        collision_strategy: CollisionPolicy::Replace,
+        ..DestinationPolicyConfig::default()
     };
-    let destination = settings.download_dir().join("file.bin");
+    let destination = destination_config.default_download_dir.join("file.bin");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, b"old").unwrap();
 
@@ -536,7 +535,7 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
-        DestinationPolicy::automatic(&settings),
+        DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
         tx,
         CancellationToken::new(),
@@ -566,11 +565,11 @@ async fn active_part_file_duplicate_returns_error() {
         .await;
 
     let root = tempfile::tempdir().unwrap();
-    let settings = Settings {
-        default_download_dir: Some(root.path().join("Downloads")),
-        ..Settings::default()
+    let destination_config = DestinationPolicyConfig {
+        default_download_dir: root.path().join("Downloads"),
+        ..DestinationPolicyConfig::default()
     };
-    let destination = settings.download_dir().join("file.bin");
+    let destination = destination_config.default_download_dir.join("file.bin");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(
         destination.with_file_name("file.bin.ophelia_part"),
@@ -584,7 +583,7 @@ async fn active_part_file_duplicate_returns_error() {
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination,
-        DestinationPolicy::automatic(&settings),
+        DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
         tx,
         CancellationToken::new(),
@@ -627,7 +626,7 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
         HttpDownloadConfig {
             min_connections: 3,
             max_connections: 3,
-            ordering_mode: HttpDownloadOrderingMode::Sequential,
+            ordering_mode: HttpOrderingMode::Sequential,
             write_buffer_size: 1024,
             ..HttpDownloadConfig::default()
         },
@@ -675,7 +674,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
         HttpDownloadConfig {
             min_connections: 4,
             max_connections: 4,
-            ordering_mode: HttpDownloadOrderingMode::Sequential,
+            ordering_mode: HttpOrderingMode::Sequential,
             speed_limit_bps: 8_000,
             write_buffer_size: 512,
             ..HttpDownloadConfig::default()

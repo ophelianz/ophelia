@@ -27,6 +27,10 @@ pub mod spec;
 pub mod state;
 pub mod types;
 
+pub use crate::config::{
+    CollisionPolicy, CoreConfig, CorePaths, DestinationPolicyConfig, DestinationRuleConfig,
+    HttpCoreConfig, HttpOrderingMode,
+};
 pub use actor::DownloadEngine;
 pub use spec::{AddDownloadRequest, DownloadSource, DownloadSpec, RestoredDownload};
 pub use types::*;

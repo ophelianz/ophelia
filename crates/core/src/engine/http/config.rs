@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use crate::settings::{HttpDownloadOrderingMode, Settings};
+use crate::config::{HttpCoreConfig, HttpOrderingMode, default_sequential_download_extensions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RangeOrdering {
@@ -70,7 +70,7 @@ pub struct HttpDownloadConfig {
     ///         0 = unlimited
     pub speed_limit_bps: u64,
     /// HTTP range order from settings
-    pub ordering_mode: HttpDownloadOrderingMode,
+    pub ordering_mode: HttpOrderingMode,
     /// Extensions that use sequential range downloads in file-specific mode
     pub sequential_extensions: Vec<String>,
     /// Live strategies for balanced range downloads
@@ -89,28 +89,28 @@ impl Default for HttpDownloadConfig {
             max_retries_per_chunk: 3,
             min_steal_bytes: 4 * 1024 * 1024,
             speed_limit_bps: 0,
-            ordering_mode: HttpDownloadOrderingMode::Balanced,
-            sequential_extensions: crate::settings::default_sequential_download_extensions(),
+            ordering_mode: HttpOrderingMode::Balanced,
+            sequential_extensions: default_sequential_download_extensions(),
             range_strategies: HttpRangeStrategyConfig::live_balancer(),
         }
     }
 }
 
 impl HttpDownloadConfig {
-    pub fn from_settings(settings: &Settings) -> Self {
+    pub fn from_core_config(config: &HttpCoreConfig) -> Self {
         Self {
-            max_connections: settings.max_connections_per_download,
-            ordering_mode: settings.http_download_ordering_mode,
-            sequential_extensions: settings.sequential_download_extensions.clone(),
+            max_connections: config.max_connections_per_download,
+            ordering_mode: config.ordering_mode,
+            sequential_extensions: config.sequential_extensions.clone(),
             ..Self::default()
         }
     }
 
     pub(crate) fn resolved_ordering_for_destination(&self, destination: &Path) -> RangeOrdering {
         match self.ordering_mode {
-            HttpDownloadOrderingMode::Balanced => RangeOrdering::Balanced,
-            HttpDownloadOrderingMode::Sequential => RangeOrdering::Sequential,
-            HttpDownloadOrderingMode::FileSpecific => {
+            HttpOrderingMode::Balanced => RangeOrdering::Balanced,
+            HttpOrderingMode::Sequential => RangeOrdering::Sequential,
+            HttpOrderingMode::FileSpecific => {
                 if matches_sequential_extension(destination, &self.sequential_extensions) {
                     RangeOrdering::Sequential
                 } else {
@@ -152,28 +152,29 @@ fn normalize_extension(extension: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DestinationPolicyConfig;
     use crate::engine::destination::{DestinationOverrides, DestinationPolicy};
 
     #[test]
     fn ordering_modes_resolve_expected_transfer_order() {
         let cases = [
             (
-                HttpDownloadOrderingMode::Balanced,
+                HttpOrderingMode::Balanced,
                 "/tmp/movie.mkv",
                 RangeOrdering::Balanced,
             ),
             (
-                HttpDownloadOrderingMode::Sequential,
+                HttpOrderingMode::Sequential,
                 "/tmp/readme.txt",
                 RangeOrdering::Sequential,
             ),
             (
-                HttpDownloadOrderingMode::FileSpecific,
+                HttpOrderingMode::FileSpecific,
                 "/tmp/movie.MKV",
                 RangeOrdering::Sequential,
             ),
             (
-                HttpDownloadOrderingMode::FileSpecific,
+                HttpOrderingMode::FileSpecific,
                 "/tmp/readme.txt",
                 RangeOrdering::Balanced,
             ),
@@ -194,15 +195,18 @@ mod tests {
 
     #[test]
     fn explicit_filename_override_beats_server_filename_for_file_specific_mode() {
-        let settings = Settings {
-            http_download_ordering_mode: HttpDownloadOrderingMode::FileSpecific,
-            sequential_download_extensions: vec![".mkv".into()],
-            default_download_dir: Some(Path::new("/tmp/downloads").to_path_buf()),
-            ..Settings::default()
+        let http_config = HttpCoreConfig {
+            ordering_mode: HttpOrderingMode::FileSpecific,
+            sequential_extensions: vec![".mkv".into()],
+            ..HttpCoreConfig::default()
         };
-        let config = HttpDownloadConfig::from_settings(&settings);
+        let destination_config = DestinationPolicyConfig {
+            default_download_dir: Path::new("/tmp/downloads").to_path_buf(),
+            ..DestinationPolicyConfig::default()
+        };
+        let config = HttpDownloadConfig::from_core_config(&http_config);
         let policy = DestinationPolicy::with_overrides(
-            &settings,
+            &destination_config,
             DestinationOverrides {
                 explicit_directory: None,
                 explicit_filename: Some("notes.txt".into()),
@@ -218,15 +222,18 @@ mod tests {
 
     #[test]
     fn server_filename_refinement_controls_file_specific_mode_without_explicit_filename() {
-        let settings = Settings {
-            http_download_ordering_mode: HttpDownloadOrderingMode::FileSpecific,
-            sequential_download_extensions: vec![".mkv".into()],
-            default_download_dir: Some(Path::new("/tmp/downloads").to_path_buf()),
-            ..Settings::default()
+        let http_config = HttpCoreConfig {
+            ordering_mode: HttpOrderingMode::FileSpecific,
+            sequential_extensions: vec![".mkv".into()],
+            ..HttpCoreConfig::default()
         };
-        let config = HttpDownloadConfig::from_settings(&settings);
+        let destination_config = DestinationPolicyConfig {
+            default_download_dir: Path::new("/tmp/downloads").to_path_buf(),
+            ..DestinationPolicyConfig::default()
+        };
+        let config = HttpDownloadConfig::from_core_config(&http_config);
         let policy = DestinationPolicy::with_overrides(
-            &settings,
+            &destination_config,
             DestinationOverrides {
                 explicit_directory: Some(Path::new("/tmp/media").to_path_buf()),
                 explicit_filename: None,

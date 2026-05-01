@@ -28,13 +28,13 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::CoreConfig;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
     PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TaskRuntimeUpdate,
     TransferControlSupport,
 };
-use crate::settings::Settings;
 
 pub(super) struct TaskDone {
     pub(super) id: DownloadId,
@@ -75,12 +75,12 @@ pub(super) enum TaskDestinationSink {
     Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
-pub(super) fn capabilities(spec: &DownloadSpec, settings: &Settings) -> ProviderCapabilities {
+pub(super) fn capabilities(spec: &DownloadSpec, config: &CoreConfig) -> ProviderCapabilities {
     match &spec.source {
         DownloadSource::Http { url, .. } => ProviderCapabilities {
             shared_scheduler: Some(SharedSchedulerRequirement {
                 key: SchedulerKey::Hostname(host_from_url(url)),
-                limit: settings.max_connections_per_server,
+                limit: config.http.max_connections_per_server,
             }),
         },
     }
@@ -96,9 +96,9 @@ pub(super) fn supports_control_action(spec: &DownloadSpec, action: DownloadContr
     lifecycle_capabilities(spec).supports(action)
 }
 
-pub(super) fn shared_scheduler_limit(key: &SchedulerKey, settings: &Settings) -> Option<usize> {
+pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &CoreConfig) -> Option<usize> {
     match key {
-        SchedulerKey::Hostname(_) => Some(settings.max_connections_per_server),
+        SchedulerKey::Hostname(_) => Some(config.http.max_connections_per_server),
     }
 }
 
@@ -202,25 +202,30 @@ fn host_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CoreConfig, DestinationPolicyConfig, HttpCoreConfig};
     use crate::engine::destination::DestinationPolicy;
     use crate::engine::http::HttpDownloadConfig;
     use std::path::PathBuf;
 
     #[test]
     fn capabilities_report_http_hostname_scheduler_key() {
-        let settings = Settings {
-            max_connections_per_server: 6,
-            ..Settings::default()
+        let config = CoreConfig {
+            http: HttpCoreConfig {
+                max_connections_per_server: 6,
+                ..HttpCoreConfig::default()
+            },
+            ..CoreConfig::default()
         };
         let destination = PathBuf::from("/tmp/archive.zip");
+        let destination_config = DestinationPolicyConfig::default();
         let spec = DownloadSpec::http(
             "https://user:pass@EXAMPLE.com:443/archive.zip".to_string(),
             destination.clone(),
-            DestinationPolicy::for_resolved_destination(&settings, &destination),
+            DestinationPolicy::for_resolved_destination(&destination_config, &destination),
             HttpDownloadConfig::default(),
         );
 
-        let capabilities = capabilities(&spec, &settings);
+        let capabilities = capabilities(&spec, &config);
         let scheduler = capabilities.shared_scheduler.unwrap();
         assert_eq!(scheduler.limit, 6);
         assert_eq!(

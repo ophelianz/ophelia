@@ -43,6 +43,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::CoreConfig;
 use crate::engine::destination::part_path_for;
 use crate::engine::http::TokenBucket;
 use crate::engine::provider::{
@@ -54,7 +55,6 @@ use crate::engine::{
     EngineNotification, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
     RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState, TransferControlSupport,
 };
-use crate::settings::Settings;
 
 #[allow(dead_code)]
 enum EngineCommand {
@@ -78,8 +78,8 @@ enum EngineCommand {
     Restore {
         download: RestoredDownload,
     },
-    UpdateSettings {
-        settings: Settings,
+    UpdateConfig {
+        config: CoreConfig,
     },
     Shutdown,
 }
@@ -129,7 +129,7 @@ pub struct DownloadEngine {
 
 impl DownloadEngine {
     pub fn new(
-        settings: Settings,
+        config: CoreConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         initial_next_id: u64,
     ) -> Self {
@@ -144,7 +144,7 @@ impl DownloadEngine {
             EngineActor::new(
                 progress_tx,
                 notification_tx,
-                settings,
+                config,
                 db_tx,
                 done_tx,
                 runtime_update_tx,
@@ -193,8 +193,8 @@ impl DownloadEngine {
             .send(EngineCommand::DeleteArtifact { id, destination });
     }
 
-    pub fn update_settings(&self, settings: Settings) {
-        let _ = self.cmd_tx.send(EngineCommand::UpdateSettings { settings });
+    pub fn update_config(&self, config: CoreConfig) {
+        let _ = self.cmd_tx.send(EngineCommand::UpdateConfig { config });
     }
 
     pub fn poll_progress(&mut self) -> Option<ProgressUpdate> {
@@ -225,7 +225,7 @@ struct EngineActor {
     done_tx: mpsc::UnboundedSender<TaskDone>,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     notification_tx: mpsc::UnboundedSender<EngineNotification>,
-    settings: Settings,
+    config: CoreConfig,
     /// Shared semaphores for source-wide limits
     /// HTTP uses this for per-host limits
     shared_schedulers: HashMap<SchedulerKey, Arc<Semaphore>>,
@@ -239,13 +239,13 @@ impl EngineActor {
     fn new(
         progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
         notification_tx: mpsc::UnboundedSender<EngineNotification>,
-        settings: Settings,
+        config: CoreConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         done_tx: mpsc::UnboundedSender<TaskDone>,
         runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
     ) -> Self {
-        let max_concurrent = settings.max_concurrent_downloads;
-        let global_throttle = Arc::new(TokenBucket::new(settings.global_speed_limit_bps));
+        let max_concurrent = config.max_concurrent_downloads;
+        let global_throttle = Arc::new(TokenBucket::new(config.global_speed_limit_bps));
         Self {
             tasks: HashMap::new(),
             paused: HashMap::new(),
@@ -254,7 +254,7 @@ impl EngineActor {
             done_tx,
             progress_tx,
             notification_tx,
-            settings,
+            config,
             shared_schedulers: HashMap::new(),
             db_tx,
             global_throttle,
@@ -263,7 +263,7 @@ impl EngineActor {
     }
 
     fn shared_scheduler_semaphore(&mut self, spec: &DownloadSpec) -> Option<Arc<Semaphore>> {
-        let requirement = provider::capabilities(spec, &self.settings).shared_scheduler?;
+        let requirement = provider::capabilities(spec, &self.config).shared_scheduler?;
         Some(
             self.shared_schedulers
                 .entry(requirement.key)
@@ -315,8 +315,8 @@ impl EngineActor {
                                 resume_data: download.resume_data,
                             });
                         }
-                        EngineCommand::UpdateSettings { settings } => {
-                            self.handle_update_settings(settings);
+                        EngineCommand::UpdateConfig { config } => {
+                            self.handle_update_config(config);
                         }
                         EngineCommand::Shutdown => {
                             self.handle_shutdown();
@@ -738,15 +738,15 @@ impl EngineActor {
         }
     }
 
-    fn handle_update_settings(&mut self, settings: Settings) {
+    fn handle_update_config(&mut self, config: CoreConfig) {
         let old_max_concurrent = self.max_concurrent;
-        let old_settings = self.settings.clone();
+        let old_config = self.config.clone();
 
-        self.max_concurrent = settings.max_concurrent_downloads;
+        self.max_concurrent = config.max_concurrent_downloads;
         self.global_throttle
-            .set_limit(settings.global_speed_limit_bps);
-        self.adjust_shared_scheduler_limits(&old_settings, &settings);
-        self.settings = settings;
+            .set_limit(config.global_speed_limit_bps);
+        self.adjust_shared_scheduler_limits(&old_config, &config);
+        self.config = config;
 
         if self.max_concurrent > old_max_concurrent {
             self.try_start_next();
@@ -802,12 +802,12 @@ impl EngineActor {
         }
     }
 
-    fn adjust_shared_scheduler_limits(&mut self, old_settings: &Settings, new_settings: &Settings) {
+    fn adjust_shared_scheduler_limits(&mut self, old_config: &CoreConfig, new_config: &CoreConfig) {
         for (key, semaphore) in &self.shared_schedulers {
-            let Some(old_limit) = provider::shared_scheduler_limit(key, old_settings) else {
+            let Some(old_limit) = provider::shared_scheduler_limit(key, old_config) else {
                 continue;
             };
-            let Some(new_limit) = provider::shared_scheduler_limit(key, new_settings) else {
+            let Some(new_limit) = provider::shared_scheduler_limit(key, new_config) else {
                 continue;
             };
             if old_limit == new_limit {

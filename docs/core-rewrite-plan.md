@@ -2,9 +2,9 @@
 
 This is the flight recorder for the long core split. It records what we know, what we are changing next, and what must stay true while the core gets cleaner.
 
-The target shape is three crates:
+The target shape is three packages:
 
-- `ophelia-core` owns downloads, persistence, range scheduling, disk writes, pause, resume, retry, and engine events
+- `ophelia` owns downloads, persistence, range scheduling, disk writes, pause, resume, retry, and engine events
 - `ophelia-gui` owns GPUI, settings screens, rows, filters, menus, tray, updater, and browser IPC
 - `ophelia-cli` starts tiny, with `ophelia URL --output PATH`, and later grows into a real command line app
 
@@ -12,11 +12,11 @@ The model is close to curl and libcurl. The GUI and CLI parse user choices. Core
 
 ## Current State
 
-The repo is still one Cargo package named `ophelia`. The library root exports `engine`, `ipc`, `platform`, and `settings` from the same crate.
+The repo is now a Cargo workspace. The default member is `crates/core`, and that package is named `ophelia`.
 
-The engine is useful but not cleanly split yet. Engine files import `Settings` in `src/engine/actor.rs`, `src/engine/destination.rs`, `src/engine/spec.rs`, `src/engine/provider.rs`, and `src/engine/http/config.rs`. Engine persistence imports app platform paths in `src/engine/state/db.rs`.
+The GUI files are parked under `crates/ophelia-gui`, but there is no GUI package in the workspace yet. That is intentional for this slice: the core is allowed to move first.
 
-The GUI bridge is `Downloads` in `src/app.rs`. It owns `DownloadEngine`, the DB worker handle, IPC, settings, live transfer arrays, history, and metric sampling.
+The core no longer imports GUI `Settings` or app platform path helpers. Engine code receives `CoreConfig`, `DestinationPolicyConfig`, `HttpCoreConfig`, and `CorePaths`.
 
 The current engine owns a Tokio runtime internally. `DownloadEngine::new` creates the runtime, starts the actor, and exposes sync polling methods for progress and notifications.
 
@@ -63,17 +63,17 @@ The current branch is `refactor/http-core`. The audit target starts at commit `8
 
 ## Slice 2: Core-First Workspace Shape
 
-The next code slice may move earlier than the old staged plan. The goal is to make `ophelia-core` real enough that it can be compiled, tested, and benchmarked without dragging GPUI along.
+The core-first workspace exists now. The goal was to make core compile, test, and benchmark without dragging GPUI along.
 
-Minimum useful output:
+Output:
 
 - root workspace
-- `crates/ophelia-core`
-- core-owned dependencies only
+- `crates/core` package named `ophelia`
+- core-owned dependencies only in the checked package
 - core tests and benches wired to the core crate
-- a documented list of GUI compile breakage if the adapter is not ready
+- GUI files parked under `crates/ophelia-gui`, not wired yet
 
-The workspace shape is allowed to be partial. The useful split is the one that lets `ophelia-core` prove itself without GPUI.
+The workspace shape is partial on purpose. The useful split is the one that lets core prove itself without GPUI.
 
 ## Slice 3: Core Boundary
 
@@ -89,7 +89,7 @@ The first useful cut is settings. `Settings` should stay in the GUI/app side. Th
 
 If extracting the crate first makes the boundary cleaner, do that. The hard rule is not app continuity. The hard rule is that core stays understandable, documented, tested, and benchmarkable.
 
-The extracted core must not depend on GPUI, views, IPC, updater, tray, or GUI settings.
+The extracted core does not depend on GPUI, views, IPC, updater, tray, platform paths, or GUI settings.
 
 ## Slice 4: Runtime Ownership
 

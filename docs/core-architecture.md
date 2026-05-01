@@ -27,30 +27,27 @@ The GUI turns those events into rows, buttons, filters, notifications, menus, an
 
 ## What Exists Today
 
-Today everything is one crate. `src/lib.rs` exports engine, IPC, platform, and settings together. `src/main.rs` starts GPUI and opens the app window.
+Today the workspace builds the core package by default. The core lives in `crates/core`, and its package name is `ophelia`.
 
-`Downloads` in `src/app.rs` is the current bridge. It owns the engine, settings, IPC, DB worker handle, live transfer rows, history rows, and metric sampling.
+The old GUI source is parked in `crates/ophelia-gui`, but it is not a package yet. That means the GUI is intentionally behind the core rewrite right now.
 
-`DownloadEngine` in `src/engine/actor.rs` is the current engine handle. It creates a Tokio runtime, starts one engine actor, sends commands through an unbounded channel, and exposes polling methods for progress and notifications.
+`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. It still creates a Tokio runtime, starts one engine actor, sends commands through an unbounded channel, and exposes polling methods for progress and notifications.
 
 The range runner is already much cleaner than the old slot model. Workers report events. The scheduler owns pending ranges, completed ranges, active attempts, optional stealing state, and optional hedge state.
 
 ## Current Leaks
 
-The engine still accepts the full `Settings` object. That pulls GUI and app choices into core code. The most important imports are:
+The old `Settings` and platform path leaks are gone from core. The scan to keep honest is:
 
-- `src/engine/actor.rs` imports `Settings`
-- `src/engine/destination.rs` imports `Settings`, `DestinationRule`, and `CollisionStrategy`
-- `src/engine/spec.rs` imports `Settings`
-- `src/engine/provider.rs` imports `Settings`
-- `src/engine/http/config.rs` imports `Settings` and `HttpDownloadOrderingMode`
-- `src/engine/state/db.rs` imports app platform path helpers
+```sh
+rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/src crates/core/benches
+```
 
-This is the first thing to fix. The engine should receive core config and paths, not the whole app settings file.
+The remaining large leak is runtime ownership. Core still hides a Tokio runtime inside `DownloadEngine::new`. That is useful for the old GUI bridge, but it is not the final shape.
 
 ## Target Core Inputs
 
-`CoreConfig` should contain download behavior:
+`CoreConfig` contains download behavior:
 
 - max concurrent downloads
 - max connections per download
@@ -62,10 +59,10 @@ This is the first thing to fix. The engine should receive core config and paths,
 - retry and timeout knobs
 - destination routing policy
 
-`CorePaths` should contain filesystem roots:
+`CorePaths` contains filesystem roots:
 
-- app data directory
 - database path
+- optional legacy database path
 - default download directory
 
 `DownloadRequest` should describe one user request:
@@ -74,7 +71,7 @@ This is the first thing to fix. The engine should receive core config and paths,
 - explicit output path when provided
 - suggested filename when a browser or CLI gives one
 
-The GUI can still save a larger `Settings` struct. The adapter turns it into `CoreConfig` and `CorePaths`.
+The GUI can still save a larger `Settings` struct later. The adapter should turn it into `CoreConfig` and `CorePaths`.
 
 ## Target Core Outputs
 
@@ -111,7 +108,7 @@ The current actor has one high-risk pause path: active pause waits inside the ac
 
 ## Persistence Ownership
 
-SQLite belongs in core. The current `src/engine/state` code is already close to that idea:
+SQLite belongs in core. The current `crates/core/src/engine/state` code is already close to that idea:
 
 - DB open and migration
 - write worker

@@ -6,25 +6,21 @@ These diagrams are a sanity check. If a diagram gets too tangled, the code proba
 
 ```mermaid
 graph TD
-  Main["src/main.rs starts GPUI"] --> App["src/app.rs Downloads"]
-  App --> Engine["src/engine DownloadEngine"]
-  App --> Settings["src/settings Settings"]
-  App --> Ipc["src/ipc browser IPC"]
-  App --> Views["src/views and src/ui"]
-  App --> State["src/engine/state DB worker"]
-  Engine --> Settings
-  Engine --> State
-  Engine --> Platform["src/platform paths"]
-  State --> Platform
-  Ipc --> Request["engine AddDownloadRequest"]
-  Request --> Engine
+  Workspace["root workspace"] --> CorePackage["crates/core package ophelia"]
+  Workspace --> GuiSource["crates/ophelia-gui source parked"]
+  CorePackage --> Engine["engine"]
+  CorePackage --> State["state and DB worker"]
+  CorePackage --> Http["HTTP range engine"]
+  CorePackage --> Config["CoreConfig and CorePaths"]
+  GuiSource -. "not in workspace yet" .-> Adapter["future GUI adapter"]
+  Adapter -. "will pass plain config" .-> CorePackage
 ```
 
 ## Target Crate Shape
 
 ```mermaid
 graph TD
-  Gui["ophelia-gui"] --> Core["ophelia-core"]
+  Gui["ophelia-gui"] --> Core["ophelia crate"]
   Cli["ophelia-cli"] --> Core
   Gui --> GuiSettings["GUI settings and GPUI state"]
   GuiSettings --> CoreConfig["CoreConfig and CorePaths"]
@@ -41,7 +37,7 @@ graph TD
 
 ```mermaid
 flowchart TD
-  Url["URL from modal or IPC"] --> Spec["DownloadSpec from Settings"]
+  Url["URL request"] --> Spec["DownloadSpec from CoreConfig"]
   Spec --> EngineAdd["DownloadEngine::add"]
   EngineAdd --> Actor["EngineActor"]
   Actor --> Provider["provider::spawn_task"]
@@ -65,6 +61,8 @@ flowchart TD
   Finalize --> Disk["file on disk"]
 ```
 
+The current download path label still mentions modal and IPC because that is where the old GUI sends requests from. In this slice, those files are parked outside the workspace while core gets cleaned up.
+
 ## Target Core Boundary
 
 ```mermaid
@@ -80,7 +78,7 @@ flowchart LR
     EventsToRows["EngineEvent to rows or terminal output"]
   end
 
-  subgraph Core["ophelia-core"]
+  subgraph Core["ophelia crate"]
     CoreApi["async engine API"]
     Actor["engine task"]
     Providers["providers"]

@@ -2,32 +2,36 @@
 
 This ledger includes bugs, likely unintended behavior, and growth risks found during the first audit. It is not a refactor wish list. Each item needs a test or measurement before a large fix.
 
-## Blocker
+## Closed In Slice 2
 
 ### Engine Accepts Full GUI Settings
 
 Exact behavior:
 
-The engine accepts `Settings` directly. `Settings` contains download knobs, but it also contains language, notifications, update settings, IPC port, and GUI-facing defaults.
+Fixed. The engine now accepts core-owned config types instead of GUI `Settings`.
 
 Files involved:
 
-- `src/engine/actor.rs`
-- `src/engine/destination.rs`
-- `src/engine/spec.rs`
-- `src/engine/provider.rs`
-- `src/engine/http/config.rs`
-- `src/settings/mod.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/destination.rs`
+- `crates/core/src/engine/spec.rs`
+- `crates/core/src/engine/provider.rs`
+- `crates/core/src/engine/http/config.rs`
+- `crates/core/src/engine/state/db.rs`
 
 Why it matters:
 
-If we move engine code into `ophelia-core` as-is, core will drag GUI settings with it. That would make the crate split dirty from day one.
+This was the first clean-crate blocker. Core can now compile, test, and benchmark without the GUI settings module.
 
 Likely test:
 
-Add a test or CI scan that fails if `src/engine` imports `crate::settings` after the boundary slice.
+Keep a scan or CI guard that fails if core imports GUI modules:
 
-Priority: blocker
+```sh
+rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/src crates/core/benches
+```
+
+Priority: closed
 
 ## High
 
@@ -39,10 +43,10 @@ Exact behavior:
 
 Files involved:
 
-- `src/engine/actor.rs`
-- `src/engine/provider.rs`
-- `src/engine/http/range_runner.rs`
-- `src/engine/http/range_worker.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/provider.rs`
+- `crates/core/src/engine/http/range_runner.rs`
+- `crates/core/src/engine/http/range_worker.rs`
 
 Why it matters:
 
@@ -62,10 +66,10 @@ Range workers receive `Arc<std::fs::File>` and call positioned `write_all_at` or
 
 Files involved:
 
-- `src/engine/http/task.rs`
-- `src/engine/http/range_runner.rs`
-- `src/engine/http/range_worker.rs`
-- `src/engine/alloc.rs`
+- `crates/core/src/engine/http/task.rs`
+- `crates/core/src/engine/http/range_runner.rs`
+- `crates/core/src/engine/http/range_worker.rs`
+- `crates/core/src/engine/alloc.rs`
 
 Why it matters:
 
@@ -85,11 +89,11 @@ The engine uses unbounded channels for commands, progress, notifications, done e
 
 Files involved:
 
-- `src/engine/actor.rs`
-- `src/engine/provider.rs`
-- `src/engine/http/range_runner.rs`
-- `src/engine/http/range_worker.rs`
-- `src/app.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/provider.rs`
+- `crates/core/src/engine/http/range_runner.rs`
+- `crates/core/src/engine/http/range_worker.rs`
+- `crates/ophelia-gui/src/app.rs`
 
 Why it matters:
 
@@ -109,10 +113,10 @@ Startup restore checks that a needed part file exists. It does not prove the fil
 
 Files involved:
 
-- `src/engine/state/db.rs`
-- `src/engine/state/http.rs`
-- `src/engine/http/range_runner.rs`
-- `src/engine/http/task.rs`
+- `crates/core/src/engine/state/db.rs`
+- `crates/core/src/engine/state/http.rs`
+- `crates/core/src/engine/http/range_runner.rs`
+- `crates/core/src/engine/http/task.rs`
 
 Why it matters:
 
@@ -134,10 +138,10 @@ Every `BytesWritten` event records progress through `RangeSet::insert_and_count_
 
 Files involved:
 
-- `src/engine/http/ranges.rs`
-- `src/engine/http/scheduler.rs`
-- `src/engine/http/range_worker.rs`
-- `benches/http_range_data.rs`
+- `crates/core/src/engine/http/ranges.rs`
+- `crates/core/src/engine/http/scheduler.rs`
+- `crates/core/src/engine/http/range_worker.rs`
+- `crates/core/benches/http_range_data.rs`
 
 Why it matters:
 
@@ -149,16 +153,16 @@ Add a scheduler-level benchmark that feeds realistic `BytesWritten` events throu
 
 Priority: medium
 
-### Core Persistence Picks App Paths
+### Core Persistence Picked App Paths
 
 Exact behavior:
 
-The DB code chooses the database path through app platform helpers instead of receiving paths from a frontend or config object.
+Fixed. The DB code receives `CorePaths` and opens the database from injected paths.
 
 Files involved:
 
-- `src/engine/state/db.rs`
-- `src/platform/paths.rs`
+- `crates/core/src/engine/state/db.rs`
+- `crates/core/src/config.rs`
 
 Why it matters:
 
@@ -166,9 +170,9 @@ CLI and GUI may need different config choices later. Core should not decide app 
 
 Likely test:
 
-Add `CorePaths` and a test that opens a temp DB through injected paths without importing platform path helpers in engine state.
+Keep the no-GUI-import scan. Add a focused `CorePaths` DB-open test if this code changes again.
 
-Priority: medium
+Priority: closed
 
 ### GUI Mirrors Restored State Separately From Engine
 
@@ -178,9 +182,9 @@ On startup the GUI restores saved downloads into engine paused state and also pu
 
 Files involved:
 
-- `src/app.rs`
-- `src/engine/actor.rs`
-- `src/engine/state/db.rs`
+- `crates/ophelia-gui/src/app.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/state/db.rs`
 
 Why it matters:
 
@@ -192,21 +196,21 @@ Restore a paused download with gapped or overlapping chunk rows. Assert the GUI 
 
 Priority: medium
 
-### Settings Reset Can Change Restored Downloads
+### Current Config Can Change Restored Downloads
 
 Exact behavior:
 
-Restored downloads rebuild HTTP config from current settings instead of persisted per-download config.
+Restored downloads rebuild HTTP config from current `CoreConfig` instead of persisted per-download config.
 
 Files involved:
 
-- `src/engine/spec.rs`
-- `src/settings/mod.rs`
-- `src/engine/state/db.rs`
+- `crates/core/src/engine/spec.rs`
+- `crates/core/src/config.rs`
+- `crates/core/src/engine/state/db.rs`
 
 Why it matters:
 
-A settings reset or config change can alter how an old paused download resumes.
+A config change can alter how an old paused download resumes.
 
 Likely test:
 
@@ -222,9 +226,9 @@ The task can accept pause before probing discovers that the server requires sing
 
 Files involved:
 
-- `src/engine/actor.rs`
-- `src/engine/http/task.rs`
-- `src/engine/http/single.rs`
+- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/http/task.rs`
+- `crates/core/src/engine/http/single.rs`
 - `tests/engine_notifications.rs`
 
 Why it matters:
@@ -247,8 +251,8 @@ Exact behavior:
 
 Files involved:
 
-- `src/engine/chunk.rs`
-- `src/app.rs`
+- `crates/core/src/engine/chunk.rs`
+- `crates/ophelia-gui/src/app.rs`
 
 Why it matters:
 
@@ -268,9 +272,9 @@ The GUI builds transfer row vectors for summary and list rendering. This clones 
 
 Files involved:
 
-- `src/app.rs`
-- `src/views/main/main_window.rs`
-- `src/views/main/transfers_list.rs`
+- `crates/ophelia-gui/src/app.rs`
+- `crates/ophelia-gui/src/views/main/main_window.rs`
+- `crates/ophelia-gui/src/views/main/transfers_list.rs`
 
 Why it matters:
 
