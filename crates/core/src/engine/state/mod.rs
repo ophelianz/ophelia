@@ -57,8 +57,8 @@ pub struct StateBootstrap {
     pub history_reader: HistoryReader,
     pub saved_downloads: Vec<SavedDownload>,
     pub next_download_id: u64,
-    #[allow(dead_code)] // Downloads takes this to keep the DB worker alive until shutdown
-    pub(crate) worker: DbWorkerHandle,
+    #[allow(dead_code)] // gui needs this to keep the DB worker alive until shutdown
+    pub worker: DbWorkerHandle,
 }
 
 pub fn bootstrap(paths: &CorePaths) -> rusqlite::Result<StateBootstrap> {

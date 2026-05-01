@@ -35,10 +35,16 @@ mod destination_presets;
 
 use std::path::PathBuf;
 
+use ophelia::engine::{
+    CollisionPolicy, CoreConfig, CorePaths, DestinationPolicyConfig, DestinationRuleConfig,
+    HttpCoreConfig, HttpOrderingMode,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::build_info::{BuildInfo, ReleaseChannel};
-use crate::platform::paths::{app_config_dir, default_download_dir};
+use crate::platform::paths::{
+    app_config_dir, app_data_dir, default_download_dir, legacy_app_support_dir,
+};
 
 pub use destination_presets::default_destination_rules;
 use destination_presets::suggested_destination_rule_icon_name as suggested_icon_name;
@@ -137,7 +143,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load from disk, returning defaults on any error.
     pub fn load() -> Self {
         let mut settings: Self = std::fs::read_to_string(Self::path())
             .ok()
@@ -147,7 +152,7 @@ impl Settings {
         settings
     }
 
-    /// Persist to disk atomically. Creates parent directories if needed.
+    /// Persist to disk atomically & creates parent directories if needed
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(dir) = path.parent() {
@@ -159,7 +164,6 @@ impl Settings {
         std::fs::rename(&tmp, &path)
     }
 
-    /// Resolved destination directory: user preference, then ~/Downloads, then cwd.
     pub fn download_dir(&self) -> PathBuf {
         if let Some(ref dir) = self.default_download_dir {
             return dir.clone();
@@ -171,8 +175,72 @@ impl Settings {
         canonical_language(self.language.as_str())
     }
 
+    pub fn core_config(&self) -> CoreConfig {
+        CoreConfig {
+            max_concurrent_downloads: self.max_concurrent_downloads,
+            global_speed_limit_bps: self.global_speed_limit_bps,
+            http: HttpCoreConfig {
+                max_connections_per_server: self.max_connections_per_server,
+                max_connections_per_download: self.max_connections_per_download,
+                ordering_mode: self.http_download_ordering_mode.into(),
+                sequential_extensions: self.sequential_download_extensions.clone(),
+            },
+            destination: DestinationPolicyConfig {
+                default_download_dir: self.download_dir(),
+                collision_strategy: self.collision_strategy.into(),
+                rules_enabled: self.destination_rules_enabled,
+                rules: self
+                    .destination_rules
+                    .iter()
+                    .map(DestinationRuleConfig::from)
+                    .collect(),
+            },
+        }
+    }
+
+    pub fn core_paths(&self) -> CorePaths {
+        CorePaths::new(
+            app_data_dir().join("Ophelia").join("downloads.db"),
+            Some(
+                legacy_app_support_dir()
+                    .join("Ophelia")
+                    .join("downloads.db"),
+            ),
+            self.download_dir(),
+        )
+    }
+
     fn path() -> PathBuf {
         app_config_dir().join("Ophelia").join("settings.json")
+    }
+}
+
+impl From<CollisionStrategy> for CollisionPolicy {
+    fn from(strategy: CollisionStrategy) -> Self {
+        match strategy {
+            CollisionStrategy::Rename => Self::Rename,
+            CollisionStrategy::Replace => Self::Replace,
+        }
+    }
+}
+
+impl From<HttpDownloadOrderingMode> for HttpOrderingMode {
+    fn from(mode: HttpDownloadOrderingMode) -> Self {
+        match mode {
+            HttpDownloadOrderingMode::Balanced => Self::Balanced,
+            HttpDownloadOrderingMode::FileSpecific => Self::FileSpecific,
+            HttpDownloadOrderingMode::Sequential => Self::Sequential,
+        }
+    }
+}
+
+impl From<&DestinationRule> for DestinationRuleConfig {
+    fn from(rule: &DestinationRule) -> Self {
+        Self {
+            enabled: rule.enabled,
+            target_dir: rule.target_dir.clone(),
+            extensions: rule.extensions.clone(),
+        }
     }
 }
 
@@ -347,6 +415,73 @@ mod tests {
             HttpDownloadOrderingMode::FileSpecific
         );
         assert_eq!(settings.sequential_download_extensions, vec![".MKV"]);
+    }
+
+    #[test]
+    fn settings_map_to_core_config_without_ui_only_rule_fields() {
+        let settings = Settings {
+            max_connections_per_server: 6,
+            max_connections_per_download: 9,
+            max_concurrent_downloads: 5,
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            global_speed_limit_bps: 128,
+            collision_strategy: CollisionStrategy::Replace,
+            destination_rules_enabled: true,
+            destination_rules: vec![DestinationRule {
+                id: "video".into(),
+                label: "Video".into(),
+                enabled: true,
+                target_dir: PathBuf::from("/tmp/video"),
+                extensions: vec![".mkv".into()],
+                icon_name: Some("video".into()),
+            }],
+            http_download_ordering_mode: HttpDownloadOrderingMode::Sequential,
+            sequential_download_extensions: vec![".iso".into()],
+            ..Settings::default()
+        };
+
+        let config = settings.core_config();
+
+        assert_eq!(config.max_concurrent_downloads, 5);
+        assert_eq!(config.global_speed_limit_bps, 128);
+        assert_eq!(config.http.max_connections_per_server, 6);
+        assert_eq!(config.http.max_connections_per_download, 9);
+        assert_eq!(config.http.ordering_mode, HttpOrderingMode::Sequential);
+        assert_eq!(config.http.sequential_extensions, vec![".iso"]);
+        assert_eq!(
+            config.destination.default_download_dir,
+            PathBuf::from("/tmp/downloads")
+        );
+        assert_eq!(
+            config.destination.collision_strategy,
+            CollisionPolicy::Replace
+        );
+        assert_eq!(config.destination.rules.len(), 1);
+        assert_eq!(
+            config.destination.rules[0].target_dir,
+            PathBuf::from("/tmp/video")
+        );
+        assert_eq!(config.destination.rules[0].extensions, vec![".mkv"]);
+    }
+
+    #[test]
+    fn settings_build_core_paths_for_database_and_default_download_dir() {
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            ..Settings::default()
+        };
+
+        let paths = settings.core_paths();
+
+        assert!(paths.database_path.ends_with("Ophelia/downloads.db"));
+        assert_eq!(
+            paths
+                .legacy_database_path
+                .as_ref()
+                .and_then(|path| path.file_name()),
+            Some(std::ffi::OsStr::new("downloads.db"))
+        );
+        assert_eq!(paths.default_download_dir, PathBuf::from("/tmp/downloads"));
     }
 
     #[test]

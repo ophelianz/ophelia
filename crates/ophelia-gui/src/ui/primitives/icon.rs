@@ -81,10 +81,10 @@ pub fn icon(name: IconName, size: Pixels, color: impl Into<Hsla>) -> Svg {
         .text_color(color)
 }
 
-/// A fixed geometry slot for icons.
+/// A fixed geometry slot for icons
 ///
 /// The frame owns alignment and row participation; the glyph only owns its SVG
-/// path and color.
+/// path and color (yet another helper because yay uniform UIs)
 #[derive(IntoElement, Clone)]
 pub struct IconBox {
     name: IconName,

@@ -19,15 +19,15 @@
 
 //! App download state
 //!
-//! Downloads owns the engine and the live transfer lists
-//! A background task drains engine updates every 100ms and asks GPUI to redraw
+//! Downloads owns live transfer lists and stats view state.
+//! A Tokio bridge owns the engine and sends events back into this entity.
 //!
 //! Startup sequence (bitch I'm NASA):
 //!   1. Load saved settings
 //!   2. Start SQLite state, DB worker, and history reader
 //!   3. Start the local IPC server
-//!   4. Create DownloadEngine with the next free download id
-//!   5. Restore saved downloads into the engine and app lists
+//!   4. Create EngineBridge with the next free download id
+//!   5. Restore saved downloads through core events
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -38,10 +38,11 @@ use gpui::{Context, SharedString};
 
 use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddDownloadRequest, ArtifactState, DownloadControlAction, DownloadEngine, DownloadId,
-    DownloadSpec, DownloadStatus, EngineNotification, HistoryFilter, HistoryRow, ProgressUpdate,
-    RestoredDownload, SavedDownload, TransferChunkMapState, TransferControlSupport,
+    AddDownloadRequest, ArtifactState, DownloadControlAction, DownloadId, DownloadSpec,
+    DownloadStatus, EngineEvent, HistoryFilter, HistoryRow, ProgressUpdate, TransferChunkMapState,
+    TransferControlSupport, TransferSnapshot,
 };
+use crate::engine_bridge::{EngineBridge, EngineBridgeEvent, EngineClient, EngineCommandKind};
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
 use crate::views::overlays::notification::NotificationKind;
@@ -49,7 +50,8 @@ use crate::views::overlays::notification::NotificationKind;
 /// Live downloads stored as parallel vecs
 /// Every vec uses the same row index
 pub struct Downloads {
-    engine: DownloadEngine,
+    engine_client: EngineClient,
+    _engine_bridge: EngineBridge,
     _db_worker: state::DbWorkerHandle,
     ipc: IpcServer,
     pub settings: Settings,
@@ -295,19 +297,27 @@ impl DownloadWriteSampler {
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
-        let bootstrap = state::bootstrap().expect("failed to bootstrap backend state");
-        let ipc = IpcServer::start(settings.ipc_port);
+        let bootstrap =
+            state::bootstrap(&settings.core_paths()).expect("failed to bootstrap backend state");
+        let runtime = crate::runtime::Tokio::handle(cx);
+        let ipc = IpcServer::start(settings.ipc_port, &runtime);
         Self::from_bootstrap(settings, bootstrap, ipc, cx)
     }
 
     #[cfg(test)]
     pub(crate) fn new_for_test(cx: &mut Context<Self>) -> Self {
         let db_dir = tempfile::tempdir().expect("failed to create test database directory");
-        let db_path = db_dir.path().join("downloads.db");
-        let bootstrap =
-            state::bootstrap_at(&db_path).expect("failed to bootstrap test backend state");
-        let mut model =
-            Self::from_bootstrap(Settings::default(), bootstrap, IpcServer::disabled(), cx);
+        let settings = Settings {
+            default_download_dir: Some(db_dir.path().join("downloads")),
+            ..Settings::default()
+        };
+        let paths = crate::engine::CorePaths::new(
+            db_dir.path().join("downloads.db"),
+            None,
+            settings.download_dir(),
+        );
+        let bootstrap = state::bootstrap(&paths).expect("failed to bootstrap test backend state");
+        let mut model = Self::from_bootstrap(settings, bootstrap, IpcServer::disabled(), cx);
         model._test_db_dir = Some(db_dir);
         model
     }
@@ -325,10 +335,20 @@ impl Downloads {
             next_download_id,
             worker,
         } = bootstrap;
-        let engine = DownloadEngine::new(settings.clone(), db_tx, next_download_id);
+        let runtime = crate::runtime::Tokio::handle(cx);
+        let mut engine_bridge = EngineBridge::spawn(
+            &runtime,
+            &settings,
+            db_tx,
+            saved_downloads,
+            next_download_id,
+        );
+        let engine_client = engine_bridge.client();
+        let mut bridge_events = engine_bridge.take_events();
 
         let mut model = Self {
-            engine,
+            engine_client,
+            _engine_bridge: engine_bridge,
             _db_worker: worker,
             ipc,
             settings,
@@ -354,14 +374,21 @@ impl Downloads {
             _test_db_dir: None,
         };
 
-        for saved_dl in &saved_downloads {
-            model
-                .engine
-                .restore(RestoredDownload::from_saved(saved_dl, &model.settings));
-            model.push_saved(saved_dl);
-        }
-
         model.refresh_history(cx);
+
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            use futures::StreamExt;
+
+            while let Some(event) = bridge_events.next().await {
+                cx.update(|app| {
+                    this.update(app, |model, cx| {
+                        model.apply_bridge_event(event, cx);
+                    })
+                    .ok();
+                });
+            }
+        })
+        .detach();
 
         cx.spawn(async |this, cx: &mut gpui::AsyncApp| {
             loop {
@@ -370,12 +397,6 @@ impl Downloads {
                     .await;
                 cx.update(|app| {
                     this.update(app, |model, cx| {
-                        while let Some(update) = model.engine.poll_progress() {
-                            model.apply_progress(update, cx);
-                        }
-                        while let Some(notification) = model.engine.poll_notification() {
-                            model.apply_notification(notification, cx);
-                        }
                         while let Some(req) = model.ipc.try_recv() {
                             model.add_request(req, cx);
                         }
@@ -401,14 +422,15 @@ impl Downloads {
             .and_then(|name| name.to_str())
             .unwrap_or("download")
             .to_string();
-        let spec = match DownloadSpec::from_user_input(url, destination, &self.settings) {
+        let core_config = self.settings.core_config();
+        let spec = match DownloadSpec::from_user_input(url, destination, &core_config) {
             Ok(spec) => spec,
             Err(error) => {
                 self.report_add_failure(display_name, error, cx);
                 return None;
             }
         };
-        Some(self.add_spec(spec, AddOrigin::UserInput, cx))
+        self.add_spec(spec, AddOrigin::UserInput, cx)
     }
 
     pub fn add_request(
@@ -417,14 +439,15 @@ impl Downloads {
         cx: &mut Context<Self>,
     ) -> Option<DownloadId> {
         let display_name = request.display_filename_hint();
-        let spec = match request.into_spec(&self.settings) {
+        let core_config = self.settings.core_config();
+        let spec = match request.into_spec(&core_config) {
             Ok(spec) => spec,
             Err(error) => {
                 self.report_add_failure(display_name, error, cx);
                 return None;
             }
         };
-        Some(self.add_spec(spec, AddOrigin::IpcRequest, cx))
+        self.add_spec(spec, AddOrigin::IpcRequest, cx)
     }
 
     fn add_spec(
@@ -432,39 +455,14 @@ impl Downloads {
         spec: DownloadSpec,
         origin: AddOrigin,
         cx: &mut Context<Self>,
-    ) -> DownloadId {
+    ) -> Option<DownloadId> {
         let filename = notification_filename(spec.destination());
-        let id = self.push_spec(spec, cx);
+        self.engine_client.add(spec);
         if let Some(kind) = start_notification_kind(origin) {
             self.show_notification(cx, filename, kind);
         }
-        id
-    }
-
-    fn push_spec(&mut self, spec: DownloadSpec, cx: &mut Context<Self>) -> DownloadId {
-        let destination = spec.destination().to_path_buf();
-        let filename = notification_filename(&destination);
-        let dest_str: SharedString = destination.to_string_lossy().to_string().into();
-
-        let provider_kind: SharedString = spec.provider_kind().to_string().into();
-        let source_label: SharedString = spec.source_label().to_string().into();
-        let control_support = spec.control_support();
-        let id = self.engine.add(spec);
-        self.ids.push(id);
-        self.provider_kinds.push(provider_kind);
-        self.source_labels.push(source_label);
-        self.filenames.push(filename);
-        self.destinations.push(dest_str);
-        self.statuses.push(DownloadStatus::Pending);
-        self.control_supports.push(control_support);
-        self.transfer_chunk_maps
-            .push(TransferChunkMapState::Unsupported);
-        self.downloaded_bytes.push(0);
-        self.total_bytes.push(None);
-        self.speeds.push(0);
-        self.row_by_id.insert(id, self.ids.len() - 1);
         cx.notify();
-        id
+        None
     }
 
     fn report_add_failure(
@@ -478,39 +476,39 @@ impl Downloads {
     }
 
     pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine.pause(id);
+        self.engine_client.pause(id);
         cx.notify();
     }
 
     pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if settings.ipc_port != self.settings.ipc_port {
-            self.ipc = IpcServer::start(settings.ipc_port);
+            let runtime = crate::runtime::Tokio::handle(cx);
+            self.ipc = IpcServer::start(settings.ipc_port, &runtime);
         }
-        self.engine.update_settings(settings.clone());
+        self.engine_client.update_settings(&settings);
         self.settings = settings;
         cx.notify();
     }
 
     pub fn resume(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine.resume(id);
+        self.engine_client.resume(id);
         cx.notify();
     }
 
     /// Cancel a live transfer without deleting bytes already on disk
     #[allow(dead_code)] // reserved for a future UI with a distinct cancel-transfer action.
     pub fn cancel_transfer(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine.cancel(id);
+        self.engine_client.cancel(id);
         cx.notify();
     }
 
     /// Delete the file for a live transfer
     /// History is kept separately
     pub fn delete_artifact(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        let Some(idx) = self.index_of(id) else {
+        if self.index_of(id).is_none() {
             return;
         };
-        let destination = PathBuf::from(self.destinations[idx].as_ref());
-        self.engine.delete_artifact(id, destination);
+        self.engine_client.delete_artifact(id);
         cx.notify();
     }
 
@@ -573,7 +571,7 @@ impl Downloads {
         Some(0)
     }
 
-    /// Current rate of bytes successfully written by download tasks
+    /// Current app-level rate of bytes successfully written by download tasks, not OS process I/O.
     pub fn file_write_speed_bps(&self) -> Option<u64> {
         Some(self.write_sampler.write_speed_bps())
     }
@@ -640,34 +638,6 @@ impl Downloads {
         self.refresh_history(cx);
     }
 
-    /// Push a restored download into the app lists without going through the engine
-    fn push_saved(&mut self, saved: &SavedDownload) {
-        let filename: SharedString = saved
-            .destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-            .into();
-        let dest_str: SharedString = saved.destination.to_string_lossy().to_string().into();
-        let provider_kind: SharedString = saved.source.kind().to_string().into();
-        let source_label: SharedString = saved.source.display_label().to_string().into();
-
-        self.ids.push(saved.id);
-        self.provider_kinds.push(provider_kind);
-        self.source_labels.push(source_label);
-        self.filenames.push(filename);
-        self.destinations.push(dest_str);
-        self.statuses.push(DownloadStatus::Paused);
-        self.control_supports.push(saved.source.control_support());
-        self.transfer_chunk_maps
-            .push(TransferChunkMapState::Unsupported);
-        self.downloaded_bytes.push(saved.downloaded_bytes);
-        self.total_bytes.push(saved.total_bytes);
-        self.speeds.push(0);
-        self.row_by_id.insert(saved.id, self.ids.len() - 1);
-    }
-
     fn apply_progress(&mut self, update: ProgressUpdate, cx: &mut Context<Self>) {
         if let Some(idx) = self.index_of(update.id) {
             let prev = self.statuses[idx];
@@ -687,15 +657,26 @@ impl Downloads {
         }
     }
 
-    fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
-        match notification {
-            EngineNotification::Update(update) => self.apply_progress(update, cx),
-            EngineNotification::DownloadBytesWritten { id, bytes } => {
-                if self.index_of(id).is_some() {
-                    self.write_sampler.record(bytes);
-                }
+    fn apply_bridge_event(&mut self, event: EngineBridgeEvent, cx: &mut Context<Self>) {
+        match event {
+            EngineBridgeEvent::Engine(event) => self.apply_engine_event(event, cx),
+            EngineBridgeEvent::CommandFailed { id, action, error } => {
+                self.apply_command_failure(id, action, error, cx);
             }
-            EngineNotification::DestinationChanged { id, destination } => {
+        }
+    }
+
+    fn apply_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
+        match event {
+            EngineEvent::TransferAdded { snapshot }
+            | EngineEvent::TransferRestored { snapshot } => {
+                self.upsert_snapshot(snapshot, cx);
+            }
+            EngineEvent::Progress(update) => self.apply_progress(update, cx),
+            EngineEvent::DownloadBytesWritten { bytes, .. } => {
+                self.write_sampler.record(bytes);
+            }
+            EngineEvent::DestinationChanged { id, destination } => {
                 if let Some(idx) = self.index_of(id) {
                     self.filenames[idx] = destination
                         .file_name()
@@ -707,19 +688,19 @@ impl Downloads {
                     cx.notify();
                 }
             }
-            EngineNotification::ControlSupportChanged { id, support } => {
+            EngineEvent::ControlSupportChanged { id, support } => {
                 if let Some(idx) = self.index_of(id) {
                     self.control_supports[idx] = support;
                     cx.notify();
                 }
             }
-            EngineNotification::ChunkMapStateChanged { id, state } => {
+            EngineEvent::ChunkMapChanged { id, state } => {
                 if let Some(idx) = self.index_of(id) {
                     self.transfer_chunk_maps[idx] = state;
                     cx.notify();
                 }
             }
-            EngineNotification::LiveTransferRemoved {
+            EngineEvent::LiveTransferRemoved {
                 id,
                 action,
                 artifact_state,
@@ -733,13 +714,71 @@ impl Downloads {
                 self.remove_row(id, cx);
                 self.refresh_history(cx);
             }
-            EngineNotification::ControlUnsupported { id, action } => {
+            EngineEvent::ControlUnsupported { id, action } => {
                 tracing::warn!(
                     id = id.0,
                     action = control_action_name(action),
                     "provider does not support requested control action"
                 );
+                if let Some(idx) = self.index_of(id) {
+                    let filename = self.filenames[idx].clone();
+                    self.show_notification(cx, filename, NotificationKind::Error);
+                }
             }
+        }
+    }
+
+    fn upsert_snapshot(&mut self, snapshot: TransferSnapshot, cx: &mut Context<Self>) {
+        let filename = notification_filename(&snapshot.destination);
+        let destination: SharedString = snapshot.destination.to_string_lossy().to_string().into();
+        let provider_kind: SharedString = snapshot.provider_kind.into();
+        let source_label: SharedString = snapshot.source_label.into();
+
+        if let Some(idx) = self.index_of(snapshot.id) {
+            self.provider_kinds[idx] = provider_kind;
+            self.source_labels[idx] = source_label;
+            self.filenames[idx] = filename;
+            self.destinations[idx] = destination;
+            self.statuses[idx] = snapshot.status;
+            self.control_supports[idx] = snapshot.control_support;
+            self.transfer_chunk_maps[idx] = snapshot.chunk_map_state;
+            self.downloaded_bytes[idx] = snapshot.downloaded_bytes;
+            self.total_bytes[idx] = snapshot.total_bytes;
+            self.speeds[idx] = snapshot.speed_bytes_per_sec;
+        } else {
+            self.ids.push(snapshot.id);
+            self.provider_kinds.push(provider_kind);
+            self.source_labels.push(source_label);
+            self.filenames.push(filename);
+            self.destinations.push(destination);
+            self.statuses.push(snapshot.status);
+            self.control_supports.push(snapshot.control_support);
+            self.transfer_chunk_maps.push(snapshot.chunk_map_state);
+            self.downloaded_bytes.push(snapshot.downloaded_bytes);
+            self.total_bytes.push(snapshot.total_bytes);
+            self.speeds.push(snapshot.speed_bytes_per_sec);
+            self.row_by_id.insert(snapshot.id, self.ids.len() - 1);
+        }
+
+        cx.notify();
+    }
+
+    fn apply_command_failure(
+        &self,
+        id: Option<DownloadId>,
+        action: EngineCommandKind,
+        error: crate::engine::EngineError,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::warn!(
+            id = id.map(|id| id.0),
+            action = engine_command_kind_name(action),
+            "download engine command failed: {error}"
+        );
+
+        if let Some(id) = id.and_then(|id| self.index_of(id)) {
+            let filename = self.filenames[id].clone();
+            self.show_notification(cx, filename, NotificationKind::Error);
         }
     }
 
@@ -792,6 +831,17 @@ fn control_action_name(action: DownloadControlAction) -> &'static str {
         DownloadControlAction::Resume => "resume",
         DownloadControlAction::Cancel => "cancel",
         DownloadControlAction::Restore => "restore",
+    }
+}
+
+fn engine_command_kind_name(action: EngineCommandKind) -> &'static str {
+    match action {
+        EngineCommandKind::Add => "add",
+        EngineCommandKind::Pause => "pause",
+        EngineCommandKind::Resume => "resume",
+        EngineCommandKind::Cancel => "cancel",
+        EngineCommandKind::DeleteArtifact => "delete_artifact",
+        EngineCommandKind::Restore => "restore",
     }
 }
 
@@ -922,7 +972,29 @@ fn query_disk(path: &Path) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestApp;
+    use gpui::{AppContext, TestApp};
+
+    fn test_downloads(app: &mut TestApp) -> gpui::Entity<Downloads> {
+        app.update(|cx| {
+            crate::runtime::init(cx);
+            cx.new(Downloads::new_for_test)
+        })
+    }
+
+    fn test_snapshot(id: u64, destination: &str, status: DownloadStatus) -> TransferSnapshot {
+        TransferSnapshot {
+            id: DownloadId(id),
+            provider_kind: "http".into(),
+            source_label: "https://example.com/file.bin".into(),
+            destination: PathBuf::from(destination),
+            status,
+            downloaded_bytes: 128,
+            total_bytes: Some(256),
+            speed_bytes_per_sec: 64,
+            control_support: TransferControlSupport::all(),
+            chunk_map_state: TransferChunkMapState::Loading,
+        }
+    }
 
     #[test]
     fn transfer_available_actions_follow_status_and_capabilities() {
@@ -1096,6 +1168,95 @@ mod tests {
         assert_eq!(map.get(&DownloadId(7)), Some(&0));
         assert_eq!(map.get(&DownloadId(11)), Some(&1));
         assert_eq!(map.get(&DownloadId(3)), Some(&2));
+    }
+
+    #[test]
+    fn engine_snapshot_events_upsert_transfer_rows() {
+        let mut app = TestApp::new();
+        let downloads = test_downloads(&mut app);
+
+        app.update(|cx| {
+            downloads.update(cx, |downloads, cx| {
+                downloads.apply_engine_event(
+                    EngineEvent::TransferAdded {
+                        snapshot: test_snapshot(7, "/tmp/first.bin", DownloadStatus::Downloading),
+                    },
+                    cx,
+                );
+                downloads.apply_engine_event(
+                    EngineEvent::TransferAdded {
+                        snapshot: test_snapshot(7, "/tmp/renamed.bin", DownloadStatus::Paused),
+                    },
+                    cx,
+                );
+            });
+
+            let rows = downloads.read(cx).transfer_rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, DownloadId(7));
+            assert_eq!(rows[0].filename.as_ref(), "renamed.bin");
+            assert_eq!(rows[0].status, DownloadStatus::Paused);
+        });
+    }
+
+    #[test]
+    fn live_transfer_removed_event_removes_transfer_row() {
+        let mut app = TestApp::new();
+        let downloads = test_downloads(&mut app);
+
+        app.update(|cx| {
+            downloads.update(cx, |downloads, cx| {
+                downloads.apply_engine_event(
+                    EngineEvent::TransferRestored {
+                        snapshot: test_snapshot(3, "/tmp/restored.bin", DownloadStatus::Paused),
+                    },
+                    cx,
+                );
+                downloads.apply_engine_event(
+                    EngineEvent::LiveTransferRemoved {
+                        id: DownloadId(3),
+                        action: crate::engine::LiveTransferRemovalAction::Cancelled,
+                        artifact_state: ArtifactState::Present,
+                    },
+                    cx,
+                );
+            });
+
+            assert!(downloads.read(cx).transfer_rows().is_empty());
+        });
+    }
+
+    #[test]
+    fn download_bytes_written_updates_file_write_rate() {
+        let mut app = TestApp::new();
+        let downloads = test_downloads(&mut app);
+        let start = Instant::now();
+
+        app.update(|cx| {
+            downloads.update(cx, |downloads, cx| {
+                downloads.apply_engine_event(
+                    EngineEvent::DownloadBytesWritten {
+                        id: DownloadId(99),
+                        bytes: 2_000,
+                    },
+                    cx,
+                );
+                downloads.write_sampler.sample_now(start);
+                downloads.apply_engine_event(
+                    EngineEvent::DownloadBytesWritten {
+                        id: DownloadId(99),
+                        bytes: 6_000,
+                    },
+                    cx,
+                );
+                downloads
+                    .write_sampler
+                    .sample_now(start + Duration::from_secs(2));
+
+                assert_eq!(downloads.file_read_speed_bps(), Some(0));
+                assert_eq!(downloads.file_write_speed_bps(), Some(3_000));
+            });
+        });
     }
 
     #[test]

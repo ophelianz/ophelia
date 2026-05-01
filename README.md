@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="400" height="400" src="assets/wordmark.svg" alt="ophelia" />
+  <img width="400" height="400" src="crates/ophelia-gui/assets/wordmark.svg" alt="ophelia" />
 </div>
 
 ---

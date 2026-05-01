@@ -1,4 +1,4 @@
 [workspace]
 resolver = "3"
-members = ["crates/core"]
-default-members = ["crates/core"]
+members = ["crates/core", "crates/ophelia-gui"]
+default-members = ["crates/ophelia-gui"]

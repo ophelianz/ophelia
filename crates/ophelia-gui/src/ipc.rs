@@ -30,8 +30,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::engine::AddDownloadRequest;
@@ -47,28 +48,36 @@ struct BrowserDownloadRequest {
 ///
 /// The browser-extension server runs outside the download engine
 pub struct IpcServer {
-    #[allow(dead_code)] // held to keep the runtime and server alive
-    runtime: Runtime,
+    task: Option<JoinHandle<()>>,
     rx: mpsc::UnboundedReceiver<AddDownloadRequest>,
 }
 
 impl IpcServer {
-    pub fn start(port: u16) -> Self {
-        let runtime = Runtime::new().expect("failed to create IPC runtime");
+    pub fn start(port: u16, runtime: &Handle) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        runtime.spawn(serve(port, tx));
-        Self { runtime, rx }
+        let task = runtime.spawn(serve(port, tx));
+        Self {
+            task: Some(task),
+            rx,
+        }
     }
 
     #[cfg(test)]
     pub fn disabled() -> Self {
-        let runtime = Runtime::new().expect("failed to create IPC runtime");
         let (_tx, rx) = mpsc::unbounded_channel();
-        Self { runtime, rx }
+        Self { task: None, rx }
     }
 
     pub fn try_recv(&mut self) -> Option<AddDownloadRequest> {
         self.rx.try_recv().ok()
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -188,12 +197,13 @@ mod tests {
             request.suggested_filename.as_deref(),
             Some("browser-name.mp4")
         );
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            destination_rules_enabled: false,
+            ..Settings::default()
+        };
         assert_eq!(
-            request.preview_destination(&Settings {
-                default_download_dir: Some(PathBuf::from("/tmp/downloads")),
-                destination_rules_enabled: false,
-                ..Settings::default()
-            }),
+            request.preview_destination(&settings.core_config().destination),
             PathBuf::from("/tmp/downloads/browser-name.mp4")
         );
     }
