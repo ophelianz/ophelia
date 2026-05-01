@@ -28,11 +28,12 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::CoreConfig;
+use crate::config::EngineConfig;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
-    ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
-    PersistedDownloadSource, ProviderResumeData, TaskRuntimeUpdate, TransferControlSupport,
+    ChunkSnapshot, DownloadSource, DownloadSpec, HttpResumeData, PersistedDownloadSource,
+    ProviderResumeData, TaskRuntimeUpdate, TransferControlAction, TransferControlSupport,
+    TransferId,
 };
 
 pub(super) struct SpawnedTask {
@@ -69,7 +70,7 @@ pub(super) enum TaskDestinationSink {
     Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
-pub(super) fn capabilities(spec: &DownloadSpec, config: &CoreConfig) -> ProviderCapabilities {
+pub(super) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> ProviderCapabilities {
     match &spec.source {
         DownloadSource::Http { url, .. } => ProviderCapabilities {
             shared_scheduler: Some(SharedSchedulerRequirement {
@@ -86,18 +87,18 @@ pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupp
     }
 }
 
-pub(super) fn supports_control_action(spec: &DownloadSpec, action: DownloadControlAction) -> bool {
+pub(super) fn supports_control_action(spec: &DownloadSpec, action: TransferControlAction) -> bool {
     lifecycle_capabilities(spec).supports(action)
 }
 
-pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &CoreConfig) -> Option<usize> {
+pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &EngineConfig) -> Option<usize> {
     match key {
         SchedulerKey::Hostname(_) => Some(config.http.max_connections_per_server),
     }
 }
 
 pub(super) fn spawn_task(
-    id: DownloadId,
+    id: TransferId,
     spec: &DownloadSpec,
     pause_token: CancellationToken,
     resume_data: Option<ProviderResumeData>,
@@ -201,19 +202,19 @@ fn host_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CoreConfig, DestinationPolicyConfig, HttpCoreConfig};
+    use crate::config::{DestinationPolicyConfig, EngineConfig, HttpEngineConfig};
     use crate::engine::destination::DestinationPolicy;
     use crate::engine::http::HttpDownloadConfig;
     use std::path::PathBuf;
 
     #[test]
     fn capabilities_report_http_hostname_scheduler_key() {
-        let config = CoreConfig {
-            http: HttpCoreConfig {
+        let config = EngineConfig {
+            http: HttpEngineConfig {
                 max_connections_per_server: 6,
-                ..HttpCoreConfig::default()
+                ..HttpEngineConfig::default()
             },
-            ..CoreConfig::default()
+            ..EngineConfig::default()
         };
         let destination = PathBuf::from("/tmp/archive.zip");
         let destination_config = DestinationPolicyConfig::default();

@@ -14,9 +14,9 @@ The model is close to curl and libcurl. The GUI and CLI parse user choices. Core
 
 The repo is now a Cargo workspace. The default member is `crates/core`, and that package is named `ophelia`.
 
-The GUI files are parked under `crates/ophelia-gui`, but there is no GUI package in the workspace yet. That is intentional for this slice: the core is allowed to move first.
+The GUI files are parked under `crates/gui`, but there is no GUI package in the workspace yet. That is intentional for this slice: the core is allowed to move first.
 
-The core no longer imports GUI `Settings` or app platform path helpers. Engine code receives `CoreConfig`, `DestinationPolicyConfig`, `HttpCoreConfig`, and `CorePaths`.
+The core no longer imports GUI `Settings` or app platform path helpers. Engine code receives `EngineConfig`, `DestinationPolicyConfig`, `HttpEngineConfig`, and `ProfilePaths`.
 
 The current engine uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle, starts the controller, and exposes one async event stream.
 
@@ -71,7 +71,7 @@ Output:
 - `crates/core` package named `ophelia`
 - core-owned dependencies only in the checked package
 - core tests and benches wired to the core crate
-- GUI files parked under `crates/ophelia-gui`, not wired yet
+- GUI files parked under `crates/gui`, not wired yet
 
 The workspace shape is partial on purpose. The useful split is the one that lets core prove itself without GPUI.
 
@@ -79,9 +79,9 @@ The workspace shape is partial on purpose. The useful split is the one that lets
 
 Plain core-facing types:
 
-- `CoreConfig`
-- `CorePaths`
-- `DownloadRequest`
+- `EngineConfig`
+- `ProfilePaths`
+- `TransferRequest`
 - `EngineCommand`
 - `EngineEvent`
 
@@ -101,7 +101,7 @@ Core now exposes an async-first engine handle. The GUI should own the Tokio brid
 
 Core should own SQLite schema, DB worker, restore loading, resume rows, history query rules, and artifact state.
 
-Frontends should pass paths into core through `CorePaths`. Core should not call app platform path helpers directly.
+Frontends should pass paths into core through `ProfilePaths`. Core should not call app platform path helpers directly.
 
 Dev DB and settings reset is allowed during this rewrite, but it must be called out when a slice changes persisted data behavior.
 

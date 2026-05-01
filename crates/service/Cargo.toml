@@ -1,0 +1,16 @@
+[package]
+name = "ophelia-service"
+version = "0.1.0"
+edition = "2024"
+description = "Ophelia per-user backend service"
+license = "GPL-3.0"
+
+[[bin]]
+name = "ophelia-service"
+path = "src/main.rs"
+
+[dependencies]
+ophelia = { path = "../core" }
+tokio = { version = "1.50.0", features = ["rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

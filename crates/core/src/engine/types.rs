@@ -26,10 +26,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DownloadId(pub u64);
+pub struct TransferId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DownloadStatus {
+pub enum TransferStatus {
     Pending,
     Downloading,
     Paused,
@@ -40,7 +40,7 @@ pub enum DownloadStatus {
 
 /// Controls the engine can ask a download to perform
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DownloadControlAction {
+pub enum TransferControlAction {
     Pause,
     Resume,
     Cancel,
@@ -66,12 +66,12 @@ impl TransferControlSupport {
         }
     }
 
-    pub const fn supports(self, action: DownloadControlAction) -> bool {
+    pub const fn supports(self, action: TransferControlAction) -> bool {
         match action {
-            DownloadControlAction::Pause => self.can_pause,
-            DownloadControlAction::Resume => self.can_resume,
-            DownloadControlAction::Cancel => self.can_cancel,
-            DownloadControlAction::Restore => self.can_restore,
+            TransferControlAction::Pause => self.can_pause,
+            TransferControlAction::Resume => self.can_resume,
+            TransferControlAction::Cancel => self.can_cancel,
+            TransferControlAction::Restore => self.can_restore,
         }
     }
 }
@@ -108,40 +108,40 @@ pub enum TransferChunkMapState {
 /// The worker is the only writer
 pub enum DbEvent {
     Added {
-        id: DownloadId,
+        id: TransferId,
         source: PersistedDownloadSource,
         destination: PathBuf,
     },
     DestinationChanged {
-        id: DownloadId,
+        id: TransferId,
         destination: PathBuf,
     },
     Queued {
-        id: DownloadId,
+        id: TransferId,
     },
     Started {
-        id: DownloadId,
+        id: TransferId,
     },
     Paused {
-        id: DownloadId,
+        id: TransferId,
         downloaded_bytes: u64,
         resume_data: Option<ProviderResumeData>,
     },
     Resumed {
-        id: DownloadId,
+        id: TransferId,
     },
     Finished {
-        id: DownloadId,
+        id: TransferId,
         total_bytes: u64,
     },
     Error {
-        id: DownloadId,
+        id: TransferId,
     },
     Cancelled {
-        id: DownloadId,
+        id: TransferId,
     },
     ArtifactStateChanged {
-        id: DownloadId,
+        id: TransferId,
         artifact_state: ArtifactState,
     },
 }
@@ -159,14 +159,14 @@ pub enum HistoryFilter {
 /// One download shown in history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryRow {
-    pub id: DownloadId,
+    pub id: TransferId,
     /// Source kind saved in the database
     /// Kept as a string so old rows can still display
     pub provider_kind: String,
     /// Source label shown to the user
     pub source_label: String,
     pub destination: String,
-    pub status: DownloadStatus,
+    pub status: TransferStatus,
     #[allow(dead_code)]
     /// Lets history say whether the file still exists
     pub artifact_state: ArtifactState,
@@ -190,7 +190,7 @@ impl HistoryRow {
 /// A download loaded from SQLite on startup to restore paused/pending state
 #[derive(Debug, Clone)]
 pub struct SavedDownload {
-    pub id: DownloadId,
+    pub id: TransferId,
     pub source: PersistedDownloadSource,
     pub destination: PathBuf,
     pub downloaded_bytes: u64,
@@ -293,20 +293,20 @@ impl ProviderResumeData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressUpdate {
-    pub id: DownloadId,
-    pub status: DownloadStatus,
+    pub id: TransferId,
+    pub status: TransferStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransferSnapshot {
-    pub id: DownloadId,
+pub struct TransferSummary {
+    pub id: TransferId,
     pub provider_kind: String,
     pub source_label: String,
     pub destination: PathBuf,
-    pub status: DownloadStatus,
+    pub status: TransferStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_sec: u64,
@@ -317,36 +317,36 @@ pub struct TransferSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
     TransferAdded {
-        snapshot: TransferSnapshot,
+        snapshot: TransferSummary,
     },
     TransferRestored {
-        snapshot: TransferSnapshot,
+        snapshot: TransferSummary,
     },
     Progress(ProgressUpdate),
-    DownloadBytesWritten {
-        id: DownloadId,
+    TransferBytesWritten {
+        id: TransferId,
         bytes: u64,
     },
     DestinationChanged {
-        id: DownloadId,
+        id: TransferId,
         destination: PathBuf,
     },
     ControlSupportChanged {
-        id: DownloadId,
+        id: TransferId,
         support: TransferControlSupport,
     },
     ChunkMapChanged {
-        id: DownloadId,
+        id: TransferId,
         state: TransferChunkMapState,
     },
     LiveTransferRemoved {
-        id: DownloadId,
+        id: TransferId,
         action: LiveTransferRemovalAction,
         artifact_state: ArtifactState,
     },
     ControlUnsupported {
-        id: DownloadId,
-        action: DownloadControlAction,
+        id: TransferId,
+        action: TransferControlAction,
     },
 }
 
@@ -354,11 +354,11 @@ pub enum EngineEvent {
 pub enum EngineError {
     Closed,
     NotFound {
-        id: DownloadId,
+        id: TransferId,
     },
     Unsupported {
-        id: DownloadId,
-        action: DownloadControlAction,
+        id: TransferId,
+        action: TransferControlAction,
     },
 }
 
@@ -390,25 +390,25 @@ pub enum LiveTransferRemovalAction {
 pub enum TaskRuntimeUpdate {
     Progress(ProgressUpdate),
     Done {
-        id: DownloadId,
-        status: DownloadStatus,
+        id: TransferId,
+        status: TransferStatus,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
     },
-    DownloadBytesWritten {
-        id: DownloadId,
+    TransferBytesWritten {
+        id: TransferId,
         bytes: u64,
     },
     DestinationChanged {
-        id: DownloadId,
+        id: TransferId,
         destination: PathBuf,
     },
     ControlSupportChanged {
-        id: DownloadId,
+        id: TransferId,
         support: TransferControlSupport,
     },
     ChunkMapChanged {
-        id: DownloadId,
+        id: TransferId,
         state: TransferChunkMapState,
     },
 }

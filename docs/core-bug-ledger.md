@@ -123,7 +123,7 @@ Priority: closed
 
 Exact behavior:
 
-Partly fixed. Add and restore now emit `TransferSnapshot` events. Frontends can seed rows from core events instead of inventing their own initial live-transfer state.
+Partly fixed. Add and restore now emit `TransferSummary` events. Frontends can seed rows from core events instead of inventing their own initial live-transfer state.
 
 Files involved:
 
@@ -243,7 +243,7 @@ Priority: medium
 
 Exact behavior:
 
-Fixed. The DB code receives `CorePaths` and opens the database from injected paths.
+Fixed. The DB code receives `ProfilePaths` and opens the database from injected paths.
 
 Files involved:
 
@@ -256,7 +256,7 @@ CLI and GUI may need different config choices later. Core should not decide app 
 
 Likely test:
 
-Keep the no-GUI-import scan. Add a focused `CorePaths` DB-open test if this code changes again.
+Keep the no-GUI-import scan. Add a focused `ProfilePaths` DB-open test if this code changes again.
 
 Priority: closed
 
@@ -268,7 +268,7 @@ On startup the GUI restores saved downloads into engine paused state and also pu
 
 Files involved:
 
-- `crates/ophelia-gui/src/app.rs`
+- `crates/gui/src/app.rs`
 - `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/state/db.rs`
 
@@ -286,7 +286,7 @@ Priority: medium
 
 Exact behavior:
 
-Restored downloads rebuild HTTP config from current `CoreConfig` instead of persisted per-download config.
+Restored downloads rebuild HTTP config from current `EngineConfig` instead of persisted per-download config.
 
 Files involved:
 
@@ -338,7 +338,7 @@ Exact behavior:
 Files involved:
 
 - `crates/core/src/engine/chunk.rs`
-- `crates/ophelia-gui/src/app.rs`
+- `crates/gui/src/app.rs`
 
 Why it matters:
 
@@ -358,9 +358,9 @@ The GUI builds transfer row vectors for summary and list rendering. This clones 
 
 Files involved:
 
-- `crates/ophelia-gui/src/app.rs`
-- `crates/ophelia-gui/src/views/main/main_window.rs`
-- `crates/ophelia-gui/src/views/main/transfers_list.rs`
+- `crates/gui/src/app.rs`
+- `crates/gui/src/views/main/main_window.rs`
+- `crates/gui/src/views/main/transfers_list.rs`
 
 Why it matters:
 

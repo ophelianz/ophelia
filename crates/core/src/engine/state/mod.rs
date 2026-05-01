@@ -22,7 +22,7 @@ mod http;
 use db::Db;
 pub use db::HistoryReader;
 
-use crate::config::CorePaths;
+use crate::config::ProfilePaths;
 use crate::engine::types::{DbEvent, SavedDownload};
 
 pub struct DbWorkerHandle {
@@ -61,7 +61,7 @@ pub struct StateBootstrap {
     pub worker: DbWorkerHandle,
 }
 
-pub fn bootstrap(paths: &CorePaths) -> rusqlite::Result<StateBootstrap> {
+pub fn bootstrap(paths: &ProfilePaths) -> rusqlite::Result<StateBootstrap> {
     let db = Db::open(paths)?;
     let history_reader = HistoryReader::open(paths)?;
     bootstrap_from(db, history_reader)
@@ -114,8 +114,8 @@ fn spawn_worker(db: Db, rx: std::sync::mpsc::Receiver<DbEvent>) -> DbWorkerHandl
 mod tests {
     use super::*;
     use crate::engine::types::{
-        ChunkSnapshot, DownloadId, DownloadStatus, HttpResumeData, PersistedDownloadSource,
-        ProviderResumeData,
+        ChunkSnapshot, HttpResumeData, PersistedDownloadSource, ProviderResumeData, TransferId,
+        TransferStatus,
     };
     use std::path::PathBuf;
 
@@ -133,16 +133,16 @@ mod tests {
         let worker = spawn_worker(db, rx);
 
         tx.send(DbEvent::Added {
-            id: DownloadId(10),
+            id: TransferId(10),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/movie.mkv".to_string(),
             },
             destination: PathBuf::from("/tmp/movie.mkv"),
         })
         .unwrap();
-        tx.send(DbEvent::Started { id: DownloadId(10) }).unwrap();
+        tx.send(DbEvent::Started { id: TransferId(10) }).unwrap();
         tx.send(DbEvent::Paused {
-            id: DownloadId(10),
+            id: TransferId(10),
             downloaded_bytes: 64,
             resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
@@ -161,14 +161,14 @@ mod tests {
             .load(crate::engine::types::HistoryFilter::Paused, "")
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, DownloadStatus::Paused);
+        assert_eq!(rows[0].status, TransferStatus::Paused);
         assert_eq!(rows[0].downloaded_bytes, 64);
 
         let db = Db::open_at(&db_path).unwrap();
         let (saved, next_id) = db.load_for_restore().unwrap();
         assert_eq!(next_id, 10);
         assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].id, DownloadId(10));
+        assert_eq!(saved[0].id, TransferId(10));
         assert_eq!(saved[0].source.kind(), "http");
         let resume = saved[0].resume_data.as_ref().unwrap().as_http().unwrap();
         assert_eq!(resume.chunks.len(), 1);

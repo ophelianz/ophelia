@@ -3,25 +3,25 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use ophelia::ServiceSettings;
 use ophelia::engine::{
-    ArtifactState, DownloadControlAction, DownloadId, DownloadStatus, EngineEvent,
-    LiveTransferRemovalAction, ProgressUpdate, TransferChunkMapState, TransferControlSupport,
-    TransferSnapshot,
+    ArtifactState, EngineEvent, LiveTransferRemovalAction, ProgressUpdate, TransferChunkMapState,
+    TransferControlAction, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
 };
-use ophelia::session::{SessionEvent, SessionSnapshot};
+use ophelia::service::{OpheliaEvent, OpheliaSnapshot};
 
-#[path = "../src/session/read_model.rs"]
+#[path = "../src/service/read_model.rs"]
 mod read_model;
 
-use read_model::{SessionEventCoalescer, SessionReadModel};
+use read_model::{OpheliaEventCoalescer, OpheliaReadModel};
 
-fn snapshot(id: DownloadId) -> TransferSnapshot {
-    TransferSnapshot {
+fn snapshot(id: TransferId) -> TransferSummary {
+    TransferSummary {
         id,
         provider_kind: "http".into(),
         source_label: "https://example.com/file.bin".into(),
         destination: PathBuf::from("file.bin"),
-        status: DownloadStatus::Downloading,
+        status: TransferStatus::Downloading,
         downloaded_bytes: 0,
         total_bytes: Some(100_000),
         speed_bytes_per_sec: 0,
@@ -31,9 +31,9 @@ fn snapshot(id: DownloadId) -> TransferSnapshot {
 }
 
 fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
-    let id = DownloadId(1);
-    let mut read_model = SessionReadModel::default();
-    let mut coalescer = SessionEventCoalescer::default();
+    let id = TransferId(1);
+    let mut read_model = OpheliaReadModel::default();
+    let mut coalescer = OpheliaEventCoalescer::default();
     let _ = read_model.apply_engine_event(
         EngineEvent::TransferAdded {
             snapshot: snapshot(id),
@@ -46,7 +46,7 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
         let _ = read_model.apply_engine_event(
             EngineEvent::Progress(ProgressUpdate {
                 id,
-                status: DownloadStatus::Downloading,
+                status: TransferStatus::Downloading,
                 downloaded_bytes,
                 total_bytes: Some(count.saturating_mul(64 * 1024)),
                 speed_bytes_per_sec: 64 * 1024,
@@ -54,7 +54,7 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
             &mut coalescer,
         );
         let _ = read_model.apply_engine_event(
-            EngineEvent::DownloadBytesWritten {
+            EngineEvent::TransferBytesWritten {
                 id,
                 bytes: 64 * 1024,
             },
@@ -62,9 +62,10 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
         );
     }
 
-    let snapshot_len = read_model.snapshot().transfers.len();
+    let settings = ServiceSettings::default();
+    let snapshot_len = read_model.snapshot(&settings).transfers.len();
     let has_destination = u64::from(read_model.destination(id).is_some());
-    read_model.remove(DownloadId(999_999));
+    read_model.remove(TransferId(999_999));
     let emitted = coalescer.drain_events().len();
     let stats = coalescer.stats();
     (
@@ -82,8 +83,8 @@ fn bench_session_event_coalescing(c: &mut Criterion) {
 }
 
 fn bench_session_event_json_transfer_changed(c: &mut Criterion) {
-    let event = SessionEvent::TransferChanged {
-        snapshot: snapshot(DownloadId(1)),
+    let event = OpheliaEvent::TransferChanged {
+        snapshot: snapshot(TransferId(1)),
     };
 
     c.bench_function("session_event_json_transfer_changed", |bench| {
@@ -92,8 +93,8 @@ fn bench_session_event_json_transfer_changed(c: &mut Criterion) {
 }
 
 fn bench_session_event_json_write_bytes(c: &mut Criterion) {
-    let event = SessionEvent::DownloadBytesWritten {
-        id: DownloadId(1),
+    let event = OpheliaEvent::TransferBytesWritten {
+        id: TransferId(1),
         bytes: 64 * 1024,
     };
 
@@ -103,8 +104,8 @@ fn bench_session_event_json_write_bytes(c: &mut Criterion) {
 }
 
 fn bench_session_event_json_removed(c: &mut Criterion) {
-    let event = SessionEvent::TransferRemoved {
-        id: DownloadId(1),
+    let event = OpheliaEvent::TransferRemoved {
+        id: TransferId(1),
         action: LiveTransferRemovalAction::DeleteArtifact,
         artifact_state: ArtifactState::Deleted,
     };
@@ -115,9 +116,9 @@ fn bench_session_event_json_removed(c: &mut Criterion) {
 }
 
 fn bench_session_event_json_control_unsupported(c: &mut Criterion) {
-    let event = SessionEvent::ControlUnsupported {
-        id: DownloadId(1),
-        action: DownloadControlAction::Pause,
+    let event = OpheliaEvent::ControlUnsupported {
+        id: TransferId(1),
+        action: TransferControlAction::Pause,
     };
 
     c.bench_function("session_event_json_control_unsupported", |bench| {

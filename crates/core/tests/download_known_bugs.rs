@@ -29,7 +29,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::types::{ChunkSnapshot, DownloadId, DownloadStatus, HttpResumeData};
+use ophelia::engine::types::{ChunkSnapshot, HttpResumeData, TransferId, TransferStatus};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
@@ -51,7 +51,7 @@ async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -71,7 +71,7 @@ async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Error));
     assert!(
         !dest.exists(),
         "ignored range response should not produce a committed file"
@@ -97,7 +97,7 @@ async fn progress_never_exceeds_total_during_hedged_ranges() {
 
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -163,7 +163,7 @@ async fn retry_after_delays_range_retry() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -182,7 +182,7 @@ async fn retry_after_delays_range_retry() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
     assert_eq!(std::fs::read(&dest).unwrap(), data);
 
     let request_times = request_times.lock().unwrap();

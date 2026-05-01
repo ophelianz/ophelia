@@ -32,8 +32,8 @@ use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::types::{
-    ChunkMapCellState, DownloadId, DownloadStatus, TaskRuntimeUpdate, TransferChunkMapState,
-    TransferControlSupport,
+    ChunkMapCellState, TaskRuntimeUpdate, TransferChunkMapState, TransferControlSupport,
+    TransferId, TransferStatus,
 };
 
 fn snapshot_has_prefix_shaped_coverage(
@@ -121,7 +121,7 @@ async fn parallel_download_with_range_support() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -138,7 +138,7 @@ async fn parallel_download_with_range_support() {
 
     let runtime_updates = drain_runtime_updates(&mut runtime_rx).await;
     let progress = progress_updates(&runtime_updates);
-    assert_eq!(last_status(&progress), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&progress), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
@@ -165,7 +165,7 @@ async fn chunked_http_emits_chunk_map_snapshot() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest,
         exact_destination_policy(&dir.path().join("file.bin")),
@@ -229,7 +229,7 @@ async fn chunked_http_batches_write_stat_updates() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest,
         exact_destination_policy(&dir.path().join("file.bin")),
@@ -251,7 +251,7 @@ async fn chunked_http_batches_write_stat_updates() {
     let mut write_updates = 0;
     let mut written = 0_u64;
     while let Ok(update) = runtime_rx.try_recv() {
-        if let TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } = update {
+        if let TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } = update {
             write_updates += 1;
             written = written.saturating_add(bytes);
         }
@@ -278,7 +278,7 @@ async fn single_stream_fallback_no_range_support() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -295,7 +295,7 @@ async fn single_stream_fallback_no_range_support() {
 
     let runtime_updates = drain_runtime_updates(&mut runtime_rx).await;
     let progress = progress_updates(&runtime_updates);
-    assert_eq!(last_status(&progress), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&progress), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(sha256(&downloaded), expected_hash);
@@ -320,7 +320,7 @@ async fn single_stream_fallback_no_range_support() {
                 );
                 saw_single_stream_controls = true;
             }
-            TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } => {
+            TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } => {
                 written = written.saturating_add(bytes);
             }
             _ => {}
@@ -342,7 +342,7 @@ async fn fallback_when_no_content_length() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -358,7 +358,7 @@ async fn fallback_when_no_content_length() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(sha256(&downloaded), expected_hash);
@@ -370,7 +370,7 @@ async fn error_on_server_down() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         "http://127.0.0.1:1".to_string(),
         dest,
         exact_destination_policy(&dir.path().join("file.bin")),
@@ -386,7 +386,7 @@ async fn error_on_server_down() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Error));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -419,7 +419,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
 
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         initial_destination,
         DestinationPolicy::automatic(&destination_config),
@@ -435,7 +435,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let final_destination = root.path().join("Movies").join("movie.mp4");
     assert!(final_destination.exists());
@@ -467,7 +467,7 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
     std::fs::write(&destination, b"old").unwrap();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
         DestinationPolicy::automatic(&destination_config),
@@ -483,7 +483,7 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!destination.with_file_name("file.bin.ophelia_part").exists());
 }
@@ -509,7 +509,7 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
     std::fs::write(&destination, b"old").unwrap();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
         DestinationPolicy::automatic(&destination_config),
@@ -525,7 +525,7 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!destination.with_file_name("file.bin.ophelia_part").exists());
 }
@@ -554,7 +554,7 @@ async fn active_part_file_duplicate_returns_error() {
     .unwrap();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         format!("{}/file.bin", server.uri()),
         destination,
         DestinationPolicy::automatic(&destination_config),
@@ -570,7 +570,7 @@ async fn active_part_file_duplicate_returns_error() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Error));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -590,7 +590,7 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
     let dest = dir.path().join("file.bin");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -612,7 +612,7 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
@@ -635,7 +635,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     let dest = dir.path().join("video.mkv");
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest,
         exact_destination_policy(&dir.path().join("video.mkv")),
@@ -681,7 +681,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     let updates = drain_progress(&mut runtime_rx).await;
     assert!(
         updates.iter().any(|update| {
-            update.status == DownloadStatus::Downloading && update.speed_bytes_per_sec > 0
+            update.status == TransferStatus::Downloading && update.speed_bytes_per_sec > 0
         }),
         "range downloads should report non-zero speed for the frontend graph"
     );

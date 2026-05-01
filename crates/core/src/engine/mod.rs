@@ -28,10 +28,10 @@ pub mod state;
 pub mod types;
 
 pub use crate::config::{
-    CollisionPolicy, CoreConfig, CorePaths, DestinationPolicyConfig, DestinationRuleConfig,
-    HttpCoreConfig, HttpOrderingMode,
+    CollisionPolicy, DestinationPolicyConfig, DestinationRuleConfig, EngineConfig,
+    HttpEngineConfig, HttpOrderingMode, ProfilePaths,
 };
 pub use controller::DownloadEngine;
 pub(crate) use controller::delete_artifact_files;
-pub use spec::{AddDownloadRequest, DownloadSource, DownloadSpec, RestoredDownload};
+pub use spec::{AddTransferRequest, DownloadSource, DownloadSpec, RestoredDownload};
 pub use types::*;

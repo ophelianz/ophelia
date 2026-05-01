@@ -39,28 +39,28 @@ use crate::engine::destination::{
 use crate::engine::http::throttle::{Throttle, TokenBucket};
 use crate::engine::http::{HttpDownloadConfig, HttpRangeStrategyConfig};
 use crate::engine::types::{
-    ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
-    TransferControlSupport,
+    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferControlSupport, TransferId,
+    TransferStatus,
 };
 
 use super::config::RangeOrdering;
 use super::probe::probe;
 use super::range_runner::{RangeDownloadConfig, run_range_download};
 use super::resume::RangeResumeSnapshot;
-use super::single::{SingleDownloadRequest, single_download};
+use super::single::{SingleTransferRequest, single_download};
 
 const RANGE_WORK_UNIT_SIZE: u64 = 2 * 1024 * 1024;
 const STEAL_ALIGN: u64 = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TaskFinalState {
-    pub status: DownloadStatus,
+    pub status: TransferStatus,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
 }
 
 pub struct DownloadTaskRequest {
-    pub id: DownloadId,
+    pub id: TransferId,
     pub url: String,
     pub destination: PathBuf,
     pub destination_policy: DestinationPolicy,
@@ -75,7 +75,7 @@ pub struct DownloadTaskRequest {
 }
 
 fn task_state(
-    status: DownloadStatus,
+    status: TransferStatus,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
 ) -> TaskFinalState {
@@ -118,7 +118,7 @@ struct ResolveChunksRequest<'a> {
     destination: PathBuf,
     destination_policy: &'a DestinationPolicy,
     config: &'a HttpDownloadConfig,
-    id: DownloadId,
+    id: TransferId,
     runtime_update_tx: &'a mpsc::Sender<TaskRuntimeUpdate>,
     destination_sink: &'a Arc<Mutex<Option<PathBuf>>>,
     pause_token: &'a CancellationToken,
@@ -127,8 +127,8 @@ struct ResolveChunksRequest<'a> {
 
 async fn send_progress_update(
     runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
-    id: DownloadId,
-    status: DownloadStatus,
+    id: TransferId,
+    status: TransferStatus,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
     speed_bytes_per_sec: u64,
@@ -165,9 +165,9 @@ async fn resolve_chunks(
     match resume_from {
         Some(snapshots) => {
             let Some(snapshot) = RangeResumeSnapshot::from_old_chunks(&snapshots) else {
-                send_progress_update(runtime_update_tx, id, DownloadStatus::Error, 0, None, 0)
+                send_progress_update(runtime_update_tx, id, TransferStatus::Error, 0, None, 0)
                     .await;
-                return Err(task_state(DownloadStatus::Error, 0, None));
+                return Err(task_state(TransferStatus::Error, 0, None));
             };
             let total = snapshot.total_bytes();
             let downloaded = snapshot.downloaded_bytes();
@@ -178,13 +178,13 @@ async fn resolve_chunks(
                     send_progress_update(
                         runtime_update_tx,
                         id,
-                        DownloadStatus::Error,
+                        TransferStatus::Error,
                         downloaded,
                         Some(total),
                         0,
                     )
                     .await;
-                    return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
+                    return Err(task_state(TransferStatus::Error, downloaded, Some(total)));
                 }
             };
             if !probe_result.accepts_ranges || probe_result.content_length != Some(total) {
@@ -197,13 +197,13 @@ async fn resolve_chunks(
                 send_progress_update(
                     runtime_update_tx,
                     id,
-                    DownloadStatus::Error,
+                    TransferStatus::Error,
                     downloaded,
                     Some(total),
                     0,
                 )
                 .await;
-                return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
+                return Err(task_state(TransferStatus::Error, downloaded, Some(total)));
             }
 
             let snapshots = snapshot.chunk_snapshots();
@@ -215,13 +215,13 @@ async fn resolve_chunks(
                     send_progress_update(
                         runtime_update_tx,
                         id,
-                        DownloadStatus::Error,
+                        TransferStatus::Error,
                         downloaded,
                         Some(total),
                         0,
                     )
                     .await;
-                    return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
+                    return Err(task_state(TransferStatus::Error, downloaded, Some(total)));
                 }
             };
             *destination_sink.lock().unwrap() = Some(destination.clone());
@@ -247,9 +247,9 @@ async fn resolve_chunks(
             let probe_result = match probe(probe_client, url).await {
                 Ok(p) => p,
                 Err(_) => {
-                    send_progress_update(runtime_update_tx, id, DownloadStatus::Error, 0, None, 0)
+                    send_progress_update(runtime_update_tx, id, TransferStatus::Error, 0, None, 0)
                         .await;
-                    return Err(task_state(DownloadStatus::Error, 0, None));
+                    return Err(task_state(TransferStatus::Error, 0, None));
                 }
             };
             tracing::debug!(
@@ -266,14 +266,14 @@ async fn resolve_chunks(
                         send_progress_update(
                             runtime_update_tx,
                             id,
-                            DownloadStatus::Error,
+                            TransferStatus::Error,
                             0,
                             probe_result.content_length,
                             0,
                         )
                         .await;
                         return Err(task_state(
-                            DownloadStatus::Error,
+                            TransferStatus::Error,
                             0,
                             probe_result.content_length,
                         ));
@@ -313,7 +313,7 @@ async fn resolve_chunks(
                         state: crate::engine::TransferChunkMapState::Unsupported,
                     })
                     .await;
-                return Err(single_download(SingleDownloadRequest {
+                return Err(single_download(SingleTransferRequest {
                     id,
                     client: Arc::clone(chunk_client),
                     url: url.to_owned(),
@@ -348,13 +348,13 @@ async fn resolve_chunks(
                     send_progress_update(
                         runtime_update_tx,
                         id,
-                        DownloadStatus::Error,
+                        TransferStatus::Error,
                         0,
                         Some(total_bytes),
                         0,
                     )
                     .await;
-                    return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
+                    return Err(task_state(TransferStatus::Error, 0, Some(total_bytes)));
                 }
                 Err(error) => {
                     tracing::error!(
@@ -365,13 +365,13 @@ async fn resolve_chunks(
                     send_progress_update(
                         runtime_update_tx,
                         id,
-                        DownloadStatus::Error,
+                        TransferStatus::Error,
                         0,
                         Some(total_bytes),
                         0,
                     )
                     .await;
-                    return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
+                    return Err(task_state(TransferStatus::Error, 0, Some(total_bytes)));
                 }
             };
 
@@ -385,13 +385,13 @@ async fn resolve_chunks(
                 send_progress_update(
                     runtime_update_tx,
                     id,
-                    DownloadStatus::Error,
+                    TransferStatus::Error,
                     0,
                     Some(total_bytes),
                     0,
                 )
                 .await;
-                return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
+                return Err(task_state(TransferStatus::Error, 0, Some(total_bytes)));
             }
 
             let chunks = planned_chunks(total_bytes, ordering, config);
