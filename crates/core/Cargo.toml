@@ -30,3 +30,7 @@ wiremock = "0.6.5"
 [[bench]]
 name = "http_range_data"
 harness = false
+
+[[bench]]
+name = "session_events"
+harness = false

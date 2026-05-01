@@ -12,10 +12,32 @@ pub(super) struct SessionEventCoalescer {
     transfer_updates: HashMap<DownloadId, TransferSnapshot>,
     byte_order: Vec<DownloadId>,
     bytes_written: HashMap<DownloadId, u64>,
+    stats: SessionCoalescerStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SessionCoalescerStats {
+    pub raw_transfer_updates: u64,
+    pub raw_write_updates: u64,
+    pub emitted_transfer_updates: u64,
+    pub emitted_write_updates: u64,
+}
+
+impl SessionCoalescerStats {
+    pub(super) fn coalesced_transfer_updates(self) -> u64 {
+        self.raw_transfer_updates
+            .saturating_sub(self.emitted_transfer_updates)
+    }
+
+    pub(super) fn coalesced_write_updates(self) -> u64 {
+        self.raw_write_updates
+            .saturating_sub(self.emitted_write_updates)
+    }
 }
 
 impl SessionEventCoalescer {
     pub(super) fn record_transfer(&mut self, snapshot: TransferSnapshot) {
+        self.stats.raw_transfer_updates = self.stats.raw_transfer_updates.saturating_add(1);
         let id = snapshot.id;
         if !self.transfer_updates.contains_key(&id) {
             self.transfer_order.push(id);
@@ -24,6 +46,7 @@ impl SessionEventCoalescer {
     }
 
     pub(super) fn record_bytes_written(&mut self, id: DownloadId, bytes: u64) {
+        self.stats.raw_write_updates = self.stats.raw_write_updates.saturating_add(1);
         if !self.bytes_written.contains_key(&id) {
             self.byte_order.push(id);
         }
@@ -39,15 +62,23 @@ impl SessionEventCoalescer {
         let mut events = Vec::with_capacity(self.transfer_updates.len() + self.bytes_written.len());
         for id in self.transfer_order.drain(..) {
             if let Some(snapshot) = self.transfer_updates.remove(&id) {
+                self.stats.emitted_transfer_updates =
+                    self.stats.emitted_transfer_updates.saturating_add(1);
                 events.push(SessionEvent::TransferChanged { snapshot });
             }
         }
         for id in self.byte_order.drain(..) {
             if let Some(bytes) = self.bytes_written.remove(&id) {
+                self.stats.emitted_write_updates =
+                    self.stats.emitted_write_updates.saturating_add(1);
                 events.push(SessionEvent::DownloadBytesWritten { id, bytes });
             }
         }
         events
+    }
+
+    pub(super) fn stats(&self) -> SessionCoalescerStats {
+        self.stats
     }
 }
 

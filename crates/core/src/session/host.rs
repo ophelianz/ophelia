@@ -148,6 +148,7 @@ impl SessionRuntime {
         }
 
         self.flush_coalesced_events();
+        self.log_coalescer_stats();
         if let Err(error) = self.engine.shutdown().await {
             tracing::warn!("download engine shutdown failed: {error}");
         }
@@ -286,6 +287,22 @@ impl SessionRuntime {
         for event in self.coalescer.drain_events() {
             let _ = self.event_tx.send(event);
         }
+    }
+
+    fn log_coalescer_stats(&self) {
+        let stats = self.coalescer.stats();
+        if stats.raw_transfer_updates == 0 && stats.raw_write_updates == 0 {
+            return;
+        }
+        tracing::debug!(
+            raw_transfer_updates = stats.raw_transfer_updates,
+            emitted_transfer_updates = stats.emitted_transfer_updates,
+            coalesced_transfer_updates = stats.coalesced_transfer_updates(),
+            raw_write_updates = stats.raw_write_updates,
+            emitted_write_updates = stats.emitted_write_updates,
+            coalesced_write_updates = stats.coalesced_write_updates(),
+            "session event coalescing summary"
+        );
     }
 
     fn delete_artifact_from_session_state(&mut self, id: DownloadId) -> Result<(), SessionError> {

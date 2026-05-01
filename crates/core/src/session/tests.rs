@@ -152,8 +152,53 @@ fn session_read_model_coalesces_hot_transfer_updates() {
 }
 
 #[test]
-fn terminal_progress_clears_stale_coalesced_updates() {
+fn coalescer_stats_count_raw_and_emitted_hot_events() {
     let id = DownloadId(2);
+    let mut read_model = SessionReadModel::default();
+    let mut coalescer = SessionEventCoalescer::default();
+    let _ = read_model.apply_engine_event(
+        EngineEvent::TransferAdded {
+            snapshot: test_snapshot(id, DownloadStatus::Pending),
+        },
+        &mut coalescer,
+    );
+
+    for downloaded_bytes in [10, 20, 30] {
+        let _ = read_model.apply_engine_event(
+            EngineEvent::Progress(ProgressUpdate {
+                id,
+                status: DownloadStatus::Downloading,
+                downloaded_bytes,
+                total_bytes: Some(100),
+                speed_bytes_per_sec: downloaded_bytes,
+            }),
+            &mut coalescer,
+        );
+    }
+    let _ = read_model.apply_engine_event(
+        EngineEvent::DownloadBytesWritten { id, bytes: 10 },
+        &mut coalescer,
+    );
+    let _ = read_model.apply_engine_event(
+        EngineEvent::DownloadBytesWritten { id, bytes: 20 },
+        &mut coalescer,
+    );
+
+    let events = coalescer.drain_events();
+    let stats = coalescer.stats();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(stats.raw_transfer_updates, 3);
+    assert_eq!(stats.raw_write_updates, 2);
+    assert_eq!(stats.emitted_transfer_updates, 1);
+    assert_eq!(stats.emitted_write_updates, 1);
+    assert_eq!(stats.coalesced_transfer_updates(), 2);
+    assert_eq!(stats.coalesced_write_updates(), 1);
+}
+
+#[test]
+fn terminal_progress_clears_stale_coalesced_updates() {
+    let id = DownloadId(3);
     let mut read_model = SessionReadModel::default();
     let mut coalescer = SessionEventCoalescer::default();
     let _ = read_model.apply_engine_event(
@@ -198,7 +243,7 @@ fn terminal_progress_clears_stale_coalesced_updates() {
 
 #[test]
 fn snapshot_reflects_pending_hot_updates_before_flush() {
-    let id = DownloadId(3);
+    let id = DownloadId(4);
     let mut read_model = SessionReadModel::default();
     let mut coalescer = SessionEventCoalescer::default();
     let _ = read_model.apply_engine_event(
@@ -239,13 +284,13 @@ fn snapshot_reflects_pending_hot_updates_before_flush() {
 fn terminal_events_flush_hot_updates_first() {
     assert!(!should_flush_before_immediate(
         &EngineEvent::DownloadBytesWritten {
-            id: DownloadId(4),
+            id: DownloadId(5),
             bytes: 8,
         }
     ));
     assert!(!should_flush_before_immediate(&EngineEvent::Progress(
         ProgressUpdate {
-            id: DownloadId(4),
+            id: DownloadId(5),
             status: DownloadStatus::Downloading,
             downloaded_bytes: 8,
             total_bytes: Some(100),
@@ -254,7 +299,7 @@ fn terminal_events_flush_hot_updates_first() {
     )));
     assert!(should_flush_before_immediate(&EngineEvent::Progress(
         ProgressUpdate {
-            id: DownloadId(4),
+            id: DownloadId(5),
             status: DownloadStatus::Finished,
             downloaded_bytes: 100,
             total_bytes: Some(100),
@@ -263,7 +308,7 @@ fn terminal_events_flush_hot_updates_first() {
     )));
     assert!(should_flush_before_immediate(
         &EngineEvent::LiveTransferRemoved {
-            id: DownloadId(4),
+            id: DownloadId(5),
             action: LiveTransferRemovalAction::DeleteArtifact,
             artifact_state: ArtifactState::Deleted,
         }
@@ -272,7 +317,7 @@ fn terminal_events_flush_hot_updates_first() {
 
 #[test]
 fn terminal_progress_keeps_pending_write_bytes() {
-    let id = DownloadId(5);
+    let id = DownloadId(6);
     let mut read_model = SessionReadModel::default();
     let mut coalescer = SessionEventCoalescer::default();
     let _ = read_model.apply_engine_event(
