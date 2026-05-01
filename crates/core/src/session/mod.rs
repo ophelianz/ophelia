@@ -40,7 +40,6 @@ mod tests;
 pub use client::{SessionClient, SessionSubscription};
 pub use host::SessionHost;
 pub use lock::{session_descriptor_path, session_lock_path, session_socket_path};
-pub use wire::{LocalSessionServer, SessionWireCommand, SessionWireFrame};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadRequest {
@@ -94,7 +93,7 @@ pub enum DownloadDestination {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionCommand {
+pub(crate) enum SessionCommand {
     Add {
         request: DownloadRequest,
     },
@@ -122,7 +121,7 @@ pub enum SessionCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionResponse {
+pub(crate) enum SessionResponse {
     Ack,
     DownloadAdded { id: DownloadId },
     History { rows: Vec<HistoryRow> },

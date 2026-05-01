@@ -3,13 +3,13 @@ use super::lock::{create_owner_only_dir, set_owner_only_file, write_owner_only_f
 use super::*;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SessionWireCommand {
+pub(crate) struct SessionWireCommand {
     pub id: u64,
     pub command: SessionCommand,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum SessionWireFrame {
+pub(crate) enum SessionWireFrame {
     Response { id: u64, response: SessionResponse },
     Error { id: u64, error: SessionError },
     Event { event: SessionEvent },
@@ -114,7 +114,7 @@ pub(super) fn unexpected_wire_frame(expected: &str, frame: SessionWireFrame) -> 
 }
 
 #[cfg(unix)]
-pub struct LocalSessionServer {
+pub(super) struct LocalSessionServer {
     descriptor: SessionDescriptor,
     descriptor_path: PathBuf,
     socket_path: PathBuf,
@@ -314,7 +314,7 @@ where
 }
 
 #[cfg(not(unix))]
-pub struct LocalSessionServer;
+pub(super) struct LocalSessionServer;
 
 #[cfg(not(unix))]
 impl LocalSessionServer {
