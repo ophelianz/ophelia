@@ -380,6 +380,30 @@ impl Downloads {
                                     .ok();
                                 });
                             }
+                            Err(SessionError::Lagged { skipped }) => {
+                                tracing::warn!(
+                                    skipped,
+                                    "backend session event stream lagged, refreshing snapshot"
+                                );
+                                match session_client.subscribe().await {
+                                    Ok(next_subscription) => {
+                                        let snapshot = next_subscription.snapshot.clone();
+                                        subscription = next_subscription;
+                                        cx.update(|app| {
+                                            this.update(app, |model, cx| {
+                                                model.apply_session_snapshot(snapshot, cx);
+                                            })
+                                            .ok();
+                                        });
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "backend session resubscribe failed: {error}"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
                             Err(error) => {
                                 tracing::warn!("backend session event stream closed: {error}");
                                 break;

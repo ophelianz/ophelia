@@ -352,11 +352,15 @@ impl SessionHost {
         config: CoreConfig,
         paths: CorePaths,
     ) -> Result<Self, SessionError> {
-        let lock = SessionLock::acquire(session_lock_path(&paths))?;
+        let descriptor = SessionDescriptor::for_paths(&paths);
+        let lock = SessionLock::acquire(
+            session_lock_path(&paths),
+            session_descriptor_path(&paths),
+            descriptor.socket_path.clone(),
+        )?;
         let bootstrap = state::bootstrap(&paths).map_err(|error| SessionError::Io {
             message: error.to_string(),
         })?;
-        let descriptor = SessionDescriptor::for_paths(&paths);
         let (tx, rx) = mpsc::channel(SESSION_COMMAND_CAPACITY);
         let (event_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         let client = SessionClient { tx };
@@ -476,7 +480,9 @@ impl SessionRuntime {
     async fn restore_saved_downloads(&mut self) {
         for saved in std::mem::take(&mut self.saved_downloads) {
             let restored = RestoredDownload::from_saved(&saved, &self.config);
-            if let Err(error) = self.engine.restore(restored).await {
+            let (result, events) = self.engine.restore_collecting_events(restored).await;
+            self.apply_engine_events(events);
+            if let Err(error) = result {
                 tracing::warn!(id = saved.id.0, "restore failed: {error}");
             }
             self.drain_engine_events();
@@ -510,27 +516,42 @@ impl SessionRuntime {
         match command {
             SessionCommand::Add { request } => {
                 let spec = request.into_spec(&self.config)?;
-                let id = self.engine.add(spec).await?;
+                let (result, events) = self.engine.add_collecting_events(spec).await;
+                self.apply_engine_events(events);
+                let id = result?;
                 Ok(SessionResponse::DownloadAdded { id })
             }
             SessionCommand::Pause { id } => {
-                self.engine.pause(id).await?;
+                let (result, events) = self.engine.pause_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
                 Ok(SessionResponse::Ack)
             }
             SessionCommand::Resume { id } => {
-                self.engine.resume(id).await?;
+                let (result, events) = self.engine.resume_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
                 Ok(SessionResponse::Ack)
             }
             SessionCommand::Cancel { id } => {
-                self.engine.cancel(id).await?;
+                let (result, events) = self.engine.cancel_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
                 Ok(SessionResponse::Ack)
             }
             SessionCommand::DeleteArtifact { id } => {
-                self.engine.delete_artifact(id).await?;
+                let (result, events) = self.engine.delete_artifact_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
                 Ok(SessionResponse::Ack)
             }
             SessionCommand::UpdateConfig { config } => {
-                self.engine.update_config(config.clone()).await?;
+                let (result, events) = self
+                    .engine
+                    .update_config_collecting_events(config.clone())
+                    .await;
+                self.apply_engine_events(events);
+                result?;
                 self.config = config;
                 Ok(SessionResponse::Ack)
             }
@@ -555,6 +576,12 @@ impl SessionRuntime {
 
     fn drain_engine_events(&mut self) {
         while let Some(event) = self.engine.try_next_event() {
+            self.apply_engine_event(event);
+        }
+    }
+
+    fn apply_engine_events(&mut self, events: Vec<EngineEvent>) {
+        for event in events {
             self.apply_engine_event(event);
         }
     }
@@ -663,25 +690,28 @@ struct SessionLock {
 }
 
 impl SessionLock {
-    fn acquire(path: PathBuf) -> Result<Self, SessionError> {
+    fn acquire(
+        path: PathBuf,
+        descriptor_path: PathBuf,
+        socket_path: PathBuf,
+    ) -> Result<Self, SessionError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            create_owner_only_dir(parent)?;
         }
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    SessionError::LockHeld { path: path.clone() }
-                } else {
-                    SessionError::Io {
-                        message: error.to_string(),
-                    }
+        let mut file = match create_lock_file(&path)? {
+            Some(file) => file,
+            None => {
+                if existing_session_is_live(&path, &descriptor_path, &socket_path) {
+                    return Err(SessionError::LockHeld { path });
                 }
-            })?;
+                remove_stale_session_files(&path, &descriptor_path, &socket_path)?;
+                create_lock_file(&path)?
+                    .ok_or_else(|| SessionError::LockHeld { path: path.clone() })?
+            }
+        };
         let _ = writeln!(file, "pid={}", std::process::id());
+        set_owner_only_file(&path)?;
         Ok(Self { path, _file: file })
     }
 }
@@ -697,6 +727,129 @@ impl Drop for SessionLock {
             );
         }
     }
+}
+
+fn create_lock_file(path: &Path) -> Result<Option<File>, SessionError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    match options.open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+        Err(error) => Err(SessionError::Io {
+            message: error.to_string(),
+        }),
+    }
+}
+
+fn existing_session_is_live(lock_path: &Path, descriptor_path: &Path, socket_path: &Path) -> bool {
+    socket_accepts_connections(socket_path)
+        || descriptor_pid_is_alive(descriptor_path)
+        || lock_pid_is_alive(lock_path)
+}
+
+fn descriptor_pid_is_alive(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<SessionDescriptor>(&body).ok())
+        .is_some_and(|descriptor| process_is_alive(descriptor.pid))
+}
+
+fn lock_pid_is_alive(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|body| {
+            body.lines()
+                .find_map(|line| line.strip_prefix("pid=")?.parse::<u32>().ok())
+        })
+        .is_some_and(process_is_alive)
+}
+
+fn remove_stale_session_files(
+    lock_path: &Path,
+    descriptor_path: &Path,
+    socket_path: &Path,
+) -> Result<(), SessionError> {
+    for path in [lock_path, descriptor_path, socket_path] {
+        if let Err(error) = fs::remove_file(path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(SessionError::Io {
+                message: error.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn socket_accepts_connections(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+#[cfg(not(unix))]
+fn socket_accepts_connections(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
+}
+
+fn create_owner_only_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_owner_only_file(path: &Path, body: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(body)
+}
+
+#[cfg(not(unix))]
+fn write_owner_only_file(path: &Path, body: &[u8]) -> io::Result<()> {
+    fs::write(path, body)
+}
+
+fn set_owner_only_file(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 pub fn session_lock_path(paths: &CorePaths) -> PathBuf {
@@ -750,7 +903,7 @@ impl LocalSessionServer {
         use tokio::net::UnixListener;
 
         if let Some(parent) = descriptor.socket_path.parent() {
-            fs::create_dir_all(parent)?;
+            create_owner_only_dir(parent)?;
         }
         if let Err(error) = fs::remove_file(&descriptor.socket_path)
             && error.kind() != io::ErrorKind::NotFound
@@ -766,6 +919,7 @@ impl LocalSessionServer {
                 message: error.to_string(),
             }
         })?;
+        set_owner_only_file(&descriptor.socket_path)?;
         let descriptor_path = descriptor
             .profile_database_path
             .parent()
@@ -937,14 +1091,15 @@ impl LocalSessionServer {
 
 fn write_descriptor(path: &Path, descriptor: &SessionDescriptor) -> Result<(), SessionError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_owner_only_dir(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(descriptor).map_err(|error| SessionError::Io {
         message: error.to_string(),
     })?;
-    fs::write(&tmp, body)?;
+    write_owner_only_file(&tmp, &body)?;
     fs::rename(&tmp, path)?;
+    set_owner_only_file(path)?;
     Ok(())
 }
 
@@ -962,6 +1117,12 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn session_host_rejects_second_owner_for_profile() {
         let dir = tempfile::tempdir().unwrap();
@@ -972,6 +1133,20 @@ mod tests {
         let second = SessionHost::start(&Handle::current(), CoreConfig::default(), paths.clone());
 
         assert!(matches!(second, Err(SessionError::LockHeld { .. })));
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_lock_with_dead_pid_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        fs::write(session_lock_path(&paths), "pid=999999\n").unwrap();
+
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths.clone())
+            .expect("stale lock should not block startup");
+
+        assert_eq!(file_mode(&session_lock_path(&paths)), 0o600);
         host.shutdown().await.unwrap();
     }
 
@@ -1020,6 +1195,21 @@ mod tests {
         let spec = request.into_spec(&config).unwrap();
 
         assert_eq!(spec.destination(), destination);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unix_session_files_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths.clone())
+            .expect("session should start");
+
+        assert_eq!(file_mode(&session_lock_path(&paths)), 0o600);
+        assert_eq!(file_mode(&session_descriptor_path(&paths)), 0o600);
+        assert_eq!(file_mode(&session_socket_path(&paths)), 0o600);
+
+        host.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]
