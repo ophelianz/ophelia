@@ -31,9 +31,11 @@ use super::{
     PANEL_MIN_SIZE, ResizablePanelEvent, ResizablePanelState, ResizableState, resize_handle,
 };
 
+type ResizeHandler = dyn Fn(&Entity<ResizableState>, &mut Window, &mut App);
+
 #[derive(Clone)]
 struct ResizeCallbacks {
-    on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
+    on_resize: Rc<ResizeHandler>,
 }
 
 #[derive(IntoElement)]
@@ -42,7 +44,7 @@ pub struct ResizablePanelGroup {
     state: Option<Entity<ResizableState>>,
     axis: Axis,
     children: Vec<ResizablePanel>,
-    on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
+    on_resize: Rc<ResizeHandler>,
 }
 
 impl ResizablePanelGroup {
@@ -351,7 +353,6 @@ impl Element for ResizePanelGroupElement {
         _: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-        ()
     }
 
     fn paint(

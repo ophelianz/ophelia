@@ -78,7 +78,7 @@ fn render_notifications_switch(
     Switch::new("notifications-enabled")
         .checked(this.settings.notifications_enabled)
         .on_click(move |checked, _, app| {
-            let _ = entity.update(app, |this, cx| this.set_notifications_enabled(checked, cx));
+            entity.update(app, |this, cx| this.set_notifications_enabled(checked, cx));
         })
 }
 
@@ -94,7 +94,7 @@ fn render_auto_update_switch(
         .opacity(if enabled { 1.0 } else { 0.6 })
         .child(if enabled {
             switch.on_click(move |checked, _, app| {
-                let _ = entity.update(app, |this, cx| this.set_auto_update_enabled(checked, cx));
+                entity.update(app, |this, cx| this.set_auto_update_enabled(checked, cx));
             })
         } else {
             switch
@@ -123,7 +123,7 @@ fn render_update_channel(
     let stable = if enabled {
         let entity = entity.clone();
         stable.on_click(move |_, _, app| {
-            let _ = entity.update(app, |this, cx| {
+            entity.update(app, |this, cx| {
                 this.set_update_channel(UpdateChannel::Stable, cx);
             });
         })
@@ -132,7 +132,7 @@ fn render_update_channel(
     };
     let nightly = if enabled {
         nightly.on_click(move |_, _, app| {
-            let _ = entity.update(app, |this, cx| {
+            entity.update(app, |this, cx| {
                 this.set_update_channel(UpdateChannel::Nightly, cx);
             });
         })

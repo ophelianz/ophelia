@@ -98,15 +98,15 @@ impl ChunkMapCardModel {
     }
 }
 
-fn preferred_chunk_map_row<'a>(
-    rows: &'a [TransferListRow],
+fn preferred_chunk_map_row(
+    rows: &[TransferListRow],
     selected_id: Option<DownloadId>,
     mut state_for_id: impl FnMut(DownloadId) -> TransferChunkMapState,
-) -> Option<(&'a TransferListRow, TransferChunkMapState)> {
-    if let Some(selected_id) = selected_id {
-        if let Some(row) = rows.iter().find(|row| row.id == selected_id) {
-            return Some((row, state_for_id(row.id)));
-        }
+) -> Option<(&TransferListRow, TransferChunkMapState)> {
+    if let Some(selected_id) = selected_id
+        && let Some(row) = rows.iter().find(|row| row.id == selected_id)
+    {
+        return Some((row, state_for_id(row.id)));
     }
 
     rows.iter()

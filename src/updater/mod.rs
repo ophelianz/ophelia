@@ -189,21 +189,21 @@ pub fn apply_settings(settings: Settings, cx: &mut App) {
     let Some(updater) = entity(cx) else {
         return;
     };
-    let _ = updater.update(cx, |updater, cx| updater.apply_settings(settings, cx));
+    updater.update(cx, |updater, cx| updater.apply_settings(settings, cx));
 }
 
 pub fn perform_primary_action(cx: &mut App) {
     let Some(updater) = entity(cx) else {
         return;
     };
-    let _ = updater.update(cx, |updater, cx| updater.perform_primary_action(cx));
+    updater.update(cx, |updater, cx| updater.perform_primary_action(cx));
 }
 
 pub fn manual_check(cx: &mut App) {
     let Some(updater) = entity(cx) else {
         return;
     };
-    let _ = updater.update(cx, |updater, cx| {
+    updater.update(cx, |updater, cx| {
         updater.check_for_updates(UpdateTrigger::Manual, cx)
     });
 }
@@ -224,7 +224,7 @@ impl AutoUpdater {
         cx.spawn(async |this, cx: &mut gpui::AsyncApp| {
             loop {
                 cx.background_executor().timer(TICK_INTERVAL).await;
-                let _ = cx.update(|app| {
+                cx.update(|app| {
                     this.update(app, |updater, cx| updater.tick(cx)).ok();
                 });
             }
@@ -484,7 +484,7 @@ fn download_and_verify_release(
     event_tx: &Sender<WorkerEvent>,
 ) -> Result<DownloadedRelease, String> {
     let working_dir = create_working_dir()?;
-    let archive_path = working_dir.join(format!("Ophelia-{}.zip", release.channel.as_str()));
+    let archive_path = working_dir.join(format!("Ophelia-{}.zip", release.channel.slug()));
 
     let mut response = client
         .get(&release.asset.url)
@@ -636,7 +636,7 @@ fn manifest_url(build: &BuildInfo, channel: UpdateChannel) -> String {
         base_url.trim_end_matches('/'),
         current_platform_slug(),
         current_arch_slug(),
-        effective_update_channel(channel, build).as_str()
+        effective_update_channel(channel, build).slug()
     )
 }
 
@@ -657,8 +657,8 @@ fn validate_release_manifest(
     if manifest.channel != requested_channel {
         return Err(format!(
             "update manifest channel '{}' did not match requested channel '{}'",
-            manifest.channel.as_str(),
-            requested_channel.as_str()
+            manifest.channel.slug(),
+            requested_channel.slug()
         ));
     }
     if manifest.version.trim().is_empty() {
@@ -777,11 +777,11 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 trait UpdateChannelLabel {
-    fn as_str(self) -> &'static str;
+    fn slug(self) -> &'static str;
 }
 
 impl UpdateChannelLabel for UpdateChannel {
-    fn as_str(self) -> &'static str {
+    fn slug(self) -> &'static str {
         match self {
             UpdateChannel::Stable => "stable",
             UpdateChannel::Nightly => "nightly",

@@ -545,7 +545,7 @@ impl Downloads {
 
     fn tick_metrics(&mut self) {
         self.poll_ticks = self.poll_ticks.wrapping_add(1);
-        if self.poll_ticks % 10 == 0 {
+        if self.poll_ticks.is_multiple_of(10) {
             let total: u64 = self.speeds.iter().sum();
             if self.speed_history.len() >= 60 {
                 self.speed_history.pop_front();
@@ -568,13 +568,13 @@ impl Downloads {
             .collect()
     }
 
-    /// Current download-file read rate
-    pub fn disk_read_speed_bps(&self) -> Option<u64> {
-        Some(0) // nothing for now, it looks good i'd rather keep it
+    /// Current visible file-read slot. This does not report OS process reads.
+    pub fn file_read_speed_bps(&self) -> Option<u64> {
+        Some(0)
     }
 
     /// Current rate of bytes successfully written by download tasks
-    pub fn disk_write_speed_bps(&self) -> Option<u64> {
+    pub fn file_write_speed_bps(&self) -> Option<u64> {
         Some(self.write_sampler.write_speed_bps())
     }
 
@@ -1058,8 +1058,10 @@ mod tests {
     #[test]
     fn popup_notifications_respect_the_global_settings_switch() {
         let mut app = TestApp::new();
-        let mut enabled_settings = Settings::default();
-        enabled_settings.notifications_enabled = true;
+        let enabled_settings = Settings {
+            notifications_enabled: true,
+            ..Default::default()
+        };
 
         app.update(|cx| {
             show_popup_notification(
@@ -1071,8 +1073,10 @@ mod tests {
         });
         assert_eq!(app.windows().len(), 1);
 
-        let mut disabled_settings = Settings::default();
-        disabled_settings.notifications_enabled = false;
+        let disabled_settings = Settings {
+            notifications_enabled: false,
+            ..Default::default()
+        };
         let mut app = TestApp::new();
         app.update(|cx| {
             show_popup_notification(

@@ -26,13 +26,15 @@ use gpui::{
 
 use crate::ui::prelude::*;
 
+type SegmentClickHandler = dyn Fn(&ClickEvent, &mut Window, &mut App);
+
 #[derive(Clone)]
 pub struct SegmentedControlOption {
     id: ElementId,
     label: SharedString,
     selected: bool,
     min_width: Option<f32>,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<Rc<SegmentClickHandler>>,
 }
 
 impl SegmentedControlOption {
@@ -106,11 +108,7 @@ impl RenderOnce for SegmentedControl {
                     .items_center()
                     .justify_center()
                     .text_sm()
-                    .font_weight(if option.selected {
-                        gpui::FontWeight::LIGHT
-                    } else {
-                        gpui::FontWeight::LIGHT
-                    })
+                    .font_weight(gpui::FontWeight::LIGHT)
                     .text_color(if option.selected {
                         Colors::foreground()
                     } else {

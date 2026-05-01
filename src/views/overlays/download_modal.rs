@@ -427,11 +427,12 @@ mod tests {
     }
 
     fn test_settings() -> Settings {
-        let mut settings = Settings::default();
-        settings.default_download_dir = Some(std::env::temp_dir().join("ophelia-modal-tests"));
-        settings.destination_rules_enabled = false;
-        settings.destination_rules.clear();
-        settings
+        Settings {
+            default_download_dir: Some(std::env::temp_dir().join("ophelia-modal-tests")),
+            destination_rules_enabled: false,
+            destination_rules: Vec::new(),
+            ..Default::default()
+        }
     }
 
     fn open_host(app: &mut TestApp, settings: Settings) -> gpui::TestAppWindow<DownloadModalHost> {

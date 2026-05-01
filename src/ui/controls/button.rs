@@ -32,6 +32,8 @@ use gpui::{
 
 use crate::ui::prelude::*;
 
+type ButtonClickHandler = dyn Fn(&ClickEvent, &mut Window, &mut App);
+
 #[derive(Clone, Copy)]
 pub enum ButtonVariant {
     Secondary,
@@ -46,7 +48,7 @@ pub struct Button {
     icon: Option<IconName>,
     variant: ButtonVariant,
     disabled: bool,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<Rc<ButtonClickHandler>>,
 }
 
 impl Button {
@@ -161,7 +163,7 @@ pub struct IconButton {
     icon: IconName,
     stop_propagation: bool,
     debug_selector: Option<&'static str>,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<Rc<ButtonClickHandler>>,
 }
 
 impl IconButton {
