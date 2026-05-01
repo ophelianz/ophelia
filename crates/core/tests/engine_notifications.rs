@@ -17,7 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ophelia::engine::destination::{DestinationPolicy, part_path_for};
 use ophelia::engine::http::HttpDownloadConfig;
@@ -26,6 +26,7 @@ use ophelia::engine::{
     LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
 };
 use ophelia::engine::{CoreConfig, DestinationPolicyConfig};
+use tokio::runtime::Handle;
 
 fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
     DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
@@ -38,42 +39,50 @@ fn engine_config(max_concurrent_downloads: usize) -> CoreConfig {
     }
 }
 
-fn wait_for_matching_notification(
+fn start_engine(
+    config: CoreConfig,
+    db_tx: std::sync::mpsc::Sender<ophelia::engine::DbEvent>,
+    initial_next_id: u64,
+) -> DownloadEngine {
+    DownloadEngine::spawn_on(&Handle::current(), config, db_tx, initial_next_id)
+}
+
+async fn wait_for_matching_notification(
     engine: &mut DownloadEngine,
     mut predicate: impl FnMut(&EngineNotification) -> bool,
 ) -> EngineNotification {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Some(notification) = engine.poll_notification()
-            && predicate(&notification)
-        {
-            return notification;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let notification = engine
+                .next_notification()
+                .await
+                .expect("engine notification channel closed");
+            if predicate(&notification) {
+                return notification;
+            }
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for matching engine notification"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    })
+    .await
+    .expect("timed out waiting for matching engine notification")
 }
 
-fn wait_for_matching_progress(
+async fn wait_for_matching_progress(
     engine: &mut DownloadEngine,
     mut predicate: impl FnMut(&ophelia::engine::ProgressUpdate) -> bool,
 ) -> ophelia::engine::ProgressUpdate {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Some(update) = engine.poll_progress()
-            && predicate(&update)
-        {
-            return update;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let update = engine
+                .next_progress()
+                .await
+                .expect("engine progress channel closed");
+            if predicate(&update) {
+                return update;
+            }
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for matching progress update"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    })
+    .await
+    .expect("timed out waiting for matching progress update")
 }
 
 fn spawn_no_content_length_server(body: Vec<u8>) -> std::net::SocketAddr {
@@ -178,10 +187,10 @@ fn spawn_slow_range_server(
     addr
 }
 
-#[test]
-fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(engine_config(0), db_tx, 1);
+    let mut engine = start_engine(engine_config(0), db_tx, 1);
 
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
@@ -199,7 +208,9 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             EngineNotification::Update(update)
                 if update.id == id && update.status == DownloadStatus::Paused
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::Update(update) => {
             assert_eq!(update.id, id);
             assert_eq!(update.status, DownloadStatus::Paused);
@@ -216,7 +227,9 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             EngineNotification::Update(update)
                 if update.id == id && update.status == DownloadStatus::Pending
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::Update(update) => {
             assert_eq!(update.id, id);
             assert_eq!(update.status, DownloadStatus::Pending);
@@ -232,7 +245,9 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             notification,
             EngineNotification::LiveTransferRemoved { id: removed, .. } if *removed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::LiveTransferRemoved {
             id: removed,
             action,
@@ -258,7 +273,9 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             notification,
             EngineNotification::LiveTransferRemoved { id: removed, .. } if *removed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::LiveTransferRemoved {
             id: removed,
             action,
@@ -273,12 +290,12 @@ fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
     }
 }
 
-#[test]
-fn single_stream_http_emits_runtime_control_support_narrowing() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_stream_http_emits_runtime_control_support_narrowing() {
     let server = spawn_no_content_length_server(vec![7u8; 2048]);
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
@@ -293,7 +310,9 @@ fn single_stream_http_emits_runtime_control_support_narrowing() {
             notification,
             EngineNotification::ControlSupportChanged { id: changed, .. } if *changed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ControlSupportChanged {
             id: changed,
             support,
@@ -313,12 +332,12 @@ fn single_stream_http_emits_runtime_control_support_narrowing() {
     }
 }
 
-#[test]
-fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
@@ -332,17 +351,18 @@ fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
 
     let update = wait_for_matching_progress(&mut engine, |update| {
         update.id == id && update.status == DownloadStatus::Error
-    });
+    })
+    .await;
     assert_eq!(update.downloaded_bytes, 0);
     assert!(!destination.exists());
 }
 
-#[test]
-fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
+#[tokio::test(flavor = "multi_thread")]
+async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let server = spawn_slow_range_server(vec![5u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
@@ -364,7 +384,9 @@ fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
                 state: TransferChunkMapState::Loading,
             } if *changed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ChunkMapStateChanged {
             id: changed,
             state: TransferChunkMapState::Loading,
@@ -380,7 +402,9 @@ fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
                 state: TransferChunkMapState::Http(_),
             } if *changed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ChunkMapStateChanged {
             id: changed,
             state: TransferChunkMapState::Http(snapshot),
@@ -399,7 +423,9 @@ fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
                 state: TransferChunkMapState::Unsupported,
             } if *changed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ChunkMapStateChanged {
             id: changed,
             state: TransferChunkMapState::Unsupported,
@@ -408,12 +434,12 @@ fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     }
 }
 
-#[test]
-fn pausing_active_http_clears_chunk_map_to_unsupported() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     let server = spawn_slow_range_server(vec![9u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine.add(DownloadSpec::http(
@@ -435,7 +461,8 @@ fn pausing_active_http_clears_chunk_map_to_unsupported() {
                 state: TransferChunkMapState::Http(_),
             } if *changed == id
         )
-    });
+    })
+    .await;
 
     engine.pause(id);
     match wait_for_matching_notification(&mut engine, |notification| {
@@ -446,7 +473,9 @@ fn pausing_active_http_clears_chunk_map_to_unsupported() {
                 state: TransferChunkMapState::Unsupported,
             } if *changed == id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ChunkMapStateChanged {
             id: changed,
             state: TransferChunkMapState::Unsupported,
@@ -455,15 +484,15 @@ fn pausing_active_http_clears_chunk_map_to_unsupported() {
     }
 }
 
-#[test]
-fn pausing_active_http_starts_next_queued_download() {
+#[tokio::test(flavor = "multi_thread")]
+async fn pausing_active_http_starts_next_queued_download() {
     let first_server =
         spawn_slow_range_server(vec![1u8; 128 * 1024], 512, Duration::from_millis(25));
     let second_server =
         spawn_slow_range_server(vec![2u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(engine_config(1), db_tx, 1);
+    let mut engine = start_engine(engine_config(1), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let first_destination = tempdir.path().join("first.bin");
     let second_destination = tempdir.path().join("second.bin");
@@ -497,7 +526,8 @@ fn pausing_active_http_starts_next_queued_download() {
                 state: TransferChunkMapState::Http(_),
             } if *id == first_id
         )
-    });
+    })
+    .await;
 
     engine.pause(first_id);
 
@@ -509,7 +539,9 @@ fn pausing_active_http_starts_next_queued_download() {
                 state: TransferChunkMapState::Loading,
             } if *id == second_id
         )
-    }) {
+    })
+    .await
+    {
         EngineNotification::ChunkMapStateChanged {
             id,
             state: TransferChunkMapState::Loading,
@@ -518,13 +550,13 @@ fn pausing_active_http_starts_next_queued_download() {
     }
 }
 
-#[test]
-fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
     let data = vec![8u8; 32 * 1024];
     let server = spawn_slow_range_server(data.clone(), 8192, Duration::from_millis(0));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = DownloadEngine::new(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let part_path = part_path_for(&destination);
@@ -544,7 +576,8 @@ fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
 
     let update = wait_for_matching_progress(&mut engine, |update| {
         update.id == id && update.status == DownloadStatus::Finished
-    });
+    })
+    .await;
     assert_eq!(update.downloaded_bytes, data.len() as u64);
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!part_path.exists());
