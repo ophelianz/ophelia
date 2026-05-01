@@ -17,9 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-mod actor;
 pub mod alloc;
 pub mod chunk;
+mod controller;
 pub mod destination;
 pub mod http;
 mod provider;
@@ -31,6 +31,6 @@ pub use crate::config::{
     CollisionPolicy, CoreConfig, CorePaths, DestinationPolicyConfig, DestinationRuleConfig,
     HttpCoreConfig, HttpOrderingMode,
 };
-pub use actor::DownloadEngine;
+pub use controller::DownloadEngine;
 pub use spec::{AddDownloadRequest, DownloadSource, DownloadSpec, RestoredDownload};
 pub use types::*;

@@ -19,7 +19,7 @@
 
 //! Downloads one byte range
 //!
-//! Sends one ranged HTTP request, writes up to its current stop point,
+//! Sends one ranged HTTP request, hands buffered bytes to the disk writer,
 //! and reports events back to the runner
 
 #![allow(dead_code)]
@@ -30,8 +30,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use super::disk_writer::{RangeWriteJob, RangeWriteResult, RangeWriteSender};
 use super::events::{WorkerEvent, WorkerFailure};
 use super::ranges::ByteRange;
 use super::scheduler::ActiveAttempt;
@@ -42,7 +44,7 @@ pub(super) struct RangeWorkerConfig {
     pub(super) url: String,
     pub(super) attempt: ActiveAttempt,
     pub(super) live_stop_at: Arc<AtomicU64>,
-    pub(super) file: Arc<std::fs::File>,
+    pub(super) write_jobs: RangeWriteSender,
     pub(super) write_buffer_size: usize,
     pub(super) stall_timeout: Duration,
     pub(super) pause_token: CancellationToken,
@@ -328,22 +330,58 @@ impl RangeWorker {
             return Ok(());
         }
 
-        if let Err(error) = write_at(&self.config.file, &self.buffer[..writable_len], self.offset) {
-            self.fail(io_failure(error)).await;
+        let Some(written) = ByteRange::from_len(self.offset, writable_len as u64) else {
+            self.fail(WorkerFailure::FatalIo {
+                message: "write range overflow".to_string(),
+            })
+            .await;
+            return Err(());
+        };
+
+        let bytes = self.take_writable_bytes(writable_len);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let job = RangeWriteJob::new(self.config.attempt.id(), self.offset, bytes, reply_tx);
+        if self.config.write_jobs.send(job).await.is_err() {
+            self.fail(WorkerFailure::FatalIo {
+                message: "disk writer stopped".to_string(),
+            })
+            .await;
             return Err(());
         }
 
-        if let Some(written) = ByteRange::from_len(self.offset, writable_len as u64) {
-            self.event(WorkerEvent::BytesWritten {
-                attempt: self.config.attempt.id(),
-                written,
-            })
-            .await;
+        match reply_rx.await {
+            Ok(RangeWriteResult::Written { range, .. }) => {
+                debug_assert_eq!(range, written);
+                self.event(WorkerEvent::BytesWritten {
+                    attempt: self.config.attempt.id(),
+                    written: range,
+                })
+                .await;
+                self.offset = range.end();
+                Ok(())
+            }
+            Ok(RangeWriteResult::Failed { failure, .. }) => {
+                self.fail(failure).await;
+                Err(())
+            }
+            Err(_closed) => {
+                self.fail(WorkerFailure::FatalIo {
+                    message: "disk writer dropped write result".to_string(),
+                })
+                .await;
+                Err(())
+            }
+        }
+    }
+
+    fn take_writable_bytes(&mut self, writable_len: usize) -> Vec<u8> {
+        if writable_len == self.buffer.len() {
+            return std::mem::take(&mut self.buffer);
         }
 
-        self.offset += writable_len as u64;
+        let bytes = self.buffer[..writable_len].to_vec();
         self.buffer.clear();
-        Ok(())
+        bytes
     }
 
     async fn finish(&self) {
@@ -519,32 +557,6 @@ fn status_failure(
     }
 }
 
-fn io_failure(error: std::io::Error) -> WorkerFailure {
-    match error.kind() {
-        std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied => {
-            WorkerFailure::FatalIo {
-                message: error.to_string(),
-            }
-        }
-        _ => WorkerFailure::RetryableIo {
-            message: error.to_string(),
-        },
-    }
-}
-
-#[cfg(unix)]
-fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    file.write_all_at(buf, offset)
-}
-
-#[cfg(windows)]
-fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
-    use std::os::windows::fs::FileExt;
-    file.seek_write(buf, offset)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Read;
@@ -560,10 +572,11 @@ mod tests {
     };
 
     use super::{
-        AppendOutcome, RangeWorker, RangeWorkerConfig, append_bytes_with_live_stop,
+        AppendOutcome, RangeWorker, RangeWorkerConfig, WorkerSignal, append_bytes_with_live_stop,
         run_range_worker,
     };
     use crate::engine::http::{
+        disk_writer::RangeDiskWriter,
         events::{WorkerEvent, WorkerFailure},
         ranges::ByteRange,
         scheduler::RangeScheduler,
@@ -581,7 +594,7 @@ mod tests {
         })
     }
 
-    fn test_file() -> (tempfile::TempDir, Arc<std::fs::File>) {
+    fn test_file() -> (tempfile::TempDir, std::fs::File) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("part.bin");
         let file = std::fs::OpenOptions::new()
@@ -590,7 +603,7 @@ mod tests {
             .create_new(true)
             .open(path)
             .unwrap();
-        (dir, Arc::new(file))
+        (dir, file)
     }
 
     fn events_from(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<WorkerEvent> {
@@ -603,17 +616,18 @@ mod tests {
 
     fn worker_config(
         url: String,
-        file: Arc<std::fs::File>,
         events: mpsc::Sender<WorkerEvent>,
-    ) -> RangeWorkerConfig {
+    ) -> (RangeWorkerConfig, tempfile::TempDir, RangeDiskWriter) {
+        let (dir, file) = test_file();
+        let writer = RangeDiskWriter::spawn(file);
         let mut scheduler = RangeScheduler::new(8, [range(0, 8)]);
         let attempt = scheduler.start_next_attempt().unwrap();
-        RangeWorkerConfig {
+        let config = RangeWorkerConfig {
             client: Arc::new(reqwest::Client::new()),
             url,
             attempt,
             live_stop_at: Arc::new(AtomicU64::new(attempt.stop_at())),
-            file,
+            write_jobs: writer.sender(),
             write_buffer_size: 4,
             stall_timeout: Duration::from_secs(5),
             pause_token: CancellationToken::new(),
@@ -621,7 +635,8 @@ mod tests {
             hedge_lost_token: CancellationToken::new(),
             throttle: throttle(),
             events,
-        }
+        };
+        (config, dir, writer)
     }
 
     #[test]
@@ -648,23 +663,117 @@ mod tests {
 
     #[tokio::test]
     async fn flush_buffer_trims_to_live_stop_before_write() {
-        let (dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        let config = worker_config("http://example.invalid/file.bin".to_string(), file, tx);
+        let (config, dir, writer) =
+            worker_config("http://example.invalid/file.bin".to_string(), tx);
         config.live_stop_at.store(4, Ordering::Release);
         let mut worker = RangeWorker::new(config, range(0, 8));
         worker.buffer = b"abcdefgh".to_vec();
 
         worker.flush_buffer().await.unwrap();
-
         assert_eq!(worker.offset, 4);
         assert!(worker.buffer.is_empty());
+        drop(worker);
+        assert!(writer.shutdown().await.is_empty());
         assert!(matches!(
             events_from(&mut rx).as_slice(),
             [WorkerEvent::BytesWritten {
                 written,
                 ..
             }] if *written == range(0, 4)
+        ));
+
+        let mut written = Vec::new();
+        std::fs::File::open(dir.path().join("part.bin"))
+            .unwrap()
+            .read_to_end(&mut written)
+            .unwrap();
+        assert_eq!(written, b"abcd");
+    }
+
+    #[tokio::test]
+    async fn pause_flushes_buffer_before_paused_event() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let (config, dir, writer) =
+            worker_config("http://example.invalid/file.bin".to_string(), tx);
+        let mut worker = RangeWorker::new(config, range(0, 8));
+        worker.buffer = b"abcd".to_vec();
+
+        worker.stop_after_flush(WorkerSignal::Pause).await;
+        assert_eq!(worker.offset, 4);
+        drop(worker);
+        assert!(writer.shutdown().await.is_empty());
+
+        assert!(matches!(
+            events_from(&mut rx).as_slice(),
+            [
+                WorkerEvent::BytesWritten { written, .. },
+                WorkerEvent::Paused { .. }
+            ] if *written == range(0, 4)
+        ));
+
+        let mut written = Vec::new();
+        std::fs::File::open(dir.path().join("part.bin"))
+            .unwrap()
+            .read_to_end(&mut written)
+            .unwrap();
+        assert_eq!(written, b"abcd");
+    }
+
+    #[tokio::test]
+    async fn hedge_lost_flushes_buffer_before_failure_event() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let (config, dir, writer) =
+            worker_config("http://example.invalid/file.bin".to_string(), tx);
+        let mut worker = RangeWorker::new(config, range(0, 8));
+        worker.buffer = b"abcd".to_vec();
+
+        worker.stop_after_flush(WorkerSignal::HedgeLost).await;
+        assert_eq!(worker.offset, 4);
+        drop(worker);
+        assert!(writer.shutdown().await.is_empty());
+
+        assert!(matches!(
+            events_from(&mut rx).as_slice(),
+            [
+                WorkerEvent::BytesWritten { written, .. },
+                WorkerEvent::Failed {
+                    failure: WorkerFailure::HedgeLost,
+                    ..
+                }
+            ] if *written == range(0, 4)
+        ));
+
+        let mut written = Vec::new();
+        std::fs::File::open(dir.path().join("part.bin"))
+            .unwrap()
+            .read_to_end(&mut written)
+            .unwrap();
+        assert_eq!(written, b"abcd");
+    }
+
+    #[tokio::test]
+    async fn health_retry_flushes_buffer_before_failure_event() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let (config, dir, writer) =
+            worker_config("http://example.invalid/file.bin".to_string(), tx);
+        let mut worker = RangeWorker::new(config, range(0, 8));
+        worker.buffer = b"abcd".to_vec();
+
+        worker.stop_after_flush(WorkerSignal::HealthRetry).await;
+        assert_eq!(worker.offset, 4);
+        drop(worker);
+        assert!(writer.shutdown().await.is_empty());
+
+        assert!(matches!(
+            events_from(&mut rx).as_slice(),
+            [
+                WorkerEvent::BytesWritten { written, .. },
+                WorkerEvent::Failed {
+                    failure: WorkerFailure::HealthRetry,
+                    ..
+                }
+            ] if *written == range(0, 4)
         ));
 
         let mut written = Vec::new();
@@ -689,14 +798,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         let events = events_from(&mut rx);
         assert!(matches!(
@@ -729,14 +834,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),
@@ -760,14 +861,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),
@@ -787,14 +884,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),
@@ -818,14 +911,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         let events = events_from(&mut rx);
         assert!(matches!(
@@ -850,14 +939,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        run_range_worker(worker_config(
-            format!("{}/file.bin", server.uri()),
-            Arc::clone(&file),
-            tx,
-        ))
-        .await;
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
+        run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         let events = events_from(&mut rx);
         assert!(matches!(
@@ -872,12 +957,12 @@ mod tests {
     #[tokio::test]
     async fn range_worker_reports_pause_before_request() {
         let server = MockServer::start().await;
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
         config.pause_token.cancel();
 
         run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),
@@ -888,12 +973,12 @@ mod tests {
     #[tokio::test]
     async fn range_worker_reports_hedge_lost_before_request() {
         let server = MockServer::start().await;
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
         config.hedge_lost_token.cancel();
 
         run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),
@@ -907,12 +992,12 @@ mod tests {
     #[tokio::test]
     async fn range_worker_reports_health_retry_before_request() {
         let server = MockServer::start().await;
-        let (_dir, file) = test_file();
         let (tx, mut rx) = mpsc::channel(256);
-        let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
+        let (config, _dir, writer) = worker_config(format!("{}/file.bin", server.uri()), tx);
         config.health_retry_token.cancel();
 
         run_range_worker(config).await;
+        assert!(writer.shutdown().await.is_empty());
 
         assert!(matches!(
             events_from(&mut rx).as_slice(),

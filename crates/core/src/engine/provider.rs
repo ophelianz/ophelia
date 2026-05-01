@@ -17,9 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Starts downloads for the engine actor
+//! Starts downloads for the engine controller
 //!
-//! Keeps HTTP task setup and HTTP pause data out of `actor.rs`
+//! Keeps HTTP task setup and HTTP pause data out of `controller.rs`
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
