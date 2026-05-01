@@ -111,10 +111,10 @@ async fn wait_for_matching_progress(
             .expect("engine event channel closed");
         let event_debug = format!("{event:?}");
 
-        if let EngineEvent::Progress(update) = event {
-            if predicate(&update) {
-                return update;
-            }
+        if let EngineEvent::Progress(update) = event
+            && predicate(&update)
+        {
+            return update;
         }
 
         seen.push(event_debug);
