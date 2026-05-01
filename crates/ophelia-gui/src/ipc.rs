@@ -1,0 +1,234 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
+//! Local HTTP server for browser-extension downloads
+//!
+//! Bound to 127.0.0.1 only
+//! The extension checks GET /health, then POSTs downloads to /download
+
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tower_http::cors::CorsLayer;
+
+use crate::engine::AddDownloadRequest;
+
+/// Browser-extension request body
+#[derive(Debug, Deserialize)]
+struct BrowserDownloadRequest {
+    pub url: String,
+    pub filename: Option<String>,
+}
+
+/// App-owned IPC handle
+///
+/// The browser-extension server runs outside the download engine
+pub struct IpcServer {
+    task: Option<JoinHandle<()>>,
+    rx: mpsc::UnboundedReceiver<AddDownloadRequest>,
+}
+
+impl IpcServer {
+    pub fn start(port: u16, runtime: &Handle) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = runtime.spawn(serve(port, tx));
+        Self {
+            task: Some(task),
+            rx,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn disabled() -> Self {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        Self { task: None, rx }
+    }
+
+    pub fn try_recv(&mut self) -> Option<AddDownloadRequest> {
+        self.rx.try_recv().ok()
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    app: &'static str,
+    version: &'static str,
+}
+
+/// Bind and serve until the process exits
+/// Port conflict is logged as a warning
+pub async fn serve(port: u16, tx: mpsc::UnboundedSender<AddDownloadRequest>) {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("IPC server could not bind on port {port}: {e}");
+            return;
+        }
+    };
+
+    tracing::info!("IPC server listening on 127.0.0.1:{port}");
+    serve_listener(listener, tx).await;
+}
+
+async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    tx: mpsc::UnboundedSender<AddDownloadRequest>,
+) {
+    axum::serve(listener, router(tx)).await.ok();
+}
+
+fn router(tx: mpsc::UnboundedSender<AddDownloadRequest>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/download", post(add_download))
+        .layer(CorsLayer::permissive())
+        .with_state(Arc::new(tx))
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        app: "ophelia",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+async fn add_download(
+    State(tx): State<Arc<mpsc::UnboundedSender<AddDownloadRequest>>>,
+    Json(req): Json<BrowserDownloadRequest>,
+) -> StatusCode {
+    let request = AddDownloadRequest::from_url_with_suggested_filename(req.url, req.filename);
+    if tx.send(request).is_ok() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    async fn spawn_test_server(
+        tx: mpsc::UnboundedSender<AddDownloadRequest>,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            serve_listener(listener, tx).await;
+        });
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn health_endpoint_reports_app_and_version() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let addr = spawn_test_server(tx).await;
+
+        let response = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(body["app"], "ophelia");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_endpoint_normalizes_browser_payload_into_add_request() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let addr = spawn_test_server(tx).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("http://{addr}/download"))
+            .header("content-type", "application/json")
+            .body(
+                json!({
+                    "url": "https://example.com/video.mp4",
+                    "filename": "browser-name.mp4"
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = rx.recv().await.unwrap();
+        assert_eq!(request.url(), "https://example.com/video.mp4");
+        assert_eq!(
+            request.suggested_filename.as_deref(),
+            Some("browser-name.mp4")
+        );
+        let settings = Settings {
+            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
+            destination_rules_enabled: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            request.preview_destination(&settings.core_config().destination),
+            PathBuf::from("/tmp/downloads/browser-name.mp4")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_endpoint_returns_service_unavailable_when_receiver_closed() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let addr = spawn_test_server(tx).await;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!("http://{addr}/download"))
+            .header("content-type", "application/json")
+            .body(
+                json!({
+                    "url": "https://example.com/file.zip",
+                    "filename": null
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
