@@ -17,10 +17,10 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Local HTTP server that lets the browser extension hand downloads to Ophelia.
+//! Local HTTP server for browser-extension downloads
 //!
 //! Bound to 127.0.0.1 only
-//! The extension discovers it via GET /health, then POSTs downloads to /download.
+//! The extension checks GET /health, then POSTs downloads to /download
 
 use axum::{
     Json, Router,
@@ -36,17 +36,16 @@ use tower_http::cors::CorsLayer;
 
 use crate::engine::AddDownloadRequest;
 
-/// Browser-extension transport payload.
+/// Browser-extension request body
 #[derive(Debug, Deserialize)]
 struct BrowserDownloadRequest {
     pub url: String,
     pub filename: Option<String>,
 }
 
-/// App-owned IPC ingress handle.
+/// App-owned IPC handle
 ///
-/// The browser-extension transport runs on its own runtime so the download
-/// engine does not have to own ingress lifecycles directly.
+/// The browser-extension server runs outside the download engine
 pub struct IpcServer {
     #[allow(dead_code)] // held to keep the runtime and server alive
     runtime: Runtime,
@@ -79,7 +78,8 @@ struct HealthResponse {
     version: &'static str,
 }
 
-/// Bind and serve until the process exits. Soft-fails on port conflict (logged as warn).
+/// Bind and serve until the process exits
+/// Port conflict is logged as a warning
 pub async fn serve(port: u16, tx: mpsc::UnboundedSender<AddDownloadRequest>) {
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,

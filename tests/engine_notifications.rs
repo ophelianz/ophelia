@@ -19,11 +19,11 @@
 
 use std::time::{Duration, Instant};
 
-use ophelia::engine::destination::DestinationPolicy;
+use ophelia::engine::destination::{DestinationPolicy, part_path_for};
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::{
-    ArtifactState, DownloadEngine, DownloadSpec, DownloadStatus, EngineNotification,
-    LiveTransferRemovalAction, TransferChunkMapState, TransferControlSupport,
+    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineNotification,
+    LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
 };
 use ophelia::settings::Settings;
 
@@ -46,6 +46,25 @@ fn wait_for_matching_notification(
     }
 }
 
+fn wait_for_matching_progress(
+    engine: &mut DownloadEngine,
+    mut predicate: impl FnMut(&ophelia::engine::ProgressUpdate) -> bool,
+) -> ophelia::engine::ProgressUpdate {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(update) = engine.poll_progress()
+            && predicate(&update)
+        {
+            return update;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for matching progress update"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn spawn_no_content_length_server(body: Vec<u8>) -> std::net::SocketAddr {
     use std::io::{Read, Write};
 
@@ -60,6 +79,29 @@ fn spawn_no_content_length_server(body: Vec<u8>) -> std::net::SocketAddr {
             std::thread::spawn(move || {
                 let mut request = [0u8; 4096];
                 let _ = socket.read(&mut request);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                let _ = socket.write_all(&body);
+            });
+        }
+    });
+    addr
+}
+
+fn spawn_slow_no_content_length_server(body: Vec<u8>, delay: Duration) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for socket in listener.incoming() {
+            let Ok(mut socket) = socket else {
+                break;
+            };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request);
+                std::thread::sleep(delay);
                 let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
                 let _ = socket.write_all(&body);
             });
@@ -265,6 +307,30 @@ fn single_stream_http_emits_runtime_control_support_narrowing() {
 }
 
 #[test]
+fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
+    let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
+
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
+    let id = engine.add(DownloadSpec::http(
+        format!("http://{server}/file.bin"),
+        destination.clone(),
+        DestinationPolicy::for_resolved_destination(&Settings::default(), &destination),
+        HttpDownloadConfig::default(),
+    ));
+
+    engine.pause(id);
+
+    let update = wait_for_matching_progress(&mut engine, |update| {
+        update.id == id && update.status == DownloadStatus::Error
+    });
+    assert_eq!(update.downloaded_bytes, 0);
+    assert!(!destination.exists());
+}
+
+#[test]
 fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let server = spawn_slow_range_server(vec![5u8; 32 * 1024], 512, Duration::from_millis(25));
 
@@ -380,4 +446,103 @@ fn pausing_active_http_clears_chunk_map_to_unsupported() {
         } => assert_eq!(changed, id),
         other => panic!("expected paused unsupported chunk-map state, got {other:?}"),
     }
+}
+
+#[test]
+fn pausing_active_http_starts_next_queued_download() {
+    let first_server =
+        spawn_slow_range_server(vec![1u8; 128 * 1024], 512, Duration::from_millis(25));
+    let second_server =
+        spawn_slow_range_server(vec![2u8; 32 * 1024], 512, Duration::from_millis(25));
+
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let settings = Settings {
+        max_concurrent_downloads: 1,
+        ..Settings::default()
+    };
+    let mut engine = DownloadEngine::new(settings, db_tx, 1);
+    let tempdir = tempfile::tempdir().unwrap();
+    let first_destination = tempdir.path().join("first.bin");
+    let second_destination = tempdir.path().join("second.bin");
+
+    let first_id = engine.add(DownloadSpec::http(
+        format!("http://{first_server}/first.bin"),
+        first_destination.clone(),
+        DestinationPolicy::for_resolved_destination(&Settings::default(), &first_destination),
+        HttpDownloadConfig {
+            speed_limit_bps: 20_000,
+            write_buffer_size: 1024,
+            ..HttpDownloadConfig::default()
+        },
+    ));
+    let second_id = engine.add(DownloadSpec::http(
+        format!("http://{second_server}/second.bin"),
+        second_destination.clone(),
+        DestinationPolicy::for_resolved_destination(&Settings::default(), &second_destination),
+        HttpDownloadConfig {
+            speed_limit_bps: 20_000,
+            write_buffer_size: 1024,
+            ..HttpDownloadConfig::default()
+        },
+    ));
+
+    let _ = wait_for_matching_notification(&mut engine, |notification| {
+        matches!(
+            notification,
+            EngineNotification::ChunkMapStateChanged {
+                id,
+                state: TransferChunkMapState::Http(_),
+            } if *id == first_id
+        )
+    });
+
+    engine.pause(first_id);
+
+    match wait_for_matching_notification(&mut engine, |notification| {
+        matches!(
+            notification,
+            EngineNotification::ChunkMapStateChanged {
+                id,
+                state: TransferChunkMapState::Loading,
+            } if *id == second_id
+        )
+    }) {
+        EngineNotification::ChunkMapStateChanged {
+            id,
+            state: TransferChunkMapState::Loading,
+        } => assert_eq!(id, second_id),
+        other => panic!("expected queued download to start, got {other:?}"),
+    }
+}
+
+#[test]
+fn restored_http_without_resume_data_discards_stale_part_file_before_restart() {
+    let data = vec![8u8; 32 * 1024];
+    let server = spawn_slow_range_server(data.clone(), 8192, Duration::from_millis(0));
+
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = DownloadEngine::new(Settings::default(), db_tx, 1);
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
+    let part_path = part_path_for(&destination);
+    std::fs::write(&part_path, b"stale partial bytes").unwrap();
+
+    let id = DownloadId(77);
+    engine.restore(RestoredDownload::http(
+        id,
+        format!("http://{server}/file.bin"),
+        destination.clone(),
+        &Settings::default(),
+        HttpDownloadConfig::default(),
+        None,
+    ));
+
+    engine.resume(id);
+
+    let update = wait_for_matching_progress(&mut engine, |update| {
+        update.id == id && update.status == DownloadStatus::Finished
+    });
+    assert_eq!(update.downloaded_bytes, data.len() as u64);
+    assert_eq!(std::fs::read(&destination).unwrap(), data);
+    assert!(!part_path.exists());
 }

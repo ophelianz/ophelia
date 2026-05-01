@@ -119,7 +119,7 @@ async fn parallel_download_with_range_support() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -143,6 +143,10 @@ async fn parallel_download_with_range_support() {
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
     assert_eq!(sha256(&downloaded), expected_hash);
+    assert_eq!(
+        drain_download_write_bytes(&mut runtime_rx),
+        data.len() as u64
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -229,7 +233,7 @@ async fn single_stream_fallback_no_range_support() {
     let dest = dir.path().join("file.bin");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -252,113 +256,36 @@ async fn single_stream_fallback_no_range_support() {
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(sha256(&downloaded), expected_hash);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn no_range_http_emits_unsupported_chunk_map_state() {
-    let data = test_data(5_000);
-
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/file.bin"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(data))
-        .mount(&server)
-        .await;
-
-    let url = format!("{}/file.bin", server.uri());
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
-    download_task(
-        DownloadId(0),
-        url,
-        dest,
-        exact_destination_policy(&dir.path().join("file.bin")),
-        HttpDownloadConfig::default(),
-        tx,
-        CancellationToken::new(),
-        Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(None)),
-        None,
-        unlimited_semaphore(),
-        unlimited_throttle(),
-        runtime_tx,
-    )
-    .await;
-
-    match wait_for_runtime_update(&mut runtime_rx, |update| {
-        matches!(
-            update,
+    let mut saw_unsupported_chunk_map = false;
+    let mut saw_single_stream_controls = false;
+    let mut written = 0_u64;
+    while let Ok(update) = runtime_rx.try_recv() {
+        match update {
             TaskRuntimeUpdate::ChunkMapStateChanged {
                 state: TransferChunkMapState::Unsupported,
                 ..
+            } => saw_unsupported_chunk_map = true,
+            TaskRuntimeUpdate::ControlSupportChanged { support, .. } => {
+                assert_eq!(
+                    support,
+                    TransferControlSupport {
+                        can_pause: false,
+                        can_resume: false,
+                        can_cancel: true,
+                        can_restore: false,
+                    }
+                );
+                saw_single_stream_controls = true;
             }
-        )
-    })
-    .await
-    {
-        TaskRuntimeUpdate::ChunkMapStateChanged {
-            state: TransferChunkMapState::Unsupported,
-            ..
-        } => {}
-        other => panic!("expected unsupported chunk-map state, got {other:?}"),
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn no_range_http_emits_narrowed_runtime_control_support() {
-    let data = test_data(2_000);
-
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/file.bin"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(data))
-        .mount(&server)
-        .await;
-
-    let url = format!("{}/file.bin", server.uri());
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
-    download_task(
-        DownloadId(0),
-        url,
-        dest,
-        exact_destination_policy(&dir.path().join("file.bin")),
-        HttpDownloadConfig::default(),
-        tx,
-        CancellationToken::new(),
-        Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(None)),
-        None,
-        unlimited_semaphore(),
-        unlimited_throttle(),
-        runtime_tx,
-    )
-    .await;
-
-    match wait_for_runtime_update(&mut runtime_rx, |update| {
-        matches!(update, TaskRuntimeUpdate::ControlSupportChanged { .. })
-    })
-    .await
-    {
-        TaskRuntimeUpdate::ControlSupportChanged { support, .. } => {
-            assert_eq!(
-                support,
-                TransferControlSupport {
-                    can_pause: false,
-                    can_resume: false,
-                    can_cancel: true,
-                    can_restore: false,
-                }
-            );
+            TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } => {
+                written = written.saturating_add(bytes);
+            }
+            _ => {}
         }
-        other => panic!("expected control-support update, got {other:?}"),
     }
+    assert!(saw_unsupported_chunk_map);
+    assert!(saw_single_stream_controls);
+    assert_eq!(written, data.len() as u64);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -395,100 +322,6 @@ async fn fallback_when_no_content_length() {
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(sha256(&downloaded), expected_hash);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn no_content_length_fallback_emits_narrowed_runtime_control_support() {
-    let data = test_data(2_000);
-    let server = spawn_no_content_length_server(data).await;
-    let url = format!("http://{server}/file.bin");
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
-    download_task(
-        DownloadId(0),
-        url,
-        dest,
-        exact_destination_policy(&dir.path().join("file.bin")),
-        HttpDownloadConfig::default(),
-        tx,
-        CancellationToken::new(),
-        Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(None)),
-        None,
-        unlimited_semaphore(),
-        unlimited_throttle(),
-        runtime_tx,
-    )
-    .await;
-
-    let mut saw_support_change = false;
-    while let Ok(update) = runtime_rx.try_recv() {
-        if let TaskRuntimeUpdate::ControlSupportChanged { support, .. } = update {
-            assert_eq!(
-                support,
-                TransferControlSupport {
-                    can_pause: false,
-                    can_resume: false,
-                    can_cancel: true,
-                    can_restore: false,
-                }
-            );
-            saw_support_change = true;
-        }
-    }
-    assert!(
-        saw_support_change,
-        "expected runtime control-support narrowing"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn no_content_length_fallback_emits_unsupported_chunk_map_state() {
-    let data = test_data(2_000);
-    let server = spawn_no_content_length_server(data).await;
-    let url = format!("http://{server}/file.bin");
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
-    download_task(
-        DownloadId(0),
-        url,
-        dest,
-        exact_destination_policy(&dir.path().join("file.bin")),
-        HttpDownloadConfig::default(),
-        tx,
-        CancellationToken::new(),
-        Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(None)),
-        None,
-        unlimited_semaphore(),
-        unlimited_throttle(),
-        runtime_tx,
-    )
-    .await;
-
-    match wait_for_runtime_update(&mut runtime_rx, |update| {
-        matches!(
-            update,
-            TaskRuntimeUpdate::ChunkMapStateChanged {
-                state: TransferChunkMapState::Unsupported,
-                ..
-            }
-        )
-    })
-    .await
-    {
-        TaskRuntimeUpdate::ChunkMapStateChanged {
-            state: TransferChunkMapState::Unsupported,
-            ..
-        } => {}
-        other => panic!("expected unsupported chunk-map state, got {other:?}"),
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -718,6 +551,55 @@ async fn active_part_file_duplicate_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sequential_chunked_download_with_range_runner_finishes() {
+    let data = test_data(24_000);
+    let expected_hash = sha256(&data);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file.bin"))
+        .respond_with(RangeResponder { data: data.clone() })
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/file.bin", server.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("file.bin");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    download_task(
+        DownloadId(0),
+        url,
+        dest.clone(),
+        exact_destination_policy(&dest),
+        HttpDownloadConfig {
+            min_connections: 3,
+            max_connections: 3,
+            ordering_mode: HttpDownloadOrderingMode::Sequential,
+            write_buffer_size: 1024,
+            ..HttpDownloadConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+        None,
+        unlimited_semaphore(),
+        unlimited_throttle(),
+        runtime_tx,
+    )
+    .await;
+
+    let updates = drain_progress(&mut rx).await;
+    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+
+    let downloaded = std::fs::read(&dest).unwrap();
+    assert_eq!(downloaded.len(), data.len());
+    assert_eq!(sha256(&downloaded), expected_hash);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     let data = test_data(32_000);
 
@@ -732,7 +614,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("video.mkv");
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -778,4 +660,12 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
         }
         other => panic!("expected http chunk-map snapshot, got {other:?}"),
     }
+
+    let updates = drain_progress(&mut rx).await;
+    assert!(
+        updates.iter().any(|update| {
+            update.status == DownloadStatus::Downloading && update.speed_bytes_per_sec > 0
+        }),
+        "range downloads should report non-zero speed for the frontend graph"
+    );
 }

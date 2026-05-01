@@ -19,11 +19,9 @@
 
 #![allow(dead_code)]
 
-//! Shared platform-specific process I/O counters.
+//! Process disk counters from the OS
 //!
-//! These counters are used for lightweight app-session disk I/O metrics in the
-//! Transfers stats bar. They are intentionally process-wide rather than
-//! per-download.
+//! These are process-wide counters, not per-download counters
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessIoCounters {

@@ -17,12 +17,12 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Server capability probe.
+//! Checks what the server supports
 //!
-//! A single GET with `Range: bytes=0-0` tells us three things:
-//!   - 206 Partial Content -> server supports range requests (parallel chunks OK)
-//!   - Content-Range header -> total file size
-//!   - Content-Disposition header -> server-suggested filename (used instead of the URL path)
+//! Sends one GET with `Range: bytes=0-0`
+//!   - 206 Partial Content -> server supports range requests
+//!   - Content-Range on a 206, or Content-Length on a 200 -> total file size
+//!   - Content-Disposition -> server-suggested filename
 
 use reqwest::StatusCode;
 
@@ -31,8 +31,8 @@ use crate::engine::destination::normalize_filename_component;
 pub struct ProbeResult {
     pub content_length: Option<u64>,
     pub accepts_ranges: bool,
-    /// Filename suggested by the server via `Content-Disposition: attachment; filename="..."`.
-    /// `None` if the header is absent or unparseable.
+    /// Filename from `Content-Disposition: attachment; filename="..."`
+    /// `None` if the header is missing or unusable
     pub filename: Option<String>,
 }
 
@@ -66,10 +66,10 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> Result<ProbeResult, r
     }
 }
 
-/// Extracts the filename from a `Content-Disposition` header value.
+/// Extracts the filename from `Content-Disposition`
 ///
-/// Handles `filename="foo.pdf"` (quoted) and `filename=foo.pdf` (unquoted).
-/// Strips path separators to prevent path traversal.
+/// Handles `filename="foo.pdf"` and `filename=foo.pdf`
+/// Strips path separators
 fn parse_content_disposition_filename(header: &str) -> Option<String> {
     for part in header.split(';') {
         let part = part.trim();

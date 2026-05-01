@@ -17,12 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Pre allocate space for downloads
+//! Preallocates space for downloads
 //!
-//! Chunked downloads write different byte ranges into the same temporary file.
-//! Before those writes start, `preallocate` tries to reserve enough disk space
-//! for the whole file. If the disk is full, the download can fail before doing
-//! network work.
+//! Lets a chunked download fail early if there is not enough disk space
 
 pub fn preallocate(file: &std::fs::File, size: u64) -> std::io::Result<()> {
     imp::preallocate(file, size)
@@ -56,7 +53,7 @@ mod imp {
 
         let length = super::off_t_len(size)?;
         loop {
-            // FALLOC_FL_KEEP_SIZE is not set; we want the visible file size updated.
+            // Do not use FALLOC_FL_KEEP_SIZE because the visible file size should change
             let ret = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, length) };
             if ret == 0 {
                 return Ok(());

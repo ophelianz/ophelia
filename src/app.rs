@@ -17,18 +17,17 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Application-level download state.
+//! App download state
 //!
-//! Downloads is a GPUI entity that owns the DownloadEngine and the live download
-//! data in SoA layout. A background task drains engine progress updates every 100ms
-//! and calls cx.notify() to trigger a re-render.
+//! Downloads owns the engine and the live transfer lists
+//! A background task drains engine updates every 100ms and asks GPUI to redraw
 //!
 //! Startup sequence:
-//!   1. Load persisted settings.
-//!   2. Bootstrap backend state (SQLite restore data, DB worker, history reader).
-//!   3. Create the app-owned IPC ingress server.
-//!   4. Create DownloadEngine with db_tx and initial_next_id > DB max.
-//!   5. Restore saved downloads into the engine's paused map and SoA vecs.
+//!   1. Load saved settings
+//!   2. Start SQLite state, DB worker, and history reader
+//!   3. Start the local IPC server
+//!   4. Create DownloadEngine with the next free download id
+//!   5. Restore saved downloads into the engine and app lists
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -44,12 +43,11 @@ use crate::engine::{
     RestoredDownload, SavedDownload, TransferChunkMapState, TransferControlSupport,
 };
 use crate::ipc::IpcServer;
-use crate::platform::io::{ProcessIoCounters, sample_process_io_counters};
 use crate::settings::Settings;
 use crate::views::overlays::notification::NotificationKind;
 
-/// All live download state in SoA layout.
-/// One vec per field, all vecs share the same index space.
+/// Live downloads stored as parallel vecs
+/// Every vec uses the same row index
 pub struct Downloads {
     engine: DownloadEngine,
     _db_worker: state::DbWorkerHandle,
@@ -58,24 +56,24 @@ pub struct Downloads {
 
     pub ids: Vec<DownloadId>,
     row_by_id: HashMap<DownloadId, usize>,
-    /// Provider identifier per live transfer, kept app-side so future workflow
-    /// views do not have to infer it from engine internals.
+    /// Source kind per live transfer
+    /// Kept app-side so future views do not need engine access
     pub provider_kinds: Vec<SharedString>,
-    /// User-facing source label per live transfer (URL today, richer labels later).
+    /// Source label per live transfer
     pub source_labels: Vec<SharedString>,
     pub filenames: Vec<SharedString>,
     pub destinations: Vec<SharedString>,
     pub statuses: Vec<DownloadStatus>,
-    /// Provider-declared lifecycle controls for each live transfer.
+    /// Controls this transfer supports
     pub control_supports: Vec<TransferControlSupport>,
     pub transfer_chunk_maps: Vec<TransferChunkMapState>,
     pub downloaded_bytes: Vec<u64>,
     pub total_bytes: Vec<Option<u64>>,
     pub speeds: Vec<u64>,
 
-    /// Rolling ~60-second download speed history (one sample per second).
+    /// Rolling ~60-second download speed history
     pub speed_history: VecDeque<u64>,
-    io_sampler: ProcessIoSampler,
+    write_sampler: DownloadWriteSampler,
     poll_ticks: u8,
 
     history_reader: HistoryReader,
@@ -142,7 +140,7 @@ pub struct TransferListRow {
     // kept app-facing so future provider filters/badges do not need engine access
     pub provider_kind: SharedString,
     #[allow(dead_code)]
-    // kept app-facing so future provider-aware surfaces can render source labels directly
+    // kept app-facing so future views can render source labels directly
     pub source_label: SharedString,
     pub filename: SharedString,
     pub destination: SharedString,
@@ -249,65 +247,47 @@ impl SidebarStorageSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProcessIoSample {
+struct DownloadWriteSample {
     at: Instant,
-    counters: ProcessIoCounters,
+    total_bytes: u64,
 }
 
 #[derive(Debug, Default)]
-struct ProcessIoSampler {
-    last_sample: Option<ProcessIoSample>,
-    read_speed_bps: Option<u64>,
-    write_speed_bps: Option<u64>,
+struct DownloadWriteSampler {
+    last_sample: Option<DownloadWriteSample>,
+    total_bytes: u64,
+    write_speed_bps: u64,
 }
 
-impl ProcessIoSampler {
-    fn sample_now(&mut self, now: Instant) {
-        self.update_from_sample(sample_process_io_counters(), now);
+impl DownloadWriteSampler {
+    fn record(&mut self, bytes: u64) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
     }
 
-    fn update_from_sample(&mut self, counters: Option<ProcessIoCounters>, now: Instant) {
-        let Some(counters) = counters else {
-            self.last_sample = None;
-            self.read_speed_bps = None;
-            self.write_speed_bps = None;
-            return;
-        };
-
+    fn sample_now(&mut self, now: Instant) {
         let Some(previous) = self.last_sample else {
-            self.last_sample = Some(ProcessIoSample { at: now, counters });
-            self.read_speed_bps = Some(0);
-            self.write_speed_bps = Some(0);
+            self.last_sample = Some(DownloadWriteSample {
+                at: now,
+                total_bytes: self.total_bytes,
+            });
+            self.write_speed_bps = 0;
             return;
         };
 
         let elapsed = now.saturating_duration_since(previous.at).as_secs_f64();
-        self.last_sample = Some(ProcessIoSample { at: now, counters });
+        self.last_sample = Some(DownloadWriteSample {
+            at: now,
+            total_bytes: self.total_bytes,
+        });
         if elapsed <= 0.0 {
             return;
         }
 
-        self.read_speed_bps = Some(
-            (counters
-                .read_bytes
-                .saturating_sub(previous.counters.read_bytes) as f64
-                / elapsed)
-                .round() as u64,
-        );
-        self.write_speed_bps = Some(
-            (counters
-                .write_bytes
-                .saturating_sub(previous.counters.write_bytes) as f64
-                / elapsed)
-                .round() as u64,
-        );
+        self.write_speed_bps =
+            (self.total_bytes.saturating_sub(previous.total_bytes) as f64 / elapsed).round() as u64;
     }
 
-    fn read_speed_bps(&self) -> Option<u64> {
-        self.read_speed_bps
-    }
-
-    fn write_speed_bps(&self) -> Option<u64> {
+    fn write_speed_bps(&self) -> u64 {
         self.write_speed_bps
     }
 }
@@ -365,7 +345,7 @@ impl Downloads {
             total_bytes: Vec::new(),
             speeds: Vec::new(),
             speed_history: VecDeque::new(),
-            io_sampler: ProcessIoSampler::default(),
+            write_sampler: DownloadWriteSampler::default(),
             poll_ticks: 0,
             history_reader,
             history: Vec::new(),
@@ -516,14 +496,15 @@ impl Downloads {
         cx.notify();
     }
 
-    /// Cancel a live transfer without deleting any bytes already on disk.
+    /// Cancel a live transfer without deleting bytes already on disk
     #[allow(dead_code)] // reserved for a future UI with a distinct cancel-transfer action.
     pub fn cancel_transfer(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.engine.cancel(id);
         cx.notify();
     }
 
-    /// Delete the artifact for a live transfer. History is preserved separately.
+    /// Delete the file for a live transfer
+    /// History is kept separately
     pub fn delete_artifact(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         let Some(idx) = self.index_of(id) else {
             return;
@@ -533,13 +514,12 @@ impl Downloads {
         cx.notify();
     }
 
-    /// Current live-transfer remove semantics are delete-the-artifact and let the
-    /// history surface retain the persisted record.
+    /// Removing a live transfer deletes the file but keeps history
     pub fn remove(&mut self, id: DownloadId, cx: &mut Context<Self>) {
         self.delete_artifact(id, cx);
     }
 
-    /// Open the containing folder for a live transfer's destination path.
+    /// Open the folder containing a transfer's destination
     pub fn open_destination_folder(&mut self, id: DownloadId, _cx: &mut Context<Self>) {
         let Some(idx) = self.index_of(id) else {
             return;
@@ -571,11 +551,11 @@ impl Downloads {
                 self.speed_history.pop_front();
             }
             self.speed_history.push_back(total);
-            self.io_sampler.sample_now(Instant::now());
+            self.write_sampler.sample_now(Instant::now());
         }
     }
 
-    /// Current total download speed across all active tasks, in bytes/s.
+    /// Current total download speed across active tasks, in bytes/s
     pub fn download_speed_bps(&self) -> u64 {
         self.speeds.iter().sum()
     }
@@ -588,15 +568,18 @@ impl Downloads {
             .collect()
     }
 
+    /// Current download-file read rate
+    /// Nothing reports file reads yet, so keep the UI slot visible but honest
     pub fn disk_read_speed_bps(&self) -> Option<u64> {
-        self.io_sampler.read_speed_bps()
+        Some(0)
     }
 
+    /// Current rate of bytes successfully written by download tasks
     pub fn disk_write_speed_bps(&self) -> Option<u64> {
-        self.io_sampler.write_speed_bps()
+        Some(self.write_sampler.write_speed_bps())
     }
 
-    /// (active, finished, queued) counts.
+    /// active, finished, queued counts
     pub fn status_counts(&self) -> (usize, usize, usize) {
         let active = self
             .statuses
@@ -642,8 +625,7 @@ impl Downloads {
         self.ids.len()
     }
 
-    /// Re-query the history DB and notify the UI. Called when the history view
-    /// becomes visible and when a download reaches a terminal state.
+    /// Reload history and redraw the UI
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
         match self.history_reader.load(self.history_filter, "") {
             Ok(rows) => {
@@ -659,7 +641,7 @@ impl Downloads {
         self.refresh_history(cx);
     }
 
-    /// Push a restored download into the SoA vecs without going through the engine.
+    /// Push a restored download into the app lists without going through the engine
     fn push_saved(&mut self, saved: &SavedDownload) {
         let filename: SharedString = saved
             .destination
@@ -695,7 +677,7 @@ impl Downloads {
             self.total_bytes[idx] = update.total_bytes;
             self.speeds[idx] = update.speed_bytes_per_sec;
 
-            // Show notification on first terminal transition.
+            // Show notification on first final status
             if let Some(kind) = terminal_notification_kind(prev, update.status) {
                 let filename = self.filenames[idx].clone();
                 self.show_notification(cx, filename, kind);
@@ -709,6 +691,11 @@ impl Downloads {
     fn apply_notification(&mut self, notification: EngineNotification, cx: &mut Context<Self>) {
         match notification {
             EngineNotification::Update(update) => self.apply_progress(update, cx),
+            EngineNotification::DownloadBytesWritten { id, bytes } => {
+                if self.index_of(id).is_some() {
+                    self.write_sampler.record(bytes);
+                }
+            }
             EngineNotification::DestinationChanged { id, destination } => {
                 if let Some(idx) = self.index_of(id) {
                     self.filenames[idx] = destination
@@ -1132,77 +1119,51 @@ mod tests {
     }
 
     #[test]
-    fn process_io_sampler_establishes_zero_baseline_on_first_sample() {
-        let mut sampler = ProcessIoSampler::default();
+    fn download_write_sampler_establishes_zero_baseline_on_first_sample() {
+        let mut sampler = DownloadWriteSampler::default();
         let now = Instant::now();
 
-        sampler.update_from_sample(
-            Some(ProcessIoCounters {
-                read_bytes: 128,
-                write_bytes: 256,
-            }),
-            now,
-        );
+        sampler.record(256);
+        sampler.sample_now(now);
 
-        assert_eq!(sampler.read_speed_bps(), Some(0));
-        assert_eq!(sampler.write_speed_bps(), Some(0));
+        assert_eq!(sampler.write_speed_bps(), 0);
     }
 
     #[test]
-    fn process_io_sampler_computes_read_and_write_deltas() {
-        let mut sampler = ProcessIoSampler::default();
+    fn download_write_sampler_computes_write_delta() {
+        let mut sampler = DownloadWriteSampler::default();
         let start = Instant::now();
 
-        sampler.update_from_sample(
-            Some(ProcessIoCounters {
-                read_bytes: 1_000,
-                write_bytes: 2_000,
-            }),
-            start,
-        );
-        sampler.update_from_sample(
-            Some(ProcessIoCounters {
-                read_bytes: 4_000,
-                write_bytes: 8_000,
-            }),
-            start + Duration::from_secs(2),
-        );
+        sampler.record(2_000);
+        sampler.sample_now(start);
+        sampler.record(6_000);
+        sampler.sample_now(start + Duration::from_secs(2));
 
-        assert_eq!(sampler.read_speed_bps(), Some(1_500));
-        assert_eq!(sampler.write_speed_bps(), Some(3_000));
+        assert_eq!(sampler.write_speed_bps(), 3_000);
     }
 
     #[test]
-    fn process_io_sampler_reports_zero_for_idle_supported_samples() {
-        let mut sampler = ProcessIoSampler::default();
+    fn download_write_sampler_reports_zero_when_no_new_writes_arrive() {
+        let mut sampler = DownloadWriteSampler::default();
         let start = Instant::now();
-        let counters = ProcessIoCounters {
-            read_bytes: 64,
-            write_bytes: 32,
-        };
 
-        sampler.update_from_sample(Some(counters), start);
-        sampler.update_from_sample(Some(counters), start + Duration::from_secs(1));
+        sampler.record(32);
+        sampler.sample_now(start);
+        sampler.sample_now(start + Duration::from_secs(1));
 
-        assert_eq!(sampler.read_speed_bps(), Some(0));
-        assert_eq!(sampler.write_speed_bps(), Some(0));
+        assert_eq!(sampler.write_speed_bps(), 0);
     }
 
     #[test]
-    fn process_io_sampler_clears_metrics_when_sampling_is_unavailable() {
-        let mut sampler = ProcessIoSampler::default();
+    fn download_write_sampler_saturates_total_bytes() {
+        let mut sampler = DownloadWriteSampler::default();
         let now = Instant::now();
 
-        sampler.update_from_sample(
-            Some(ProcessIoCounters {
-                read_bytes: 128,
-                write_bytes: 256,
-            }),
-            now,
-        );
-        sampler.update_from_sample(None, now + Duration::from_secs(1));
+        sampler.record(u64::MAX);
+        sampler.sample_now(now);
+        sampler.record(1);
+        sampler.sample_now(now + Duration::from_secs(1));
 
-        assert_eq!(sampler.read_speed_bps(), None);
-        assert_eq!(sampler.write_speed_bps(), None);
+        assert_eq!(sampler.write_speed_bps(), 0);
     }
 }

@@ -17,10 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Provider-neutral add/restore request shapes used by the engine surface.
+//! Add and restore request types for the engine
 //!
-//! Ophelia currently supports only HTTP, but the top-level engine API should not
-//! have to grow a new method or command variant for every provider.
+//! HTTP is the only source today, but the engine can carry source-specific data
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,7 +35,7 @@ use crate::engine::types::{
 };
 use crate::settings::Settings;
 
-/// Backend-facing add request before a final destination path is chosen.
+/// Add request before the final path is chosen
 #[derive(Debug, Clone)]
 pub struct AddDownloadRequest {
     pub source: AddDownloadSource,
@@ -97,7 +96,7 @@ impl AddDownloadSource {
     }
 }
 
-/// Provider-neutral download request used by the engine surface.
+/// Download request used by the engine
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     pub destination: PathBuf,
@@ -227,7 +226,7 @@ impl DownloadSource {
     }
 }
 
-/// Restored download state fed back into the engine on startup.
+/// Download restored from saved state on startup
 #[derive(Debug, Clone)]
 pub struct RestoredDownload {
     pub id: DownloadId,

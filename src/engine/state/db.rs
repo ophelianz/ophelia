@@ -126,8 +126,8 @@ impl Db {
         Ok(false)
     }
 
-    /// On startup: any row still marked 'downloading' means we crashed mid-transfer.
-    /// Normalize to 'paused' so they show up as resumable.
+    /// On startup, turn leftover 'downloading' rows into 'paused'
+    /// Resume keeps saved chunks when they exist
     pub fn normalize_stale(&self) -> rusqlite::Result<usize> {
         let n = self.conn.execute(
             "UPDATE downloads SET status = 'paused' WHERE status = 'downloading'",
@@ -139,8 +139,7 @@ impl Db {
         Ok(n)
     }
 
-    /// Remove DB rows whose .ophelia_part file no longer exists on disk;
-    /// happens when the user manually deleted a partial download
+    /// Mark paused/pending rows as missing when their `.ophelia_part` file is gone
     pub fn validate_integrity(&self) -> rusqlite::Result<()> {
         let mut stmt = self.conn.prepare(
             "SELECT id, destination FROM downloads
@@ -174,9 +173,8 @@ impl Db {
         Ok(())
     }
 
-    /// Load all paused/pending downloads and their provider-specific resume state
-    /// for startup restoration.
-    /// Also returns the global max id so DownloadEngine can continue the id sequence.
+    /// Load paused/pending downloads for startup
+    /// Also returns the max id so DownloadEngine can keep counting from there
     pub fn load_for_restore(&self) -> rusqlite::Result<(Vec<SavedDownload>, u64)> {
         let max_id = self
             .conn
@@ -240,7 +238,7 @@ impl Db {
         Ok((downloads, max_id))
     }
 
-    /// Sole write path, called only from the DbEventWorker thread.
+    /// Only write path for SQLite
     pub fn handle(&self, event: DbEvent) -> rusqlite::Result<()> {
         match event {
             DbEvent::Added {
@@ -284,11 +282,13 @@ impl Db {
                 downloaded_bytes,
                 resume_data,
             } => {
-                self.conn.execute(
+                let tx = self.conn.unchecked_transaction()?;
+                tx.execute(
                     "UPDATE downloads SET status = 'paused', downloaded = ?1 WHERE id = ?2",
                     params![downloaded_bytes as i64, id.0 as i64],
                 )?;
-                self.save_resume_data(id, resume_data.as_ref())?;
+                http::save_resume_data(&tx, id, resume_data.as_ref())?;
+                tx.commit()?;
             }
             DbEvent::Finished { id, total_bytes } => {
                 self.conn.execute(
@@ -298,7 +298,7 @@ impl Db {
                     params![total_bytes as i64, unix_ms(), id.0 as i64],
                 )?;
                 // Chunks not needed once finished; CASCADE would handle it on delete
-                // but we delete explicitly to free space immediately.
+                // but delete explicitly to free space immediately
                 self.save_resume_data(id, None)?;
             }
             DbEvent::Error { id } => {
@@ -408,10 +408,10 @@ fn move_or_copy_file(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-// --- read-only history queries -------------------------------------------
+// Read-only history queries
 
-/// A lightweight read-only connection used by the UI history view.
-/// WAL mode lets this coexist with the DbEventWorker's write connection.
+/// Read-only connection for the history view
+/// WAL mode lets it run while the DB worker writes
 pub struct HistoryReader {
     conn: Connection,
 }
@@ -423,7 +423,7 @@ impl HistoryReader {
 
     pub(super) fn open_at(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let conn = Connection::open(path.as_ref())?;
-        // Best-effort read-only hint; doesn't error on older SQLite.
+        // Best-effort read-only hint
         let _ = conn.execute_batch("PRAGMA query_only=ON;");
         Ok(Self { conn })
     }

@@ -17,23 +17,23 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! HTTP/HTTPS protocol implementation.
-//! Everything in this module is specific to HTTP: range probing, chunked
-//! parallel requests, and HTTP-specific download configuration.
+//! HTTP/HTTPS downloads
+//! Handles range probing, range workers, and HTTP download settings
 
 pub mod config;
 pub mod task;
 pub mod throttle;
 
 mod chunk_map;
-mod error;
-mod health;
+mod events;
 mod probe;
-mod progress;
+mod range_runner;
+mod range_worker;
+mod ranges;
+mod resume;
+mod scheduler;
 mod single;
-mod steal;
-pub mod worker;
 
-pub use config::HttpDownloadConfig;
+pub use config::{HttpDownloadConfig, HttpRangeStrategyConfig};
 pub use task::{TaskFinalState, download_task};
 pub use throttle::TokenBucket;
