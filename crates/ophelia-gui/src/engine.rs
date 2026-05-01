@@ -23,7 +23,3 @@
 //! `crate::engine::*` imports while the real engine logic lives in `ophelia`.
 
 pub use ophelia::engine::*;
-
-pub mod state {
-    pub use ophelia::engine::state::*;
-}

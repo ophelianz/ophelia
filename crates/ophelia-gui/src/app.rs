@@ -20,14 +20,13 @@
 //! App download state
 //!
 //! Downloads owns live transfer lists and stats view state.
-//! A Tokio bridge owns the engine and sends events back into this entity.
+//! The core session owns downloads, history, and backend tasks.
 //!
-//! Startup sequence (bitch I'm NASA):
+//! Startup sequence:
 //!   1. Load saved settings
-//!   2. Start SQLite state, DB worker, and history reader
-//!   3. Start the local IPC server
-//!   4. Create EngineBridge with the next free download id
-//!   5. Restore saved downloads through core events
+//!   2. Start the core session host
+//!   3. Start the browser-extension adapter
+//!   4. Subscribe to session snapshots and events
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -36,23 +35,24 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, SharedString};
 
-use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddDownloadRequest, ArtifactState, DownloadControlAction, DownloadId, DownloadSpec,
-    DownloadStatus, EngineEvent, HistoryFilter, HistoryRow, ProgressUpdate, TransferChunkMapState,
-    TransferControlSupport, TransferSnapshot,
+    ArtifactState, DownloadControlAction, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
+    TransferChunkMapState, TransferControlSupport, TransferSnapshot,
 };
 use crate::engine_bridge::{EngineBridge, EngineBridgeEvent, EngineClient, EngineCommandKind};
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
 use crate::views::overlays::notification::NotificationKind;
+use ophelia::session::{
+    DownloadDestination, DownloadRequest, DownloadRequestSource, SessionClient, SessionError,
+    SessionEvent, SessionHost, SessionSnapshot,
+};
 
 /// Live downloads stored as parallel vecs
 /// Every vec uses the same row index
 pub struct Downloads {
-    engine_client: EngineClient,
-    _engine_bridge: EngineBridge,
-    _db_worker: state::DbWorkerHandle,
+    session_client: SessionClient,
+    _session_host: SessionHost,
     ipc: IpcServer,
     pub settings: Settings,
 
@@ -78,7 +78,6 @@ pub struct Downloads {
     write_sampler: DownloadWriteSampler,
     poll_ticks: u8,
 
-    history_reader: HistoryReader,
     pub history: Vec<HistoryRow>,
     pub history_filter: HistoryFilter,
 
@@ -297,11 +296,12 @@ impl DownloadWriteSampler {
 impl Downloads {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
-        let bootstrap =
-            state::bootstrap(&settings.core_paths()).expect("failed to bootstrap backend state");
         let runtime = crate::runtime::Tokio::handle(cx);
-        let ipc = IpcServer::start(settings.ipc_port, &runtime);
-        Self::from_bootstrap(settings, bootstrap, ipc, cx)
+        let session_host =
+            SessionHost::start(&runtime, settings.core_config(), settings.core_paths())
+                .expect("failed to start backend session");
+        let ipc = IpcServer::start(settings.ipc_port, &runtime, session_host.client());
+        Self::from_session(settings, session_host, ipc, cx)
     }
 
     #[cfg(test)]
@@ -316,40 +316,25 @@ impl Downloads {
             None,
             settings.download_dir(),
         );
-        let bootstrap = state::bootstrap(&paths).expect("failed to bootstrap test backend state");
-        let mut model = Self::from_bootstrap(settings, bootstrap, IpcServer::disabled(), cx);
+        let runtime = crate::runtime::Tokio::handle(cx);
+        let session_host = SessionHost::start(&runtime, settings.core_config(), paths)
+            .expect("failed to start test backend session");
+        let mut model = Self::from_session(settings, session_host, IpcServer::disabled(), cx);
         model._test_db_dir = Some(db_dir);
         model
     }
 
-    fn from_bootstrap(
+    fn from_session(
         settings: Settings,
-        bootstrap: state::StateBootstrap,
+        session_host: SessionHost,
         ipc: IpcServer,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state::StateBootstrap {
-            db_tx,
-            history_reader,
-            saved_downloads,
-            next_download_id,
-            worker,
-        } = bootstrap;
-        let runtime = crate::runtime::Tokio::handle(cx);
-        let mut engine_bridge = EngineBridge::spawn(
-            &runtime,
-            &settings,
-            db_tx,
-            saved_downloads,
-            next_download_id,
-        );
-        let engine_client = engine_bridge.client();
-        let mut bridge_events = engine_bridge.take_events();
+        let session_client = session_host.client();
 
         let mut model = Self {
-            engine_client,
-            _engine_bridge: engine_bridge,
-            _db_worker: worker,
+            session_client: session_client.clone(),
+            _session_host: session_host,
             ipc,
             settings,
             ids: Vec::new(),
@@ -367,7 +352,6 @@ impl Downloads {
             speed_history: VecDeque::new(),
             write_sampler: DownloadWriteSampler::default(),
             poll_ticks: 0,
-            history_reader,
             history: Vec::new(),
             history_filter: HistoryFilter::All,
             #[cfg(test)]
@@ -377,15 +361,60 @@ impl Downloads {
         model.refresh_history(cx);
 
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            use futures::StreamExt;
+            match session_client.subscribe().await {
+                Ok(mut subscription) => {
+                    let snapshot = subscription.snapshot.clone();
+                    cx.update(|app| {
+                        this.update(app, |model, cx| {
+                            model.apply_session_snapshot(snapshot, cx);
+                        })
+                        .ok();
+                    });
 
-            while let Some(event) = bridge_events.next().await {
-                cx.update(|app| {
-                    this.update(app, |model, cx| {
-                        model.apply_bridge_event(event, cx);
-                    })
-                    .ok();
-                });
+                    loop {
+                        match subscription.next_event().await {
+                            Ok(event) => {
+                                cx.update(|app| {
+                                    this.update(app, |model, cx| {
+                                        model.apply_session_event(event, cx);
+                                    })
+                                    .ok();
+                                });
+                            }
+                            Err(SessionError::Lagged { skipped }) => {
+                                tracing::warn!(
+                                    skipped,
+                                    "backend session event stream lagged, refreshing snapshot"
+                                );
+                                match session_client.subscribe().await {
+                                    Ok(next_subscription) => {
+                                        let snapshot = next_subscription.snapshot.clone();
+                                        subscription = next_subscription;
+                                        cx.update(|app| {
+                                            this.update(app, |model, cx| {
+                                                model.apply_session_snapshot(snapshot, cx);
+                                            })
+                                            .ok();
+                                        });
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "backend session resubscribe failed: {error}"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!("backend session event stream closed: {error}");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("backend session subscribe failed: {error}");
+                }
             }
         })
         .detach();
@@ -396,10 +425,7 @@ impl Downloads {
                     .timer(Duration::from_millis(100))
                     .await;
                 cx.update(|app| {
-                    this.update(app, |model, cx| {
-                        while let Some(req) = model.ipc.try_recv() {
-                            model.add_request(req, cx);
-                        }
+                    this.update(app, |model, _cx| {
                         model.tick_metrics();
                     })
                     .ok();
@@ -422,83 +448,82 @@ impl Downloads {
             .and_then(|name| name.to_str())
             .unwrap_or("download")
             .to_string();
-        let core_config = self.settings.core_config();
-        let spec = match DownloadSpec::from_user_input(url, destination, &core_config) {
-            Ok(spec) => spec,
-            Err(error) => {
-                self.report_add_failure(display_name, error, cx);
-                return None;
-            }
+        let request = DownloadRequest {
+            source: DownloadRequestSource::Http { url },
+            destination: DownloadDestination::ExplicitPath(destination),
         };
-        self.add_spec(spec, AddOrigin::UserInput, cx)
+        self.add_request(request, display_name, cx)
     }
 
-    pub fn add_request(
+    fn add_request(
         &mut self,
-        request: AddDownloadRequest,
+        request: DownloadRequest,
+        display_name: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> Option<DownloadId> {
-        let display_name = request.display_filename_hint();
-        let core_config = self.settings.core_config();
-        let spec = match request.into_spec(&core_config) {
-            Ok(spec) => spec,
-            Err(error) => {
-                self.report_add_failure(display_name, error, cx);
-                return None;
+        let _display_name: SharedString = display_name.into();
+        let client = self.session_client.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            if let Err(error) = client.add(request).await {
+                cx.update(|app| {
+                    this.update(app, |model, cx| {
+                        model.report_command_failure(None, SessionCommandKind::Add, error, cx);
+                    })
+                    .ok();
+                });
             }
-        };
-        self.add_spec(spec, AddOrigin::IpcRequest, cx)
-    }
-
-    fn add_spec(
-        &mut self,
-        spec: DownloadSpec,
-        origin: AddOrigin,
-        cx: &mut Context<Self>,
-    ) -> Option<DownloadId> {
-        let filename = notification_filename(spec.destination());
-        self.engine_client.add(spec);
-        if let Some(kind) = start_notification_kind(origin) {
-            self.show_notification(cx, filename, kind);
-        }
+        })
+        .detach();
         cx.notify();
         None
     }
 
-    fn report_add_failure(
-        &self,
-        display_name: impl Into<SharedString>,
-        error: std::io::Error,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::warn!("failed to resolve download destination: {error}");
-        self.show_notification(cx, display_name.into(), NotificationKind::Error);
-    }
-
     pub fn pause(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine_client.pause(id);
+        self.send_control_command(
+            id,
+            SessionCommandKind::Pause,
+            move |client| async move { client.pause(id).await },
+            cx,
+        );
         cx.notify();
     }
 
     pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if settings.ipc_port != self.settings.ipc_port {
             let runtime = crate::runtime::Tokio::handle(cx);
-            self.ipc = IpcServer::start(settings.ipc_port, &runtime);
+            self.ipc = IpcServer::start(settings.ipc_port, &runtime, self.session_client.clone());
         }
-        self.engine_client.update_settings(&settings);
+        let client = self.session_client.clone();
+        let config = settings.core_config();
+        cx.spawn(async move |_this, _cx: &mut gpui::AsyncApp| {
+            if let Err(error) = client.update_config(config).await {
+                tracing::warn!("backend session settings update failed: {error}");
+            }
+        })
+        .detach();
         self.settings = settings;
         cx.notify();
     }
 
     pub fn resume(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine_client.resume(id);
+        self.send_control_command(
+            id,
+            SessionCommandKind::Resume,
+            move |client| async move { client.resume(id).await },
+            cx,
+        );
         cx.notify();
     }
 
     /// Cancel a live transfer without deleting bytes already on disk
     #[allow(dead_code)] // reserved for a future UI with a distinct cancel-transfer action.
     pub fn cancel_transfer(&mut self, id: DownloadId, cx: &mut Context<Self>) {
-        self.engine_client.cancel(id);
+        self.send_control_command(
+            id,
+            SessionCommandKind::Cancel,
+            move |client| async move { client.cancel(id).await },
+            cx,
+        );
         cx.notify();
     }
 
@@ -508,7 +533,12 @@ impl Downloads {
         if self.index_of(id).is_none() {
             return;
         };
-        self.engine_client.delete_artifact(id);
+        self.send_control_command(
+            id,
+            SessionCommandKind::DeleteArtifact,
+            move |client| async move { client.delete_artifact(id).await },
+            cx,
+        );
         cx.notify();
     }
 
@@ -624,13 +654,23 @@ impl Downloads {
 
     /// Reload history and redraw the UI
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
-        match self.history_reader.load(self.history_filter, "") {
-            Ok(rows) => {
-                self.history = rows;
-                cx.notify();
+        let client = self.session_client.clone();
+        let filter = self.history_filter;
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            match client.load_history(filter, "").await {
+                Ok(rows) => {
+                    cx.update(|app| {
+                        this.update(app, |model, cx| {
+                            model.history = rows;
+                            cx.notify();
+                        })
+                        .ok();
+                    });
+                }
+                Err(error) => tracing::warn!("history query failed: {error}"),
             }
-            Err(e) => tracing::warn!("history query failed: {e}"),
-        }
+        })
+        .detach();
     }
 
     pub fn set_history_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
@@ -638,69 +678,33 @@ impl Downloads {
         self.refresh_history(cx);
     }
 
-    fn apply_progress(&mut self, update: ProgressUpdate, cx: &mut Context<Self>) {
-        if let Some(idx) = self.index_of(update.id) {
-            let prev = self.statuses[idx];
-            self.statuses[idx] = update.status;
-            self.downloaded_bytes[idx] = update.downloaded_bytes;
-            self.total_bytes[idx] = update.total_bytes;
-            self.speeds[idx] = update.speed_bytes_per_sec;
+    fn apply_session_snapshot(&mut self, snapshot: SessionSnapshot, cx: &mut Context<Self>) {
+        self.ids.clear();
+        self.row_by_id.clear();
+        self.provider_kinds.clear();
+        self.source_labels.clear();
+        self.filenames.clear();
+        self.destinations.clear();
+        self.statuses.clear();
+        self.control_supports.clear();
+        self.transfer_chunk_maps.clear();
+        self.downloaded_bytes.clear();
+        self.total_bytes.clear();
+        self.speeds.clear();
 
-            // Show notification on first final status
-            if let Some(kind) = terminal_notification_kind(prev, update.status) {
-                let filename = self.filenames[idx].clone();
-                self.show_notification(cx, filename, kind);
-                self.refresh_history(cx);
-            }
-
-            cx.notify();
+        for transfer in snapshot.transfers {
+            self.upsert_snapshot(transfer, cx);
         }
+        cx.notify();
     }
 
-    fn apply_bridge_event(&mut self, event: EngineBridgeEvent, cx: &mut Context<Self>) {
+    fn apply_session_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
-            EngineBridgeEvent::Engine(event) => self.apply_engine_event(event, cx),
-            EngineBridgeEvent::CommandFailed { id, action, error } => {
-                self.apply_command_failure(id, action, error, cx);
-            }
-        }
-    }
-
-    fn apply_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
-        match event {
-            EngineEvent::TransferAdded { snapshot }
-            | EngineEvent::TransferRestored { snapshot } => {
-                self.upsert_snapshot(snapshot, cx);
-            }
-            EngineEvent::Progress(update) => self.apply_progress(update, cx),
-            EngineEvent::DownloadBytesWritten { bytes, .. } => {
+            SessionEvent::TransferChanged { snapshot } => self.upsert_snapshot(snapshot, cx),
+            SessionEvent::DownloadBytesWritten { bytes, .. } => {
                 self.write_sampler.record(bytes);
             }
-            EngineEvent::DestinationChanged { id, destination } => {
-                if let Some(idx) = self.index_of(id) {
-                    self.filenames[idx] = destination
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                        .into();
-                    self.destinations[idx] = destination.to_string_lossy().to_string().into();
-                    cx.notify();
-                }
-            }
-            EngineEvent::ControlSupportChanged { id, support } => {
-                if let Some(idx) = self.index_of(id) {
-                    self.control_supports[idx] = support;
-                    cx.notify();
-                }
-            }
-            EngineEvent::ChunkMapChanged { id, state } => {
-                if let Some(idx) = self.index_of(id) {
-                    self.transfer_chunk_maps[idx] = state;
-                    cx.notify();
-                }
-            }
-            EngineEvent::LiveTransferRemoved {
+            SessionEvent::TransferRemoved {
                 id,
                 action,
                 artifact_state,
@@ -714,7 +718,7 @@ impl Downloads {
                 self.remove_row(id, cx);
                 self.refresh_history(cx);
             }
-            EngineEvent::ControlUnsupported { id, action } => {
+            SessionEvent::ControlUnsupported { id, action } => {
                 tracing::warn!(
                     id = id.0,
                     action = control_action_name(action),
@@ -729,7 +733,10 @@ impl Downloads {
     }
 
     fn upsert_snapshot(&mut self, snapshot: TransferSnapshot, cx: &mut Context<Self>) {
+        let previous_status = self.index_of(snapshot.id).map(|idx| self.statuses[idx]);
+        let next_status = snapshot.status;
         let filename = notification_filename(&snapshot.destination);
+        let notification_filename = filename.clone();
         let destination: SharedString = snapshot.destination.to_string_lossy().to_string().into();
         let provider_kind: SharedString = snapshot.provider_kind.into();
         let source_label: SharedString = snapshot.source_label.into();
@@ -760,20 +767,27 @@ impl Downloads {
             self.row_by_id.insert(snapshot.id, self.ids.len() - 1);
         }
 
+        if let Some(previous) = previous_status
+            && let Some(kind) = terminal_notification_kind(previous, next_status)
+        {
+            self.show_notification(cx, notification_filename, kind);
+            self.refresh_history(cx);
+        }
+
         cx.notify();
     }
 
-    fn apply_command_failure(
+    fn report_command_failure(
         &self,
         id: Option<DownloadId>,
-        action: EngineCommandKind,
-        error: crate::engine::EngineError,
+        action: SessionCommandKind,
+        error: SessionError,
         cx: &mut Context<Self>,
     ) {
         tracing::warn!(
             id = id.map(|id| id.0),
-            action = engine_command_kind_name(action),
-            "download engine command failed: {error}"
+            action = session_command_kind_name(action),
+            "download session command failed: {error}"
         );
 
         if let Some(id) = id.and_then(|id| self.index_of(id)) {
@@ -817,12 +831,38 @@ impl Downloads {
     ) {
         show_popup_notification(&self.settings, cx, filename.into(), kind);
     }
+
+    fn send_control_command<Fut>(
+        &self,
+        id: DownloadId,
+        action: SessionCommandKind,
+        command: impl FnOnce(SessionClient) -> Fut + 'static,
+        cx: &mut Context<Self>,
+    ) where
+        Fut: std::future::Future<Output = Result<(), SessionError>> + 'static,
+    {
+        let client = self.session_client.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            if let Err(error) = command(client).await {
+                cx.update(|app| {
+                    this.update(app, |model, cx| {
+                        model.report_command_failure(Some(id), action, error, cx);
+                    })
+                    .ok();
+                });
+            }
+        })
+        .detach();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AddOrigin {
-    UserInput,
-    IpcRequest,
+enum SessionCommandKind {
+    Add,
+    Pause,
+    Resume,
+    Cancel,
+    DeleteArtifact,
 }
 
 fn control_action_name(action: DownloadControlAction) -> &'static str {
@@ -834,14 +874,13 @@ fn control_action_name(action: DownloadControlAction) -> &'static str {
     }
 }
 
-fn engine_command_kind_name(action: EngineCommandKind) -> &'static str {
+fn session_command_kind_name(action: SessionCommandKind) -> &'static str {
     match action {
-        EngineCommandKind::Add => "add",
-        EngineCommandKind::Pause => "pause",
-        EngineCommandKind::Resume => "resume",
-        EngineCommandKind::Cancel => "cancel",
-        EngineCommandKind::DeleteArtifact => "delete_artifact",
-        EngineCommandKind::Restore => "restore",
+        SessionCommandKind::Add => "add",
+        SessionCommandKind::Pause => "pause",
+        SessionCommandKind::Resume => "resume",
+        SessionCommandKind::Cancel => "cancel",
+        SessionCommandKind::DeleteArtifact => "delete_artifact",
     }
 }
 
@@ -896,13 +935,6 @@ fn show_popup_notification(
 ) {
     if settings.notifications_enabled {
         crate::views::overlays::notification::show(cx, filename, kind);
-    }
-}
-
-fn start_notification_kind(origin: AddOrigin) -> Option<NotificationKind> {
-    match origin {
-        AddOrigin::UserInput => None,
-        AddOrigin::IpcRequest => Some(NotificationKind::Started),
     }
 }
 
@@ -1087,15 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn ipc_requests_show_a_start_notification_but_manual_adds_do_not() {
-        assert_eq!(start_notification_kind(AddOrigin::UserInput), None);
-        assert_eq!(
-            start_notification_kind(AddOrigin::IpcRequest),
-            Some(NotificationKind::Started)
-        );
-    }
-
-    #[test]
     fn terminal_notification_kind_only_emits_on_first_terminal_transition() {
         assert_eq!(
             terminal_notification_kind(DownloadStatus::Downloading, DownloadStatus::Finished),
@@ -1177,14 +1200,14 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_engine_event(
-                    EngineEvent::TransferAdded {
+                downloads.apply_session_event(
+                    SessionEvent::TransferChanged {
                         snapshot: test_snapshot(7, "/tmp/first.bin", DownloadStatus::Downloading),
                     },
                     cx,
                 );
-                downloads.apply_engine_event(
-                    EngineEvent::TransferAdded {
+                downloads.apply_session_event(
+                    SessionEvent::TransferChanged {
                         snapshot: test_snapshot(7, "/tmp/renamed.bin", DownloadStatus::Paused),
                     },
                     cx,
@@ -1206,14 +1229,14 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_engine_event(
-                    EngineEvent::TransferRestored {
+                downloads.apply_session_event(
+                    SessionEvent::TransferChanged {
                         snapshot: test_snapshot(3, "/tmp/restored.bin", DownloadStatus::Paused),
                     },
                     cx,
                 );
-                downloads.apply_engine_event(
-                    EngineEvent::LiveTransferRemoved {
+                downloads.apply_session_event(
+                    SessionEvent::TransferRemoved {
                         id: DownloadId(3),
                         action: crate::engine::LiveTransferRemovalAction::Cancelled,
                         artifact_state: ArtifactState::Present,
@@ -1234,16 +1257,16 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_engine_event(
-                    EngineEvent::DownloadBytesWritten {
+                downloads.apply_session_event(
+                    SessionEvent::DownloadBytesWritten {
                         id: DownloadId(99),
                         bytes: 2_000,
                     },
                     cx,
                 );
                 downloads.write_sampler.sample_now(start);
-                downloads.apply_engine_event(
-                    EngineEvent::DownloadBytesWritten {
+                downloads.apply_session_event(
+                    SessionEvent::DownloadBytesWritten {
                         id: DownloadId(99),
                         bytes: 6_000,
                     },

@@ -31,11 +31,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::engine::AddDownloadRequest;
+use ophelia::session::{DownloadRequest, SessionClient};
 
 /// Browser-extension request body
 #[derive(Debug, Deserialize)]
@@ -49,27 +49,25 @@ struct BrowserDownloadRequest {
 /// The browser-extension server runs outside the download engine
 pub struct IpcServer {
     task: Option<JoinHandle<()>>,
-    rx: mpsc::UnboundedReceiver<AddDownloadRequest>,
 }
 
 impl IpcServer {
-    pub fn start(port: u16, runtime: &Handle) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let task = runtime.spawn(serve(port, tx));
-        Self {
-            task: Some(task),
-            rx,
-        }
+    pub fn start(port: u16, runtime: &Handle, client: SessionClient) -> Self {
+        let task = runtime.spawn(serve(port, client));
+        Self { task: Some(task) }
     }
 
     #[cfg(test)]
     pub fn disabled() -> Self {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        Self { task: None, rx }
+        Self { task: None }
     }
+}
 
-    pub fn try_recv(&mut self) -> Option<AddDownloadRequest> {
-        self.rx.try_recv().ok()
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -89,7 +87,7 @@ struct HealthResponse {
 
 /// Bind and serve until the process exits
 /// Port conflict is logged as a warning
-pub async fn serve(port: u16, tx: mpsc::UnboundedSender<AddDownloadRequest>) {
+pub async fn serve(port: u16, client: SessionClient) {
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -99,22 +97,19 @@ pub async fn serve(port: u16, tx: mpsc::UnboundedSender<AddDownloadRequest>) {
     };
 
     tracing::info!("IPC server listening on 127.0.0.1:{port}");
-    serve_listener(listener, tx).await;
+    serve_listener(listener, client).await;
 }
 
-async fn serve_listener(
-    listener: tokio::net::TcpListener,
-    tx: mpsc::UnboundedSender<AddDownloadRequest>,
-) {
-    axum::serve(listener, router(tx)).await.ok();
+async fn serve_listener(listener: tokio::net::TcpListener, client: SessionClient) {
+    axum::serve(listener, router(client)).await.ok();
 }
 
-fn router(tx: mpsc::UnboundedSender<AddDownloadRequest>) -> Router {
+fn router(client: SessionClient) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/download", post(add_download))
         .layer(CorsLayer::permissive())
-        .with_state(Arc::new(tx))
+        .with_state(Arc::new(client))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -125,42 +120,68 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn add_download(
-    State(tx): State<Arc<mpsc::UnboundedSender<AddDownloadRequest>>>,
+    State(client): State<Arc<SessionClient>>,
     Json(req): Json<BrowserDownloadRequest>,
 ) -> StatusCode {
     let request = AddDownloadRequest::from_url_with_suggested_filename(req.url, req.filename);
-    if tx.send(request).is_ok() {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+    match client.add(DownloadRequest::from_add_request(request)).await {
+        Ok(_) => StatusCode::OK,
+        Err(error) => {
+            tracing::warn!("browser download add failed: {error}");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Settings;
+    use crate::engine::{DownloadStatus, TransferSnapshot};
+    use ophelia::session::{SessionEvent, SessionHost};
     use serde_json::json;
-    use std::path::PathBuf;
+    use std::time::Duration;
 
-    async fn spawn_test_server(
-        tx: mpsc::UnboundedSender<AddDownloadRequest>,
-    ) -> std::net::SocketAddr {
+    async fn spawn_test_server(client: SessionClient) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            serve_listener(listener, tx).await;
+            serve_listener(listener, client).await;
         });
         addr
     }
 
+    fn test_session() -> (tempfile::TempDir, SessionHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ophelia::CorePaths::new(
+            dir.path().join("downloads.db"),
+            None,
+            dir.path().join("downloads"),
+        );
+        let config = ophelia::CoreConfig::default_with_download_dir(dir.path().join("downloads"));
+        let host = SessionHost::start(&tokio::runtime::Handle::current(), config, paths).unwrap();
+        (dir, host)
+    }
+
+    async fn next_transfer_changed(
+        mut subscription: ophelia::session::SessionSubscription,
+    ) -> TransferSnapshot {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), subscription.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if let SessionEvent::TransferChanged { snapshot } = event {
+                return snapshot;
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn health_endpoint_reports_app_and_version() {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let addr = spawn_test_server(tx).await;
-
+        let (_dir, host) = test_session();
+        let addr = spawn_test_server(host.client()).await;
         let response = reqwest::get(format!("http://{addr}/health")).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -168,13 +189,17 @@ mod tests {
             serde_json::from_str(&response.text().await.unwrap()).unwrap();
         assert_eq!(body["app"], "ophelia");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn download_endpoint_normalizes_browser_payload_into_add_request() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let addr = spawn_test_server(tx).await;
+    async fn download_endpoint_adds_through_session_client() {
+        let (_dir, host) = test_session();
+        let session_client = host.client();
+        let subscription = session_client.subscribe().await.unwrap();
+        let addr = spawn_test_server(session_client.clone()).await;
         let client = reqwest::Client::new();
+        let transfer = tokio::spawn(async move { next_transfer_changed(subscription).await });
 
         let response = client
             .post(format!("http://{addr}/download"))
@@ -191,28 +216,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let request = rx.recv().await.unwrap();
-        assert_eq!(request.url(), "https://example.com/video.mp4");
+        let snapshot = transfer.await.unwrap();
+        assert_eq!(snapshot.status, DownloadStatus::Pending);
+        assert_eq!(snapshot.source_label, "https://example.com/video.mp4");
         assert_eq!(
-            request.suggested_filename.as_deref(),
+            snapshot
+                .destination
+                .file_name()
+                .and_then(|name| name.to_str()),
             Some("browser-name.mp4")
         );
-        let settings = Settings {
-            default_download_dir: Some(PathBuf::from("/tmp/downloads")),
-            destination_rules_enabled: false,
-            ..Settings::default()
-        };
-        assert_eq!(
-            request.preview_destination(&settings.core_config().destination),
-            PathBuf::from("/tmp/downloads/browser-name.mp4")
-        );
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn download_endpoint_returns_service_unavailable_when_receiver_closed() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        let addr = spawn_test_server(tx).await;
+    async fn download_endpoint_returns_service_unavailable_when_session_closed() {
+        let (_dir, host) = test_session();
+        let session_client = host.client();
+        host.shutdown().await.unwrap();
+        let addr = spawn_test_server(session_client).await;
         let client = reqwest::Client::new();
 
         let response = client

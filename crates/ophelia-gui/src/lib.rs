@@ -21,7 +21,6 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 pub mod build_info;
 pub mod engine;
-pub mod engine_bridge;
 pub mod format;
 pub mod ipc;
 pub mod platform;

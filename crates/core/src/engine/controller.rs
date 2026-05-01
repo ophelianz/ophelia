@@ -172,6 +172,14 @@ impl DownloadEngine {
             .await
     }
 
+    pub(crate) async fn restore_collecting_events(
+        &mut self,
+        download: RestoredDownload,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::Restore { download, reply })
+            .await
+    }
+
     pub async fn add(&mut self, spec: DownloadSpec) -> Result<DownloadId, EngineError> {
         let id = DownloadId(self.next_id);
         self.next_id += 1;
@@ -184,6 +192,21 @@ impl DownloadEngine {
         result
     }
 
+    pub(crate) async fn add_collecting_events(
+        &mut self,
+        spec: DownloadSpec,
+    ) -> (Result<DownloadId, EngineError>, Vec<EngineEvent>) {
+        let id = DownloadId(self.next_id);
+        self.next_id += 1;
+        let (result, events) = self
+            .command_reply_collecting_events(|reply| EngineCommand::Add { id, spec, reply })
+            .await;
+        if result.is_err() {
+            self.next_id -= 1;
+        }
+        (result, events)
+    }
+
     /// Returns when the controller accepts the pause request
     /// The paused state arrives later through EngineEvent::Progress
     pub async fn pause(&self, id: DownloadId) -> Result<(), EngineError> {
@@ -191,8 +214,24 @@ impl DownloadEngine {
             .await
     }
 
+    pub(crate) async fn pause_collecting_events(
+        &mut self,
+        id: DownloadId,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::Pause { id, reply })
+            .await
+    }
+
     pub async fn resume(&self, id: DownloadId) -> Result<(), EngineError> {
         self.command_reply(|reply| EngineCommand::Resume { id, reply })
+            .await
+    }
+
+    pub(crate) async fn resume_collecting_events(
+        &mut self,
+        id: DownloadId,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::Resume { id, reply })
             .await
     }
 
@@ -202,8 +241,24 @@ impl DownloadEngine {
             .await
     }
 
+    pub(crate) async fn cancel_collecting_events(
+        &mut self,
+        id: DownloadId,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::Cancel { id, reply })
+            .await
+    }
+
     pub async fn delete_artifact(&self, id: DownloadId) -> Result<(), EngineError> {
         self.command_reply(|reply| EngineCommand::DeleteArtifact { id, reply })
+            .await
+    }
+
+    pub(crate) async fn delete_artifact_collecting_events(
+        &mut self,
+        id: DownloadId,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::DeleteArtifact { id, reply })
             .await
     }
 
@@ -212,8 +267,20 @@ impl DownloadEngine {
             .await
     }
 
+    pub(crate) async fn update_config_collecting_events(
+        &mut self,
+        config: CoreConfig,
+    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
+        self.command_reply_collecting_events(|reply| EngineCommand::UpdateConfig { config, reply })
+            .await
+    }
+
     pub async fn next_event(&mut self) -> Option<EngineEvent> {
         self.event_rx.recv().await
+    }
+
+    pub fn try_next_event(&mut self) -> Option<EngineEvent> {
+        self.event_rx.try_recv().ok()
     }
 
     pub async fn shutdown(mut self) -> Result<(), EngineError> {
@@ -236,6 +303,83 @@ impl DownloadEngine {
             .await
             .map_err(|_| EngineError::Closed)?;
         reply_rx.await.map_err(|_| EngineError::Closed)?
+    }
+
+    async fn command_reply_collecting_events<T>(
+        &mut self,
+        make_command: impl FnOnce(CommandReply<T>) -> EngineCommand,
+    ) -> (Result<T, EngineError>, Vec<EngineEvent>) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let command = make_command(reply_tx);
+
+        let mut events = Vec::new();
+        let mut events_open = true;
+
+        if let Err(error) = self
+            .send_command_while_draining_events(command, &mut events, &mut events_open)
+            .await
+        {
+            return (Err(error), events);
+        }
+
+        let result = self
+            .wait_for_reply_while_draining_events(reply_rx, &mut events, &mut events_open)
+            .await;
+        (result, events)
+    }
+
+    async fn send_command_while_draining_events(
+        &mut self,
+        command: EngineCommand,
+        events: &mut Vec<EngineEvent>,
+        events_open: &mut bool,
+    ) -> Result<(), EngineError> {
+        let cmd_tx = self.cmd_tx.clone();
+        let send = cmd_tx.send(command);
+        tokio::pin!(send);
+
+        loop {
+            tokio::select! {
+                result = &mut send => {
+                    return result.map_err(|_| EngineError::Closed);
+                }
+                event = self.event_rx.recv(), if *events_open => {
+                    remember_engine_event(event, events, events_open);
+                }
+            }
+        }
+    }
+
+    async fn wait_for_reply_while_draining_events<T>(
+        &mut self,
+        reply_rx: oneshot::Receiver<Result<T, EngineError>>,
+        events: &mut Vec<EngineEvent>,
+        events_open: &mut bool,
+    ) -> Result<T, EngineError> {
+        tokio::pin!(reply_rx);
+        loop {
+            tokio::select! {
+                reply = &mut reply_rx => {
+                    return reply
+                        .map_err(|_| EngineError::Closed)
+                        .and_then(|result| result);
+                }
+                event = self.event_rx.recv(), if *events_open => {
+                    remember_engine_event(event, events, events_open);
+                }
+            }
+        }
+    }
+}
+
+fn remember_engine_event(
+    event: Option<EngineEvent>,
+    events: &mut Vec<EngineEvent>,
+    events_open: &mut bool,
+) {
+    match event {
+        Some(event) => events.push(event),
+        None => *events_open = false,
     }
 }
 
@@ -1074,5 +1218,64 @@ fn delete_artifact_files(destination: &Path) -> ArtifactState {
         ArtifactState::Deleted
     } else {
         ArtifactState::Missing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn command_reply_drains_events_while_waiting() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        event_tx
+            .send(EngineEvent::DownloadBytesWritten {
+                id: DownloadId(1),
+                bytes: 10,
+            })
+            .await
+            .unwrap();
+
+        let controller = tokio::spawn(async move {
+            let command = cmd_rx.recv().await.expect("command should arrive");
+            event_tx
+                .send(EngineEvent::DownloadBytesWritten {
+                    id: DownloadId(1),
+                    bytes: 20,
+                })
+                .await
+                .unwrap();
+
+            match command {
+                EngineCommand::Pause { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => panic!("unexpected command"),
+            }
+        });
+
+        let mut engine = DownloadEngine {
+            controller: Some(controller),
+            cmd_tx,
+            event_rx,
+            next_id: 1,
+        };
+
+        let (result, events) = timeout(
+            Duration::from_secs(1),
+            engine.pause_collecting_events(DownloadId(1)),
+        )
+        .await
+        .expect("command should not deadlock");
+
+        assert!(result.is_ok());
+        let remaining_events = usize::from(engine.try_next_event().is_some());
+        assert_eq!(events.len() + remaining_events, 2);
+        let _ = engine.controller.take().unwrap().await;
     }
 }
