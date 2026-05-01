@@ -110,6 +110,18 @@ impl CorePaths {
             default_download_dir: default_download_dir.into(),
         }
     }
+
+    pub fn default_profile() -> Self {
+        Self::new(
+            app_data_dir().join("Ophelia").join("downloads.db"),
+            Some(
+                legacy_app_support_dir()
+                    .join("Ophelia")
+                    .join("downloads.db"),
+            ),
+            default_download_dir(),
+        )
+    }
 }
 
 pub fn default_sequential_download_extensions() -> Vec<String> {
@@ -120,4 +132,63 @@ pub fn default_sequential_download_extensions() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn app_data_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        legacy_app_support_dir()
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|profile| profile.join("AppData").join("Local"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".local").join("share"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+fn legacy_app_support_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library")
+        .join("Application Support")
+}
+
+fn default_download_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .map(|profile| profile.join("Downloads"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Downloads"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
