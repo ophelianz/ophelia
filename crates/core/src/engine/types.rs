@@ -299,8 +299,8 @@ pub struct ProgressUpdate {
 }
 
 #[derive(Debug, Clone)]
-pub enum EngineNotification {
-    Update(ProgressUpdate),
+pub enum EngineEvent {
+    Progress(ProgressUpdate),
     DownloadBytesWritten {
         id: DownloadId,
         bytes: u64,
@@ -313,7 +313,7 @@ pub enum EngineNotification {
         id: DownloadId,
         support: TransferControlSupport,
     },
-    ChunkMapStateChanged {
+    ChunkMapChanged {
         id: DownloadId,
         state: TransferChunkMapState,
     },
@@ -328,6 +328,21 @@ pub enum EngineNotification {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineError {
+    Closed,
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => write!(f, "download engine is closed"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
 /// Why a live transfer row left the Transfers view
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTransferRemovalAction {
@@ -340,6 +355,7 @@ pub enum LiveTransferRemovalAction {
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub enum TaskRuntimeUpdate {
+    Progress(ProgressUpdate),
     DownloadBytesWritten {
         id: DownloadId,
         bytes: u64,
@@ -352,7 +368,7 @@ pub enum TaskRuntimeUpdate {
         id: DownloadId,
         support: TransferControlSupport,
     },
-    ChunkMapStateChanged {
+    ChunkMapChanged {
         id: DownloadId,
         state: TransferChunkMapState,
     },

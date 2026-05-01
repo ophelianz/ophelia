@@ -29,9 +29,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::types::{
-    ChunkSnapshot, DownloadId, DownloadStatus, HttpResumeData, ProgressUpdate,
-};
+use ophelia::engine::types::{ChunkSnapshot, DownloadId, DownloadStatus, HttpResumeData};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
@@ -51,9 +49,7 @@ async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -64,7 +60,6 @@ async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
             max_connections: 2,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -75,7 +70,7 @@ async fn ranged_worker_rejects_200_ok_when_server_ignores_partial_range() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
     assert!(
         !dest.exists(),
@@ -100,8 +95,7 @@ async fn progress_never_exceeds_total_during_hedged_ranges() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressUpdate>();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -114,7 +108,6 @@ async fn progress_never_exceeds_total_during_hedged_ranges() {
             progress_interval_ms: 10,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -125,7 +118,7 @@ async fn progress_never_exceeds_total_during_hedged_ranges() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert!(
         second_half_requests.load(Ordering::Relaxed) >= 2,
         "test did not exercise the hedge path"
@@ -168,9 +161,7 @@ async fn retry_after_delays_range_retry() {
     let url = format!("http://{server}/file.bin");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -180,7 +171,6 @@ async fn retry_after_delays_range_retry() {
             max_retries_per_chunk: 2,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -191,7 +181,7 @@ async fn retry_after_delays_range_retry() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
     assert_eq!(std::fs::read(&dest).unwrap(), data);
 

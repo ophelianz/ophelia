@@ -102,11 +102,11 @@ Add a slow disk writer test or instrumentation around the write path. Measure pa
 
 Priority: high
 
-### Unbounded Channels On Hot Paths
+### Bounded Channels Added In Core
 
 Exact behavior:
 
-The engine uses unbounded channels for commands, progress, notifications, done events, runtime updates, and worker events.
+The core now uses bounded Tokio channels for engine commands, public events, task done events, task runtime updates, and worker events.
 
 Files involved:
 
@@ -114,17 +114,17 @@ Files involved:
 - `crates/core/src/engine/provider.rs`
 - `crates/core/src/engine/http/range_runner.rs`
 - `crates/core/src/engine/http/range_worker.rs`
-- `crates/ophelia-gui/src/app.rs`
+- `crates/core/src/engine/types.rs`
 
 Why it matters:
 
-Fast producers can outrun the actor or GUI polling loop. Memory grows instead of applying backpressure or coalescing noisy updates.
+Fast producers now have backpressure instead of unlimited queue growth. This does not solve every hot-path issue, but the core no longer hides overload by growing memory without bound.
 
 Likely test:
 
-Stress local downloads while delaying GUI polling. Track message counts, memory, and max queue depth.
+Stress local downloads while delaying event polling. Track message counts, memory, and max queue depth.
 
-Priority: high
+Priority: resolved for core source, still worth measuring under load
 
 ### Resume Trusts Part Files Too Much
 

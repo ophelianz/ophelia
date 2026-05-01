@@ -91,7 +91,6 @@ No matches remain.
 - Active pause can block the actor loop
 - Range workers can block Tokio worker threads with sync file writes
 - Hot progress tracking uses `RangeSet` insert, sort, and merge
-- Unbounded channels are used in hot event paths
 - GUI adapter is not wired as a package yet
 - Restored downloads still rebuild provider config from current core config
 
@@ -101,8 +100,8 @@ Runtime ownership is now caller-owned. `DownloadEngine::spawn_on` takes a Tokio 
 
 Core engine tests now run under Tokio tests and wait on async engine output:
 
-- `next_progress`
-- `next_notification`
+- async progress reads
+- async notification reads
 
 Removed:
 
@@ -130,6 +129,37 @@ Policy update:
 
 Core quality, measured performance, and clean async Rust are the hard constraints. The GUI does not need to keep working after every core slice.
 
+## Slice 4 Result
+
+Core output now uses one public event stream.
+
+Added:
+
+- `EngineEvent`
+- `DownloadEngine::next_event`
+- `EngineError::Closed`
+- bounded async channels for engine commands, public events, task done, task runtime updates, and worker events
+- `TaskRuntimeUpdate::Progress`, so download tasks report progress through the actor
+
+Removed:
+
+- public split progress reads
+- public split notification reads
+- direct task-to-public progress sending
+- unbounded Tokio channels in core source
+
+Current capacities:
+
+- engine commands: 64
+- public events: 512
+- task done: 64
+- task runtime updates: 256
+- worker events: 256
+
+Remaining runtime issue:
+
+Active pause still awaits the download task inside the actor loop. This is now easier to see because all public events leave through the actor.
+
 ## Check Log
 
 Slice 1 docs check:
@@ -155,6 +185,16 @@ Slice 3 runtime ownership check:
 - `cargo fmt --check -p ophelia` passed
 - `git diff --check` passed
 - stale core import/runtime scan returned no matches
+- `cargo clippy -p ophelia --all-targets` passed
+- `cargo test -p ophelia --tests` passed
+- `cargo bench -p ophelia --bench http_range_data --no-run` passed
+
+Slice 4 event stream and backpressure check:
+
+- `cargo fmt --check -p ophelia` passed
+- `git diff --check` passed
+- stale event/channel scan returned no matches
+- core GUI-import scan returned no matches
 - `cargo clippy -p ophelia --all-targets` passed
 - `cargo test -p ophelia --tests` passed
 - `cargo bench -p ophelia --bench http_range_data --no-run` passed

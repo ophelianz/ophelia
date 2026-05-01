@@ -31,7 +31,7 @@ Today the workspace builds the core package by default. The core lives in `crate
 
 The old GUI source is parked in `crates/ophelia-gui`, but it is not a package yet. That means the GUI is intentionally behind the core rewrite right now.
 
-`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. The caller gives it a Tokio `Handle`, and it spawns one engine actor on that runtime. Commands still go through an unbounded channel. Progress and notifications are now read with async `next_progress` and `next_notification` calls.
+`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. The caller gives it a Tokio `Handle`, and it spawns one engine actor on that runtime. Commands go through a bounded async channel. Frontends read one ordered stream with `next_event`.
 
 The range runner is already much cleaner than the old slot model. Workers report events. The scheduler owns pending ranges, completed ranges, active attempts, optional stealing state, and optional hedge state.
 
@@ -43,7 +43,7 @@ The old `Settings` and platform path leaks are gone from core. The scan to keep 
 rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/src crates/core/benches
 ```
 
-The remaining large leaks are event shape and hot-path ownership. Core still has separate progress and notification queues, and range workers still write to disk directly.
+The remaining large leak is hot-path ownership. Range workers still write to disk directly.
 
 ## Target Core Inputs
 
@@ -75,21 +75,17 @@ The GUI can still save a larger `Settings` struct later. The adapter should turn
 
 ## Target Core Outputs
 
-`EngineEvent` should be the single stream that frontends read. The current code has separate progress and notification queues. That works today, but the final shape should make event ordering and backpressure easier to reason about.
+`EngineEvent` is the single stream that frontends read. The actor is the only public sender, so progress, write stats, destination changes, control support, chunk maps, and removal events keep actor order.
 
-Useful event groups:
+Current event groups:
 
-- `TransferAdded`
-- `TransferProgress`
-- `TransferWriteStats`
-- `TransferDestinationChanged`
-- `TransferControlSupportChanged`
-- `TransferChunkMapChanged`
-- `TransferPaused`
-- `TransferFinished`
-- `TransferFailed`
-- `TransferCancelled`
-- `TransferRemoved`
+- `Progress`
+- `DownloadBytesWritten`
+- `DestinationChanged`
+- `ControlSupportChanged`
+- `ChunkMapChanged`
+- `ControlUnsupported`
+- `LiveTransferRemoved`
 
 The GUI can convert those into `TransferListRow` and `HistoryListRow`. The CLI can print them.
 

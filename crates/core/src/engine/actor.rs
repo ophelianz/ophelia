@@ -20,7 +20,8 @@
 //! Download engine actor
 //!
 //! Sits between frontends and download tasks
-//! Commands come in through a channel and progress goes back through another channel
+//! Commands come in through a bounded channel
+//! Frontends read one ordered event stream from the actor
 //!
 //! Queue flow:
 //!   Add    → if tasks < max_concurrent, spawn immediately; else push to queue
@@ -52,9 +53,14 @@ use crate::engine::provider::{
 };
 use crate::engine::{
     ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
-    EngineNotification, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
+    EngineError, EngineEvent, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
     RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState, TransferControlSupport,
 };
+
+const ENGINE_COMMAND_CAPACITY: usize = 64;
+const ENGINE_EVENT_CAPACITY: usize = 512;
+const TASK_DONE_CAPACITY: usize = 64;
+const TASK_RUNTIME_UPDATE_CAPACITY: usize = 256;
 
 #[allow(dead_code)]
 enum EngineCommand {
@@ -120,9 +126,8 @@ struct QueuedTask {
 
 pub struct DownloadEngine {
     actor: Option<JoinHandle<()>>,
-    cmd_tx: mpsc::UnboundedSender<EngineCommand>,
-    progress_rx: mpsc::UnboundedReceiver<ProgressUpdate>,
-    notification_rx: mpsc::UnboundedReceiver<EngineNotification>,
+    cmd_tx: mpsc::Sender<EngineCommand>,
+    event_rx: mpsc::Receiver<EngineEvent>,
     next_id: u64,
 }
 
@@ -133,88 +138,94 @@ impl DownloadEngine {
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         initial_next_id: u64,
     ) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-        let (notification_tx, notification_rx) = mpsc::unbounded_channel();
-        let (done_tx, done_rx) = mpsc::unbounded_channel::<TaskDone>();
-        let (runtime_update_tx, runtime_update_rx) = mpsc::unbounded_channel::<TaskRuntimeUpdate>();
+        let (cmd_tx, cmd_rx) = mpsc::channel(ENGINE_COMMAND_CAPACITY);
+        let (event_tx, event_rx) = mpsc::channel(ENGINE_EVENT_CAPACITY);
+        let (done_tx, done_rx) = mpsc::channel::<TaskDone>(TASK_DONE_CAPACITY);
+        let (runtime_update_tx, runtime_update_rx) =
+            mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
 
         let actor = runtime.spawn(
-            EngineActor::new(
-                progress_tx,
-                notification_tx,
-                config,
-                db_tx,
-                done_tx,
-                runtime_update_tx,
-            )
-            .run(cmd_rx, done_rx, runtime_update_rx),
+            EngineActor::new(event_tx, config, db_tx, done_tx, runtime_update_tx).run(
+                cmd_rx,
+                done_rx,
+                runtime_update_rx,
+            ),
         );
 
         Self {
             actor: Some(actor),
             cmd_tx,
-            progress_rx,
-            notification_rx,
+            event_rx,
             next_id: initial_next_id,
         }
     }
 
     /// Add a saved download to the paused map
     /// The user must resume it explicitly
-    pub fn restore(&self, download: RestoredDownload) {
-        let _ = self.cmd_tx.send(EngineCommand::Restore { download });
+    pub async fn restore(&self, download: RestoredDownload) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::Restore { download }).await
     }
 
-    pub fn add(&mut self, spec: DownloadSpec) -> DownloadId {
+    pub async fn add(&mut self, spec: DownloadSpec) -> Result<DownloadId, EngineError> {
         let id = DownloadId(self.next_id);
         self.next_id += 1;
-        let _ = self.cmd_tx.send(EngineCommand::Add { id, spec });
-        id
+        if let Err(error) = self.send_command(EngineCommand::Add { id, spec }).await {
+            self.next_id -= 1;
+            return Err(error);
+        }
+        Ok(id)
     }
 
-    pub fn pause(&self, id: DownloadId) {
-        let _ = self.cmd_tx.send(EngineCommand::Pause { id });
+    pub async fn pause(&self, id: DownloadId) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::Pause { id }).await
     }
 
-    pub fn resume(&self, id: DownloadId) {
-        let _ = self.cmd_tx.send(EngineCommand::Resume { id });
+    pub async fn resume(&self, id: DownloadId) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::Resume { id }).await
     }
 
     #[allow(dead_code)] // kept as an explicit backend control even though the current UI deletes artifacts instead.
-    pub fn cancel(&self, id: DownloadId) {
-        let _ = self.cmd_tx.send(EngineCommand::Cancel { id });
+    pub async fn cancel(&self, id: DownloadId) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::Cancel { id }).await
     }
 
-    pub fn delete_artifact(&self, id: DownloadId, destination: PathBuf) {
-        let _ = self
-            .cmd_tx
-            .send(EngineCommand::DeleteArtifact { id, destination });
+    pub async fn delete_artifact(
+        &self,
+        id: DownloadId,
+        destination: PathBuf,
+    ) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::DeleteArtifact { id, destination })
+            .await
     }
 
-    pub fn update_config(&self, config: CoreConfig) {
-        let _ = self.cmd_tx.send(EngineCommand::UpdateConfig { config });
+    pub async fn update_config(&self, config: CoreConfig) -> Result<(), EngineError> {
+        self.send_command(EngineCommand::UpdateConfig { config })
+            .await
     }
 
-    pub async fn next_progress(&mut self) -> Option<ProgressUpdate> {
-        self.progress_rx.recv().await
+    pub async fn next_event(&mut self) -> Option<EngineEvent> {
+        self.event_rx.recv().await
     }
 
-    pub async fn next_notification(&mut self) -> Option<EngineNotification> {
-        self.notification_rx.recv().await
-    }
-
-    pub async fn shutdown(mut self) {
-        let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+    pub async fn shutdown(mut self) -> Result<(), EngineError> {
+        let send_result = self.send_command(EngineCommand::Shutdown).await;
         if let Some(actor) = self.actor.take() {
             let _ = actor.await;
         }
+        send_result
+    }
+
+    async fn send_command(&self, command: EngineCommand) -> Result<(), EngineError> {
+        self.cmd_tx
+            .send(command)
+            .await
+            .map_err(|_| EngineError::Closed)
     }
 }
 
 impl Drop for DownloadEngine {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(EngineCommand::Shutdown);
+        let _ = self.cmd_tx.try_send(EngineCommand::Shutdown);
     }
 }
 
@@ -228,9 +239,8 @@ struct EngineActor {
     paused: HashMap<DownloadId, PausedTask>,
     queue: VecDeque<QueuedTask>,
     max_concurrent: usize,
-    done_tx: mpsc::UnboundedSender<TaskDone>,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    notification_tx: mpsc::UnboundedSender<EngineNotification>,
+    done_tx: mpsc::Sender<TaskDone>,
+    event_tx: mpsc::Sender<EngineEvent>,
     config: CoreConfig,
     /// Shared semaphores for source-wide limits
     /// HTTP uses this for per-host limits
@@ -238,17 +248,16 @@ struct EngineActor {
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     /// Global speed cap shared across active downloads
     global_throttle: Arc<TokenBucket>,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
 impl EngineActor {
     fn new(
-        progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-        notification_tx: mpsc::UnboundedSender<EngineNotification>,
+        event_tx: mpsc::Sender<EngineEvent>,
         config: CoreConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
-        done_tx: mpsc::UnboundedSender<TaskDone>,
-        runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+        done_tx: mpsc::Sender<TaskDone>,
+        runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
     ) -> Self {
         let max_concurrent = config.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(config.global_speed_limit_bps));
@@ -258,8 +267,7 @@ impl EngineActor {
             queue: VecDeque::new(),
             max_concurrent,
             done_tx,
-            progress_tx,
-            notification_tx,
+            event_tx,
             config,
             shared_schedulers: HashMap::new(),
             db_tx,
@@ -280,26 +288,29 @@ impl EngineActor {
 
     async fn run(
         mut self,
-        mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
-        mut done_rx: mpsc::UnboundedReceiver<TaskDone>,
-        mut runtime_update_rx: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+        mut cmd_rx: mpsc::Receiver<EngineCommand>,
+        mut done_rx: mpsc::Receiver<TaskDone>,
+        mut runtime_update_rx: mpsc::Receiver<TaskRuntimeUpdate>,
     ) {
         loop {
             tokio::select! {
                 biased;
                 cmd = cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { break };
+                    let Some(cmd) = cmd else {
+                        self.handle_shutdown();
+                        break;
+                    };
                     match cmd {
                         EngineCommand::Add { id, spec } =>
-                            self.handle_add(id, spec),
+                            self.handle_add(id, spec).await,
                         EngineCommand::Pause { id } =>
                             self.handle_pause(id).await,
                         EngineCommand::Resume { id } =>
-                            self.handle_resume(id),
+                            self.handle_resume(id).await,
                         EngineCommand::Cancel { id } =>
-                            self.handle_cancel(id),
+                            self.handle_cancel(id).await,
                         EngineCommand::DeleteArtifact { id, destination } =>
-                            self.handle_delete_artifact(id, &destination),
+                            self.handle_delete_artifact(id, &destination).await,
                         EngineCommand::Restore { download } => {
                             if !provider::supports_control_action(
                                 &download.spec,
@@ -308,7 +319,7 @@ impl EngineActor {
                                 self.notify_unsupported_control(
                                     download.id,
                                     DownloadControlAction::Restore,
-                                );
+                                ).await;
                                 tracing::warn!(
                                     id = download.id.0,
                                     "provider does not support restart restore for this download"
@@ -322,7 +333,7 @@ impl EngineActor {
                             });
                         }
                         EngineCommand::UpdateConfig { config } => {
-                            self.handle_update_config(config);
+                            self.handle_update_config(config).await;
                         }
                         EngineCommand::Shutdown => {
                             self.handle_shutdown();
@@ -331,16 +342,16 @@ impl EngineActor {
                     }
                 }
                 Some(done) = done_rx.recv() => {
-                    self.handle_task_done(done);
+                    self.handle_task_done(done).await;
                 }
                 Some(update) = runtime_update_rx.recv() => {
-                    self.handle_runtime_update(update);
+                    self.handle_runtime_update(update).await;
                 }
             }
         }
     }
 
-    fn spawn_task(
+    async fn spawn_task(
         &mut self,
         id: DownloadId,
         spec: DownloadSpec,
@@ -354,7 +365,6 @@ impl EngineActor {
         } = provider::spawn_task(
             id,
             &spec,
-            self.progress_tx.clone(),
             self.done_tx.clone(),
             pause_token.clone(),
             resume_data,
@@ -365,6 +375,7 @@ impl EngineActor {
             },
         );
 
+        let chunk_map_state = spec.active_chunk_map_state();
         self.tasks.insert(
             id,
             TaskEntry {
@@ -376,20 +387,15 @@ impl EngineActor {
                 spec,
             },
         );
-        let _ = self
-            .notification_tx
-            .send(EngineNotification::ChunkMapStateChanged {
-                id,
-                state: self
-                    .tasks
-                    .get(&id)
-                    .map(|entry| entry.spec.active_chunk_map_state())
-                    .unwrap_or(TransferChunkMapState::Unsupported),
-            });
+        self.emit(EngineEvent::ChunkMapChanged {
+            id,
+            state: chunk_map_state,
+        })
+        .await;
     }
 
     /// Start queued downloads until capacity is full
-    fn try_start_next(&mut self) {
+    async fn try_start_next(&mut self) {
         while self.tasks.len() < self.max_concurrent {
             let Some(next) = self.queue.pop_front() else {
                 break;
@@ -400,16 +406,16 @@ impl EngineActor {
                 "starting queued download"
             );
             let _ = self.db_tx.send(DbEvent::Started { id: next.id });
-            self.spawn_task(next.id, next.spec, next.resume_data);
+            self.spawn_task(next.id, next.spec, next.resume_data).await;
         }
     }
 
-    fn handle_add(&mut self, id: DownloadId, spec: DownloadSpec) {
+    async fn handle_add(&mut self, id: DownloadId, spec: DownloadSpec) {
         let _ = self.db_tx.send(self.added_event(id, &spec));
         if self.tasks.len() < self.max_concurrent {
             tracing::info!(id = id.0, url = spec.url(), "download starting");
             let _ = self.db_tx.send(DbEvent::Started { id });
-            self.spawn_task(id, spec, None);
+            self.spawn_task(id, spec, None).await;
         } else {
             tracing::info!(
                 id = id.0,
@@ -433,7 +439,8 @@ impl EngineActor {
             return;
         };
         if !provider::supports_control_action(spec, DownloadControlAction::Pause) {
-            self.notify_unsupported_control(id, DownloadControlAction::Pause);
+            self.notify_unsupported_control(id, DownloadControlAction::Pause)
+                .await;
             return;
         }
 
@@ -448,18 +455,18 @@ impl EngineActor {
                 Err(error) => {
                     tracing::warn!(id = id.0, ?error, "download task failed while pausing");
                     let _ = self.db_tx.send(DbEvent::Error { id });
-                    let _ = self
-                        .notification_tx
-                        .send(EngineNotification::ChunkMapStateChanged {
-                            id,
-                            state: TransferChunkMapState::Unsupported,
-                        });
-                    self.try_start_next();
+                    self.emit(EngineEvent::ChunkMapChanged {
+                        id,
+                        state: TransferChunkMapState::Unsupported,
+                    })
+                    .await;
+                    self.try_start_next().await;
                     return;
                 }
             };
             let mut spec = entry.spec;
-            self.sync_runtime_destination(id, &mut spec, &entry.destination_sink);
+            self.sync_runtime_destination(id, &mut spec, &entry.destination_sink)
+                .await;
             let resume_data = provider::take_resume_data(entry.pause_sink);
 
             match final_state.status {
@@ -471,12 +478,11 @@ impl EngineActor {
                             downloaded_bytes,
                             resume_data: Some(resume_data.clone()),
                         });
-                        let _ =
-                            self.notification_tx
-                                .send(EngineNotification::ChunkMapStateChanged {
-                                    id,
-                                    state: TransferChunkMapState::Unsupported,
-                                });
+                        self.emit(EngineEvent::ChunkMapChanged {
+                            id,
+                            state: TransferChunkMapState::Unsupported,
+                        })
+                        .await;
                         self.paused.insert(
                             id,
                             PausedTask {
@@ -487,44 +493,41 @@ impl EngineActor {
                     } else {
                         tracing::warn!(id = id.0, "download reported paused without resume data");
                         let _ = self.db_tx.send(DbEvent::Error { id });
-                        let _ =
-                            self.notification_tx
-                                .send(EngineNotification::ChunkMapStateChanged {
-                                    id,
-                                    state: TransferChunkMapState::Unsupported,
-                                });
-                    }
-                    self.try_start_next();
-                }
-                DownloadStatus::Finished => {
-                    let _ = self
-                        .notification_tx
-                        .send(EngineNotification::ChunkMapStateChanged {
+                        self.emit(EngineEvent::ChunkMapChanged {
                             id,
                             state: TransferChunkMapState::Unsupported,
-                        });
+                        })
+                        .await;
+                    }
+                    self.try_start_next().await;
+                }
+                DownloadStatus::Finished => {
+                    self.emit(EngineEvent::ChunkMapChanged {
+                        id,
+                        state: TransferChunkMapState::Unsupported,
+                    })
+                    .await;
                     let _ = self.db_tx.send(DbEvent::Finished {
                         id,
                         total_bytes: final_state
                             .total_bytes
                             .unwrap_or(final_state.downloaded_bytes),
                     });
-                    self.try_start_next();
+                    self.try_start_next().await;
                 }
                 DownloadStatus::Error => {
-                    let _ = self
-                        .notification_tx
-                        .send(EngineNotification::ChunkMapStateChanged {
-                            id,
-                            state: TransferChunkMapState::Unsupported,
-                        });
+                    self.emit(EngineEvent::ChunkMapChanged {
+                        id,
+                        state: TransferChunkMapState::Unsupported,
+                    })
+                    .await;
                     let _ = self.db_tx.send(DbEvent::Error { id });
-                    self.try_start_next();
+                    self.try_start_next().await;
                 }
                 DownloadStatus::Pending
                 | DownloadStatus::Downloading
                 | DownloadStatus::Cancelled => {
-                    self.try_start_next();
+                    self.try_start_next().await;
                 }
             }
         } else if let Some(pos) = self.queue.iter().position(|t| t.id == id) {
@@ -536,18 +539,13 @@ impl EngineActor {
                 downloaded_bytes: 0,
                 resume_data: None,
             });
-            let _ = self
-                .notification_tx
-                .send(EngineNotification::ChunkMapStateChanged {
-                    id,
-                    state: TransferChunkMapState::Unsupported,
-                });
-            let _ = self.notification_tx.send(self.status_notification(
+            self.emit(EngineEvent::ChunkMapChanged {
                 id,
-                DownloadStatus::Paused,
-                0,
-                None,
-            ));
+                state: TransferChunkMapState::Unsupported,
+            })
+            .await;
+            self.emit(self.status_event(id, DownloadStatus::Paused, 0, None))
+                .await;
             self.paused.insert(
                 id,
                 PausedTask {
@@ -558,12 +556,13 @@ impl EngineActor {
         }
     }
 
-    fn handle_resume(&mut self, id: DownloadId) {
+    async fn handle_resume(&mut self, id: DownloadId) {
         let Some(spec) = self.resume_target_spec(id) else {
             return;
         };
         if !provider::supports_control_action(spec, DownloadControlAction::Resume) {
-            self.notify_unsupported_control(id, DownloadControlAction::Resume);
+            self.notify_unsupported_control(id, DownloadControlAction::Resume)
+                .await;
             return;
         }
 
@@ -575,22 +574,24 @@ impl EngineActor {
             let (downloaded_bytes, total_bytes) = snapshot_totals(pt.resume_data.as_ref());
             if self.tasks.len() < self.max_concurrent {
                 let _ = self.db_tx.send(DbEvent::Resumed { id });
-                let _ = self.notification_tx.send(self.status_notification(
+                self.emit(self.status_event(
                     id,
                     DownloadStatus::Downloading,
                     downloaded_bytes,
                     total_bytes,
-                ));
-                self.spawn_task(id, pt.spec, pt.resume_data);
+                ))
+                .await;
+                self.spawn_task(id, pt.spec, pt.resume_data).await;
             } else {
                 // At capacity -> put at front of queue so it starts next
                 let _ = self.db_tx.send(DbEvent::Queued { id });
-                let _ = self.notification_tx.send(self.status_notification(
+                self.emit(self.status_event(
                     id,
                     DownloadStatus::Pending,
                     downloaded_bytes,
                     total_bytes,
-                ));
+                ))
+                .await;
                 self.queue.push_front(QueuedTask {
                     id,
                     spec: pt.spec,
@@ -600,12 +601,13 @@ impl EngineActor {
         }
     }
 
-    fn handle_cancel(&mut self, id: DownloadId) {
+    async fn handle_cancel(&mut self, id: DownloadId) {
         let Some((supports_cancel, destination)) = self.cancel_target(id) else {
             return;
         };
         if !supports_cancel {
-            self.notify_unsupported_control(id, DownloadControlAction::Cancel);
+            self.notify_unsupported_control(id, DownloadControlAction::Cancel)
+                .await;
             return;
         }
 
@@ -614,7 +616,7 @@ impl EngineActor {
             tracing::info!(id = id.0, "download cancelled");
             // abort() prevents done_tx from firing, so advance the queue here
             entry.handle.abort();
-            self.try_start_next();
+            self.try_start_next().await;
             removed = true;
         }
         let queued_before = self.queue.len();
@@ -628,23 +630,21 @@ impl EngineActor {
             let _ = self
                 .db_tx
                 .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-            let _ = self
-                .notification_tx
-                .send(EngineNotification::ChunkMapStateChanged {
-                    id,
-                    state: TransferChunkMapState::Unsupported,
-                });
-            let _ = self
-                .notification_tx
-                .send(EngineNotification::LiveTransferRemoved {
-                    id,
-                    action: LiveTransferRemovalAction::Cancelled,
-                    artifact_state,
-                });
+            self.emit(EngineEvent::ChunkMapChanged {
+                id,
+                state: TransferChunkMapState::Unsupported,
+            })
+            .await;
+            self.emit(EngineEvent::LiveTransferRemoved {
+                id,
+                action: LiveTransferRemovalAction::Cancelled,
+                artifact_state,
+            })
+            .await;
         }
     }
 
-    fn handle_delete_artifact(&mut self, id: DownloadId, destination: &Path) {
+    async fn handle_delete_artifact(&mut self, id: DownloadId, destination: &Path) {
         let resolved_destination = self
             .known_destination(id)
             .unwrap_or_else(|| destination.to_path_buf());
@@ -652,7 +652,7 @@ impl EngineActor {
             entry.handle.abort();
         });
         if was_active.is_some() {
-            self.try_start_next();
+            self.try_start_next().await;
         }
 
         let queued_before = self.queue.len();
@@ -668,19 +668,17 @@ impl EngineActor {
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-        let _ = self
-            .notification_tx
-            .send(EngineNotification::ChunkMapStateChanged {
-                id,
-                state: TransferChunkMapState::Unsupported,
-            });
-        let _ = self
-            .notification_tx
-            .send(EngineNotification::LiveTransferRemoved {
-                id,
-                action: LiveTransferRemovalAction::DeleteArtifact,
-                artifact_state,
-            });
+        self.emit(EngineEvent::ChunkMapChanged {
+            id,
+            state: TransferChunkMapState::Unsupported,
+        })
+        .await;
+        self.emit(EngineEvent::LiveTransferRemoved {
+            id,
+            action: LiveTransferRemovalAction::DeleteArtifact,
+            artifact_state,
+        })
+        .await;
     }
 
     fn handle_shutdown(&mut self) {
@@ -697,23 +695,23 @@ impl EngineActor {
         self.queue.clear();
     }
 
-    fn handle_task_done(&mut self, done: TaskDone) {
+    async fn handle_task_done(&mut self, done: TaskDone) {
         let active_entry = self.tasks.remove(&done.id);
         if active_entry.is_none() && !self.paused.contains_key(&done.id) {
             return;
         }
         if let Some(mut entry) = active_entry {
-            self.sync_runtime_destination(done.id, &mut entry.spec, &entry.destination_sink);
+            self.sync_runtime_destination(done.id, &mut entry.spec, &entry.destination_sink)
+                .await;
         }
 
         match done.final_state.status {
             DownloadStatus::Finished => {
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::ChunkMapStateChanged {
-                        id: done.id,
-                        state: TransferChunkMapState::Unsupported,
-                    });
+                self.emit(EngineEvent::ChunkMapChanged {
+                    id: done.id,
+                    state: TransferChunkMapState::Unsupported,
+                })
+                .await;
                 let _ = self.db_tx.send(DbEvent::Finished {
                     id: done.id,
                     total_bytes: done
@@ -721,30 +719,29 @@ impl EngineActor {
                         .total_bytes
                         .unwrap_or(done.final_state.downloaded_bytes),
                 });
-                self.try_start_next();
+                self.try_start_next().await;
             }
             DownloadStatus::Error => {
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::ChunkMapStateChanged {
-                        id: done.id,
-                        state: TransferChunkMapState::Unsupported,
-                    });
+                self.emit(EngineEvent::ChunkMapChanged {
+                    id: done.id,
+                    state: TransferChunkMapState::Unsupported,
+                })
+                .await;
                 let _ = self.db_tx.send(DbEvent::Error { id: done.id });
-                self.try_start_next();
+                self.try_start_next().await;
             }
             DownloadStatus::Paused => {
                 if !self.paused.contains_key(&done.id) {
-                    self.try_start_next();
+                    self.try_start_next().await;
                 }
             }
             DownloadStatus::Pending | DownloadStatus::Downloading | DownloadStatus::Cancelled => {
-                self.try_start_next();
+                self.try_start_next().await;
             }
         }
     }
 
-    fn handle_update_config(&mut self, config: CoreConfig) {
+    async fn handle_update_config(&mut self, config: CoreConfig) {
         let old_max_concurrent = self.max_concurrent;
         let old_config = self.config.clone();
 
@@ -755,19 +752,28 @@ impl EngineActor {
         self.config = config;
 
         if self.max_concurrent > old_max_concurrent {
-            self.try_start_next();
+            self.try_start_next().await;
         }
     }
 
-    fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
+    async fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
         match update {
+            TaskRuntimeUpdate::Progress(update) => {
+                if self.tasks.contains_key(&update.id)
+                    || matches!(
+                        update.status,
+                        DownloadStatus::Finished | DownloadStatus::Paused | DownloadStatus::Error
+                    )
+                {
+                    self.emit(EngineEvent::Progress(update)).await;
+                }
+            }
             TaskRuntimeUpdate::DownloadBytesWritten { id, bytes } => {
                 if !self.tasks.contains_key(&id) {
                     return;
                 }
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::DownloadBytesWritten { id, bytes });
+                self.emit(EngineEvent::DownloadBytesWritten { id, bytes })
+                    .await;
             }
             TaskRuntimeUpdate::DestinationChanged { id, destination } => {
                 let Some(entry) = self.tasks.get_mut(&id) else {
@@ -781,9 +787,8 @@ impl EngineActor {
                     id,
                     destination: destination.clone(),
                 });
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::DestinationChanged { id, destination });
+                self.emit(EngineEvent::DestinationChanged { id, destination })
+                    .await;
             }
             TaskRuntimeUpdate::ControlSupportChanged { id, support } => {
                 let Some(entry) = self.tasks.get_mut(&id) else {
@@ -793,17 +798,14 @@ impl EngineActor {
                     return;
                 }
                 entry.control_support = support;
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::ControlSupportChanged { id, support });
+                self.emit(EngineEvent::ControlSupportChanged { id, support })
+                    .await;
             }
-            TaskRuntimeUpdate::ChunkMapStateChanged { id, state } => {
+            TaskRuntimeUpdate::ChunkMapChanged { id, state } => {
                 if !self.tasks.contains_key(&id) {
                     return;
                 }
-                let _ = self
-                    .notification_tx
-                    .send(EngineNotification::ChunkMapStateChanged { id, state });
+                self.emit(EngineEvent::ChunkMapChanged { id, state }).await;
             }
         }
     }
@@ -839,14 +841,14 @@ impl EngineActor {
         }
     }
 
-    fn status_notification(
+    fn status_event(
         &self,
         id: DownloadId,
         status: DownloadStatus,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
-    ) -> EngineNotification {
-        EngineNotification::Update(ProgressUpdate {
+    ) -> EngineEvent {
+        EngineEvent::Progress(ProgressUpdate {
             id,
             status,
             downloaded_bytes,
@@ -855,10 +857,13 @@ impl EngineActor {
         })
     }
 
-    fn notify_unsupported_control(&self, id: DownloadId, action: DownloadControlAction) {
-        let _ = self
-            .notification_tx
-            .send(EngineNotification::ControlUnsupported { id, action });
+    async fn notify_unsupported_control(&self, id: DownloadId, action: DownloadControlAction) {
+        self.emit(EngineEvent::ControlUnsupported { id, action })
+            .await;
+    }
+
+    async fn emit(&self, event: EngineEvent) {
+        let _ = self.event_tx.send(event).await;
     }
 
     fn pause_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
@@ -925,7 +930,7 @@ impl EngineActor {
             .unwrap_or_else(|| entry.spec.destination().to_path_buf())
     }
 
-    fn sync_runtime_destination(
+    async fn sync_runtime_destination(
         &self,
         id: DownloadId,
         spec: &mut DownloadSpec,
@@ -942,9 +947,8 @@ impl EngineActor {
             id,
             destination: destination.clone(),
         });
-        let _ = self
-            .notification_tx
-            .send(EngineNotification::DestinationChanged { id, destination });
+        self.emit(EngineEvent::DestinationChanged { id, destination })
+            .await;
     }
 }
 

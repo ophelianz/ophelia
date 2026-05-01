@@ -28,7 +28,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
+use ophelia::engine::types::{DownloadId, DownloadStatus};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pause_and_resume_completes_correctly() {
@@ -54,7 +54,6 @@ async fn pause_and_resume_completes_correctly() {
     // — Pass 1: start, pause mid-download —
     let pause_token = CancellationToken::new();
     let pause_sink = Arc::new(Mutex::new(None));
-    let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<ProgressUpdate>();
 
     let handle = {
         let url = url.clone();
@@ -69,7 +68,6 @@ async fn pause_and_resume_completes_correctly() {
                 dest.clone(),
                 exact_destination_policy(&dest),
                 HttpDownloadConfig::default(),
-                tx1,
                 token,
                 sink,
                 Arc::new(Mutex::new(None)),
@@ -95,15 +93,13 @@ async fn pause_and_resume_completes_correctly() {
     assert!(!snapshots.is_empty());
 
     // — Pass 2: resume from snapshots, run to completion —
-    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
         HttpDownloadConfig::default(),
-        tx2,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -114,7 +110,7 @@ async fn pause_and_resume_completes_correctly() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx2).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();

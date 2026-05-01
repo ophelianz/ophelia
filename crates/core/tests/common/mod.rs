@@ -53,14 +53,13 @@ pub async fn download_task(
     destination: std::path::PathBuf,
     destination_policy: DestinationPolicy,
     config: HttpDownloadConfig,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     pause_token: CancellationToken,
     pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
     destination_sink: Arc<Mutex<Option<std::path::PathBuf>>>,
     resume_from: Option<Vec<ChunkSnapshot>>,
     server_semaphore: Arc<Semaphore>,
     global_throttle: Arc<TokenBucket>,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 ) -> ophelia::engine::http::TaskFinalState {
     ophelia::engine::http::download_task(DownloadTaskRequest {
         id,
@@ -68,7 +67,6 @@ pub async fn download_task(
         destination,
         destination_policy,
         config,
-        progress_tx,
         pause_token,
         pause_sink,
         destination_sink,
@@ -81,10 +79,10 @@ pub async fn download_task(
 }
 
 pub fn runtime_updates_channel() -> (
-    mpsc::UnboundedSender<TaskRuntimeUpdate>,
-    mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+    mpsc::Sender<TaskRuntimeUpdate>,
+    mpsc::Receiver<TaskRuntimeUpdate>,
 ) {
-    mpsc::unbounded_channel()
+    mpsc::channel(256)
 }
 
 pub fn test_data(size: usize) -> Vec<u8> {
@@ -97,9 +95,20 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn drain_progress(
-    rx: &mut mpsc::UnboundedReceiver<ProgressUpdate>,
-) -> Vec<ProgressUpdate> {
+pub async fn drain_progress(rx: &mut mpsc::Receiver<TaskRuntimeUpdate>) -> Vec<ProgressUpdate> {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut updates = vec![];
+    while let Ok(update) = rx.try_recv() {
+        if let TaskRuntimeUpdate::Progress(update) = update {
+            updates.push(update);
+        }
+    }
+    updates
+}
+
+pub async fn drain_runtime_updates(
+    rx: &mut mpsc::Receiver<TaskRuntimeUpdate>,
+) -> Vec<TaskRuntimeUpdate> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut updates = vec![];
     while let Ok(update) = rx.try_recv() {
@@ -108,12 +117,29 @@ pub async fn drain_progress(
     updates
 }
 
+pub fn progress_updates(updates: &[TaskRuntimeUpdate]) -> Vec<ProgressUpdate> {
+    updates
+        .iter()
+        .filter_map(|update| match update {
+            TaskRuntimeUpdate::Progress(progress) => Some(progress.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn download_write_bytes_from(updates: &[TaskRuntimeUpdate]) -> u64 {
+    updates.iter().fold(0_u64, |total, update| match update {
+        TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } => total.saturating_add(*bytes),
+        _ => total,
+    })
+}
+
 pub fn last_status(updates: &[ProgressUpdate]) -> Option<DownloadStatus> {
     updates.last().map(|u| u.status)
 }
 
 pub async fn wait_for_runtime_update(
-    rx: &mut mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+    rx: &mut mpsc::Receiver<TaskRuntimeUpdate>,
     mut predicate: impl FnMut(&TaskRuntimeUpdate) -> bool,
 ) -> TaskRuntimeUpdate {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -131,7 +157,7 @@ pub async fn wait_for_runtime_update(
     }
 }
 
-pub fn drain_download_write_bytes(rx: &mut mpsc::UnboundedReceiver<TaskRuntimeUpdate>) -> u64 {
+pub fn drain_download_write_bytes(rx: &mut mpsc::Receiver<TaskRuntimeUpdate>) -> u64 {
     let mut total = 0_u64;
     while let Ok(update) = rx.try_recv() {
         if let TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } = update {

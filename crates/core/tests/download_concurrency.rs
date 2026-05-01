@@ -47,9 +47,7 @@ async fn work_stealing_produces_correct_output() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 4,
         min_steal_bytes: 4 * 1024,
@@ -61,7 +59,6 @@ async fn work_stealing_produces_correct_output() {
         dest.clone(),
         exact_destination_policy(&dest),
         config,
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -72,7 +69,7 @@ async fn work_stealing_produces_correct_output() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
@@ -95,9 +92,7 @@ async fn balanced_default_downloads_with_live_strategy_defaults() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 4,
         max_connections: 4,
@@ -109,7 +104,6 @@ async fn balanced_default_downloads_with_live_strategy_defaults() {
         dest.clone(),
         exact_destination_policy(&dest),
         config,
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -120,7 +114,7 @@ async fn balanced_default_downloads_with_live_strategy_defaults() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
@@ -145,9 +139,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
     let url = format!("http://{server}/file.bin");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 2,
         max_connections: 2,
@@ -160,7 +152,6 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         dest.clone(),
         exact_destination_policy(&dest),
         config,
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -171,7 +162,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
     assert!(
         second_half_requests.load(Ordering::Relaxed) >= 2,
@@ -200,9 +191,7 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
     let url = format!("http://{server}/file.bin");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     let config = HttpDownloadConfig {
         min_connections: 2,
         max_connections: 2,
@@ -215,7 +204,6 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
         dest.clone(),
         exact_destination_policy(&dest),
         config,
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -226,7 +214,7 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
     assert!(
         second_half_requests.load(Ordering::Relaxed) >= 2,

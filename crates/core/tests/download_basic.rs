@@ -119,8 +119,6 @@ async fn parallel_download_with_range_support() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -128,7 +126,6 @@ async fn parallel_download_with_range_support() {
         dest.clone(),
         exact_destination_policy(&dest),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -139,14 +136,15 @@ async fn parallel_download_with_range_support() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    let runtime_updates = drain_runtime_updates(&mut runtime_rx).await;
+    let progress = progress_updates(&runtime_updates);
+    assert_eq!(last_status(&progress), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
     assert_eq!(sha256(&downloaded), expected_hash);
     assert_eq!(
-        drain_download_write_bytes(&mut runtime_rx),
+        download_write_bytes_from(&runtime_updates),
         data.len() as u64
     );
 }
@@ -165,8 +163,6 @@ async fn chunked_http_emits_chunk_map_snapshot() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -178,7 +174,6 @@ async fn chunked_http_emits_chunk_map_snapshot() {
             write_buffer_size: 1024,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -192,7 +187,7 @@ async fn chunked_http_emits_chunk_map_snapshot() {
     match wait_for_runtime_update(&mut runtime_rx, |update| {
         matches!(
             update,
-            TaskRuntimeUpdate::ChunkMapStateChanged {
+            TaskRuntimeUpdate::ChunkMapChanged {
                 state: TransferChunkMapState::Http(_),
                 ..
             }
@@ -200,7 +195,7 @@ async fn chunked_http_emits_chunk_map_snapshot() {
     })
     .await
     {
-        TaskRuntimeUpdate::ChunkMapStateChanged {
+        TaskRuntimeUpdate::ChunkMapChanged {
             state: TransferChunkMapState::Http(snapshot),
             ..
         } => {
@@ -232,8 +227,6 @@ async fn chunked_http_batches_write_stat_updates() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -245,7 +238,6 @@ async fn chunked_http_batches_write_stat_updates() {
             progress_interval_ms: 60_000,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -284,8 +276,6 @@ async fn single_stream_fallback_no_range_support() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -293,7 +283,6 @@ async fn single_stream_fallback_no_range_support() {
         dest.clone(),
         exact_destination_policy(&dest),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -304,17 +293,18 @@ async fn single_stream_fallback_no_range_support() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    let runtime_updates = drain_runtime_updates(&mut runtime_rx).await;
+    let progress = progress_updates(&runtime_updates);
+    assert_eq!(last_status(&progress), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(sha256(&downloaded), expected_hash);
     let mut saw_unsupported_chunk_map = false;
     let mut saw_single_stream_controls = false;
     let mut written = 0_u64;
-    while let Ok(update) = runtime_rx.try_recv() {
+    for update in runtime_updates {
         match update {
-            TaskRuntimeUpdate::ChunkMapStateChanged {
+            TaskRuntimeUpdate::ChunkMapChanged {
                 state: TransferChunkMapState::Unsupported,
                 ..
             } => saw_unsupported_chunk_map = true,
@@ -350,16 +340,13 @@ async fn fallback_when_no_content_length() {
     let url = format!("http://{server}/file.bin");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -370,7 +357,7 @@ async fn fallback_when_no_content_length() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
@@ -381,16 +368,13 @@ async fn fallback_when_no_content_length() {
 async fn error_on_server_down() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         "http://127.0.0.1:1".to_string(),
         dest,
         exact_destination_policy(&dir.path().join("file.bin")),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -401,7 +385,7 @@ async fn error_on_server_down() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
 }
 
@@ -432,8 +416,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
     let url = format!("{}/download", server.uri());
     let initial_destination = destination_config.default_download_dir.join("download");
     let destination_sink = Arc::new(Mutex::new(None));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
 
     download_task(
         DownloadId(0),
@@ -441,7 +424,6 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
         initial_destination,
         DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::clone(&destination_sink),
@@ -452,7 +434,7 @@ async fn content_disposition_reruns_destination_rules_before_writing() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let final_destination = root.path().join("Movies").join("movie.mp4");
@@ -483,16 +465,13 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
     let destination = destination_config.default_download_dir.join("file.bin");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, b"old").unwrap();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
         DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -503,7 +482,7 @@ async fn chunked_replace_strategy_replaces_existing_file_on_commit() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!destination.with_file_name("file.bin.ophelia_part").exists());
@@ -528,16 +507,13 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
     let destination = destination_config.default_download_dir.join("file.bin");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, b"old").unwrap();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination.clone(),
         DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -548,7 +524,7 @@ async fn single_stream_replace_strategy_replaces_existing_file_on_commit() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!destination.with_file_name("file.bin.ophelia_part").exists());
@@ -576,16 +552,13 @@ async fn active_part_file_duplicate_returns_error() {
         b"partial",
     )
     .unwrap();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         format!("{}/file.bin", server.uri()),
         destination,
         DestinationPolicy::automatic(&destination_config),
         HttpDownloadConfig::default(),
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -596,7 +569,7 @@ async fn active_part_file_duplicate_returns_error() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Error));
 }
 
@@ -615,9 +588,7 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
     let url = format!("{}/file.bin", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("file.bin");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (runtime_tx, _runtime_rx) = runtime_updates_channel();
+    let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
         url,
@@ -630,7 +601,6 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
             write_buffer_size: 1024,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -641,7 +611,7 @@ async fn sequential_chunked_download_with_range_runner_finishes() {
     )
     .await;
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
@@ -663,8 +633,6 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     let url = format!("{}/video.mkv", server.uri());
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("video.mkv");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
         DownloadId(0),
@@ -679,7 +647,6 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
             write_buffer_size: 512,
             ..HttpDownloadConfig::default()
         },
-        tx,
         CancellationToken::new(),
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(None)),
@@ -693,7 +660,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     match wait_for_runtime_update(&mut runtime_rx, |update| {
         matches!(
             update,
-            TaskRuntimeUpdate::ChunkMapStateChanged {
+            TaskRuntimeUpdate::ChunkMapChanged {
                 state: TransferChunkMapState::Http(_),
                 ..
             }
@@ -701,7 +668,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     })
     .await
     {
-        TaskRuntimeUpdate::ChunkMapStateChanged {
+        TaskRuntimeUpdate::ChunkMapChanged {
             state: TransferChunkMapState::Http(snapshot),
             ..
         } => {
@@ -711,7 +678,7 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
         other => panic!("expected http chunk-map snapshot, got {other:?}"),
     }
 
-    let updates = drain_progress(&mut rx).await;
+    let updates = drain_progress(&mut runtime_rx).await;
     assert!(
         updates.iter().any(|update| {
             update.status == DownloadStatus::Downloading && update.speed_bytes_per_sec > 0
