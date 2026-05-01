@@ -29,7 +29,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::types::{DownloadId, DownloadStatus};
+use ophelia::engine::types::{TransferId, TransferStatus};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn work_stealing_produces_correct_output() {
@@ -54,7 +54,7 @@ async fn work_stealing_produces_correct_output() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -70,7 +70,7 @@ async fn work_stealing_produces_correct_output() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
@@ -99,7 +99,7 @@ async fn balanced_default_downloads_with_live_strategy_defaults() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -115,7 +115,7 @@ async fn balanced_default_downloads_with_live_strategy_defaults() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());
@@ -147,7 +147,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -163,7 +163,7 @@ async fn hedge_races_duplicate_connection_and_produces_correct_output() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
     assert!(
         second_half_requests.load(Ordering::Relaxed) >= 2,
         "test did not exercise the hedge path"
@@ -199,7 +199,7 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
         ..HttpDownloadConfig::default()
     };
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -215,7 +215,7 @@ async fn failed_hedge_does_not_mark_original_range_complete() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
     assert!(
         second_half_requests.load(Ordering::Relaxed) >= 2,
         "test did not exercise the hedge path"

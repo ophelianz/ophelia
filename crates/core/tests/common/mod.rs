@@ -31,7 +31,7 @@ use ophelia::engine::DestinationPolicyConfig;
 use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::{DownloadTaskRequest, HttpDownloadConfig, TokenBucket};
 use ophelia::engine::types::{
-    ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
+    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferId, TransferStatus,
 };
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
@@ -48,7 +48,7 @@ pub fn exact_destination_policy(destination: &std::path::Path) -> DestinationPol
 
 #[allow(clippy::too_many_arguments)]
 pub async fn download_task(
-    id: DownloadId,
+    id: TransferId,
     url: String,
     destination: std::path::PathBuf,
     destination_policy: DestinationPolicy,
@@ -129,12 +129,12 @@ pub fn progress_updates(updates: &[TaskRuntimeUpdate]) -> Vec<ProgressUpdate> {
 
 pub fn download_write_bytes_from(updates: &[TaskRuntimeUpdate]) -> u64 {
     updates.iter().fold(0_u64, |total, update| match update {
-        TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } => total.saturating_add(*bytes),
+        TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } => total.saturating_add(*bytes),
         _ => total,
     })
 }
 
-pub fn last_status(updates: &[ProgressUpdate]) -> Option<DownloadStatus> {
+pub fn last_status(updates: &[ProgressUpdate]) -> Option<TransferStatus> {
     updates.last().map(|u| u.status)
 }
 
@@ -160,7 +160,7 @@ pub async fn wait_for_runtime_update(
 pub fn drain_download_write_bytes(rx: &mut mpsc::Receiver<TaskRuntimeUpdate>) -> u64 {
     let mut total = 0_u64;
     while let Ok(update) = rx.try_recv() {
-        if let TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } = update {
+        if let TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } = update {
             total = total.saturating_add(bytes);
         }
     }

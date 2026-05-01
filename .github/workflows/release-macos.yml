@@ -37,10 +37,10 @@ jobs:
             exit 1
           fi
 
-          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/ophelia-gui/Cargo.toml", "rb"))["package"]["version"])')"
+          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/gui/Cargo.toml", "rb"))["package"]["version"])')"
           stable_version="${tag_name#v}"
           if [[ "$cargo_version" != "$stable_version" ]]; then
-            echo "::error::crates/ophelia-gui/Cargo.toml version ($cargo_version) did not match release tag ($stable_version)."
+            echo "::error::crates/gui/Cargo.toml version ($cargo_version) did not match release tag ($stable_version)."
             exit 1
           fi
           echo "stable_version=$stable_version" >> "$GITHUB_OUTPUT"

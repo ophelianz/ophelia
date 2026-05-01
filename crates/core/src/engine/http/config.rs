@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use crate::config::{HttpCoreConfig, HttpOrderingMode, default_sequential_download_extensions};
+use crate::config::{HttpEngineConfig, HttpOrderingMode, default_sequential_download_extensions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RangeOrdering {
@@ -97,7 +97,7 @@ impl Default for HttpDownloadConfig {
 }
 
 impl HttpDownloadConfig {
-    pub fn from_core_config(config: &HttpCoreConfig) -> Self {
+    pub fn from_engine_config(config: &HttpEngineConfig) -> Self {
         Self {
             max_connections: config.max_connections_per_download,
             ordering_mode: config.ordering_mode,
@@ -195,16 +195,16 @@ mod tests {
 
     #[test]
     fn explicit_filename_override_beats_server_filename_for_file_specific_mode() {
-        let http_config = HttpCoreConfig {
+        let http_config = HttpEngineConfig {
             ordering_mode: HttpOrderingMode::FileSpecific,
             sequential_extensions: vec![".mkv".into()],
-            ..HttpCoreConfig::default()
+            ..HttpEngineConfig::default()
         };
         let destination_config = DestinationPolicyConfig {
             default_download_dir: Path::new("/tmp/downloads").to_path_buf(),
             ..DestinationPolicyConfig::default()
         };
-        let config = HttpDownloadConfig::from_core_config(&http_config);
+        let config = HttpDownloadConfig::from_engine_config(&http_config);
         let policy = DestinationPolicy::with_overrides(
             &destination_config,
             DestinationOverrides {
@@ -222,16 +222,16 @@ mod tests {
 
     #[test]
     fn server_filename_refinement_controls_file_specific_mode_without_explicit_filename() {
-        let http_config = HttpCoreConfig {
+        let http_config = HttpEngineConfig {
             ordering_mode: HttpOrderingMode::FileSpecific,
             sequential_extensions: vec![".mkv".into()],
-            ..HttpCoreConfig::default()
+            ..HttpEngineConfig::default()
         };
         let destination_config = DestinationPolicyConfig {
             default_download_dir: Path::new("/tmp/downloads").to_path_buf(),
             ..DestinationPolicyConfig::default()
         };
-        let config = HttpDownloadConfig::from_core_config(&http_config);
+        let config = HttpDownloadConfig::from_engine_config(&http_config);
         let policy = DestinationPolicy::with_overrides(
             &destination_config,
             DestinationOverrides {

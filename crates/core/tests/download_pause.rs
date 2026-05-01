@@ -28,7 +28,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
 use ophelia::engine::http::HttpDownloadConfig;
-use ophelia::engine::types::{DownloadId, DownloadStatus};
+use ophelia::engine::types::{TransferId, TransferStatus};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pause_and_resume_completes_correctly() {
@@ -63,7 +63,7 @@ async fn pause_and_resume_completes_correctly() {
         let (runtime_tx, _runtime_rx) = runtime_updates_channel();
         tokio::spawn(async move {
             download_task(
-                DownloadId(0),
+                TransferId(0),
                 url,
                 dest.clone(),
                 exact_destination_policy(&dest),
@@ -95,7 +95,7 @@ async fn pause_and_resume_completes_correctly() {
     // — Pass 2: resume from snapshots, run to completion —
     let (runtime_tx, mut runtime_rx) = runtime_updates_channel();
     download_task(
-        DownloadId(0),
+        TransferId(0),
         url,
         dest.clone(),
         exact_destination_policy(&dest),
@@ -111,7 +111,7 @@ async fn pause_and_resume_completes_correctly() {
     .await;
 
     let updates = drain_progress(&mut runtime_rx).await;
-    assert_eq!(last_status(&updates), Some(DownloadStatus::Finished));
+    assert_eq!(last_status(&updates), Some(TransferStatus::Finished));
 
     let downloaded = std::fs::read(&dest).unwrap();
     assert_eq!(downloaded.len(), data.len());

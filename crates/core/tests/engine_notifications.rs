@@ -22,11 +22,11 @@ use std::time::Duration;
 use ophelia::engine::destination::{DestinationPolicy, part_path_for};
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::{
-    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineError,
-    EngineEvent, LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState,
-    TransferControlSupport,
+    ArtifactState, DownloadEngine, DownloadSpec, EngineError, EngineEvent,
+    LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
+    TransferId, TransferStatus,
 };
-use ophelia::engine::{CoreConfig, DestinationPolicyConfig};
+use ophelia::engine::{DestinationPolicyConfig, EngineConfig};
 use tokio::runtime::Handle;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -35,15 +35,15 @@ fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy 
     DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
 }
 
-fn engine_config(max_concurrent_downloads: usize) -> CoreConfig {
-    CoreConfig {
+fn engine_config(max_concurrent_downloads: usize) -> EngineConfig {
+    EngineConfig {
         max_concurrent_downloads,
-        ..CoreConfig::default()
+        ..EngineConfig::default()
     }
 }
 
 fn start_engine(
-    config: CoreConfig,
+    config: EngineConfig,
     db_tx: std::sync::mpsc::Sender<ophelia::engine::DbEvent>,
     initial_next_id: u64,
 ) -> DownloadEngine {
@@ -245,14 +245,14 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         matches!(
             notification,
             EngineEvent::Progress(update)
-                if update.id == id && update.status == DownloadStatus::Paused
+                if update.id == id && update.status == TransferStatus::Paused
         )
     })
     .await
     {
         EngineEvent::Progress(update) => {
             assert_eq!(update.id, id);
-            assert_eq!(update.status, DownloadStatus::Paused);
+            assert_eq!(update.status, TransferStatus::Paused);
             assert_eq!(update.downloaded_bytes, 0);
             assert_eq!(update.total_bytes, None);
         }
@@ -264,14 +264,14 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         matches!(
             notification,
             EngineEvent::Progress(update)
-                if update.id == id && update.status == DownloadStatus::Pending
+                if update.id == id && update.status == TransferStatus::Pending
         )
     })
     .await
     {
         EngineEvent::Progress(update) => {
             assert_eq!(update.id, id);
-            assert_eq!(update.status, DownloadStatus::Pending);
+            assert_eq!(update.status, TransferStatus::Pending);
             assert_eq!(update.downloaded_bytes, 0);
             assert_eq!(update.total_bytes, None);
         }
@@ -360,7 +360,7 @@ async fn add_emits_transfer_snapshot_for_frontends() {
             assert_eq!(snapshot.provider_kind, "http");
             assert_eq!(snapshot.source_label, "https://example.com/file.bin");
             assert_eq!(snapshot.destination, destination);
-            assert_eq!(snapshot.status, DownloadStatus::Pending);
+            assert_eq!(snapshot.status, TransferStatus::Pending);
             assert_eq!(snapshot.downloaded_bytes, 0);
             assert_eq!(snapshot.total_bytes, None);
             assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Unsupported);
@@ -372,11 +372,11 @@ async fn add_emits_transfer_snapshot_for_frontends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_emits_transfer_snapshot_for_frontends() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
 
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = DownloadId(77);
+    let id = TransferId(77);
     engine
         .restore(RestoredDownload::http(
             id,
@@ -398,7 +398,7 @@ async fn restore_emits_transfer_snapshot_for_frontends() {
         EngineEvent::TransferRestored { snapshot } => {
             assert_eq!(snapshot.id, id);
             assert_eq!(snapshot.destination, destination);
-            assert_eq!(snapshot.status, DownloadStatus::Paused);
+            assert_eq!(snapshot.status, TransferStatus::Paused);
             assert_eq!(snapshot.downloaded_bytes, 0);
             assert_eq!(snapshot.total_bytes, None);
         }
@@ -409,17 +409,17 @@ async fn restore_emits_transfer_snapshot_for_frontends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_delete_rejects_id_and_leaves_caller_path_alone() {
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let engine = start_engine(EngineConfig::default(), db_tx, 1);
 
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("caller-owned.bin");
     std::fs::write(&destination, b"do not delete").unwrap();
 
-    let err = engine.delete_artifact(DownloadId(999)).await.unwrap_err();
+    let err = engine.delete_artifact(TransferId(999)).await.unwrap_err();
     assert_eq!(
         err,
         EngineError::NotFound {
-            id: DownloadId(999)
+            id: TransferId(999)
         }
     );
     assert_eq!(std::fs::read(&destination).unwrap(), b"do not delete");
@@ -430,7 +430,7 @@ async fn single_stream_http_emits_runtime_control_support_narrowing() {
     let server = spawn_no_content_length_server(vec![7u8; 2048]);
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine
@@ -475,7 +475,7 @@ async fn single_stream_http_emits_download_bytes_written_event() {
     let server = spawn_no_content_length_server(vec![3u8; 4096]);
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine
@@ -489,11 +489,11 @@ async fn single_stream_http_emits_download_bytes_written_event() {
         .unwrap();
 
     match wait_for_matching_event(&mut engine, |event| {
-        matches!(event, EngineEvent::DownloadBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
+        matches!(event, EngineEvent::TransferBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
     })
     .await
     {
-        EngineEvent::DownloadBytesWritten { id: changed, bytes } => {
+        EngineEvent::TransferBytesWritten { id: changed, bytes } => {
             assert_eq!(changed, id);
             assert!(bytes > 0);
         }
@@ -523,7 +523,7 @@ async fn destination_change_event_arrives_before_finished_progress() {
         .await;
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let requested_destination = tempdir.path().join("file.bin");
     let server_destination = tempdir.path().join("server.bin");
@@ -557,7 +557,7 @@ async fn destination_change_event_arrives_before_finished_progress() {
                     saw_destination_change = true;
                 }
                 EngineEvent::Progress(update)
-                    if update.id == id && update.status == DownloadStatus::Finished =>
+                    if update.id == id && update.status == TransferStatus::Finished =>
                 {
                     assert!(saw_destination_change);
                     break;
@@ -575,7 +575,7 @@ async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine
@@ -591,7 +591,7 @@ async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     engine.pause(id).await.unwrap();
 
     let update = wait_for_matching_progress(&mut engine, |update| {
-        update.id == id && update.status == DownloadStatus::Error
+        update.id == id && update.status == TransferStatus::Error
     })
     .await;
     assert_eq!(update.downloaded_bytes, 0);
@@ -603,7 +603,7 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let server = spawn_slow_range_server(vec![5u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine
@@ -683,7 +683,7 @@ async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     let server = spawn_slow_range_server(vec![9u8; 32 * 1024], 512, Duration::from_millis(25));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let id = engine
@@ -809,13 +809,13 @@ async fn restored_http_without_resume_data_discards_stale_part_file_before_resta
     let server = spawn_slow_range_server(data.clone(), 8192, Duration::from_millis(0));
 
     let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
     let part_path = part_path_for(&destination);
     std::fs::write(&part_path, b"stale partial bytes").unwrap();
 
-    let id = DownloadId(77);
+    let id = TransferId(77);
     engine
         .restore(RestoredDownload::http(
             id,
@@ -831,7 +831,7 @@ async fn restored_http_without_resume_data_discards_stale_part_file_before_resta
     engine.resume(id).await.unwrap();
 
     let update = wait_for_matching_progress(&mut engine, |update| {
-        update.id == id && update.status == DownloadStatus::Finished
+        update.id == id && update.status == TransferStatus::Finished
     })
     .await;
     assert_eq!(update.downloaded_bytes, data.len() as u64);

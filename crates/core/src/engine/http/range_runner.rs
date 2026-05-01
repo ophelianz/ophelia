@@ -40,8 +40,8 @@ use crate::engine::destination::{FinalizeStrategy, finalize_part_file};
 use crate::engine::http::config::HttpRangeStrategyConfig;
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{
-    ChunkSnapshot, DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate,
-    TransferChunkMapState,
+    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferChunkMapState, TransferId,
+    TransferStatus,
 };
 
 use super::chunk_map::snapshot_from_covered_ranges;
@@ -61,7 +61,7 @@ const PROGRESS_WINDOW_SECS: f64 = 2.0;
 const WORKER_EVENT_CAPACITY: usize = 256;
 
 pub(super) struct RangeDownloadConfig {
-    pub(super) id: DownloadId,
+    pub(super) id: TransferId,
     pub(super) url: String,
     pub(super) client: Arc<reqwest::Client>,
     pub(super) file: std::fs::File,
@@ -102,7 +102,7 @@ struct AttemptControl {
 }
 
 struct RangeDownload {
-    id: DownloadId,
+    id: TransferId,
     url: String,
     client: Arc<reqwest::Client>,
     writer: Option<RangeDiskWriter>,
@@ -158,8 +158,8 @@ impl ProgressSpeed {
         }
     }
 
-    fn sample(&mut self, status: DownloadStatus, downloaded: u64) -> u64 {
-        if status != DownloadStatus::Downloading {
+    fn sample(&mut self, status: TransferStatus, downloaded: u64) -> u64 {
+        if status != TransferStatus::Downloading {
             self.last_downloaded = downloaded;
             self.window_bytes = 0;
             return 0;
@@ -236,7 +236,7 @@ impl RangeDownload {
     }
 
     async fn run(mut self) -> super::task::TaskFinalState {
-        self.send_progress(DownloadStatus::Downloading).await;
+        self.send_progress(TransferStatus::Downloading).await;
         self.send_chunk_map().await;
 
         while !self.should_stop() {
@@ -405,7 +405,7 @@ impl RangeDownload {
                 self.check_health();
             }
             _ = self.progress_tick.tick() => {
-                self.send_progress(DownloadStatus::Downloading).await;
+                self.send_progress(TransferStatus::Downloading).await;
                 self.flush_runtime_updates().await;
             }
             _ = retry_cooldown_sleep(self.retry_cooldown_until), if self.retry_cooldown_until.is_some() => {
@@ -621,34 +621,34 @@ impl RangeDownload {
     async fn finish(mut self) -> super::task::TaskFinalState {
         if self.failed {
             self.flush_runtime_updates().await;
-            self.send_progress(DownloadStatus::Error).await;
-            return self.task_state(DownloadStatus::Error);
+            self.send_progress(TransferStatus::Error).await;
+            return self.task_state(TransferStatus::Error);
         }
 
         if self.paused {
             self.save_pause_snapshot();
             self.flush_runtime_updates().await;
-            self.send_progress(DownloadStatus::Paused).await;
-            return self.task_state(DownloadStatus::Paused);
+            self.send_progress(TransferStatus::Paused).await;
+            return self.task_state(TransferStatus::Paused);
         }
 
         if !self.scheduler.is_complete() {
             self.flush_runtime_updates().await;
-            self.send_progress(DownloadStatus::Error).await;
-            return self.task_state(DownloadStatus::Error);
+            self.send_progress(TransferStatus::Error).await;
+            return self.task_state(TransferStatus::Error);
         }
 
         match finalize_part_file(&self.part_path, &self.destination, self.finalize_strategy) {
             Ok(()) => {
                 self.flush_runtime_updates().await;
-                self.send_progress(DownloadStatus::Finished).await;
-                self.task_state(DownloadStatus::Finished)
+                self.send_progress(TransferStatus::Finished).await;
+                self.task_state(TransferStatus::Finished)
             }
             Err(error) => {
                 tracing::error!(err = %error, "rename failed after range download");
                 self.flush_runtime_updates().await;
-                self.send_progress(DownloadStatus::Error).await;
-                self.task_state(DownloadStatus::Error)
+                self.send_progress(TransferStatus::Error).await;
+                self.task_state(TransferStatus::Error)
             }
         }
     }
@@ -680,7 +680,7 @@ impl RangeDownload {
         *self.pause_sink.lock().unwrap() = Some(snapshots);
     }
 
-    async fn send_progress(&mut self, status: DownloadStatus) {
+    async fn send_progress(&mut self, status: TransferStatus) {
         let downloaded = self.downloaded_for_status(status);
         let speed = self.speed.sample(status, downloaded);
         let _ = self
@@ -695,8 +695,8 @@ impl RangeDownload {
             .await;
     }
 
-    fn downloaded_for_status(&self, status: DownloadStatus) -> u64 {
-        if status == DownloadStatus::Finished {
+    fn downloaded_for_status(&self, status: TransferStatus) -> u64 {
+        if status == TransferStatus::Finished {
             self.total_bytes
         } else {
             self.scheduler.downloaded_bytes()
@@ -717,7 +717,7 @@ impl RangeDownload {
         self.pending_written_bytes = 0;
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::DownloadBytesWritten { id: self.id, bytes })
+            .send(TaskRuntimeUpdate::TransferBytesWritten { id: self.id, bytes })
             .await;
     }
 
@@ -751,7 +751,7 @@ impl RangeDownload {
             .await;
     }
 
-    fn task_state(&self, status: DownloadStatus) -> super::task::TaskFinalState {
+    fn task_state(&self, status: TransferStatus) -> super::task::TaskFinalState {
         super::task::TaskFinalState {
             status,
             downloaded_bytes: self.downloaded_for_status(status),
@@ -833,7 +833,7 @@ mod tests {
 
     use super::{PROGRESS_WINDOW_SECS, ProgressSpeed, scheduler_from_chunks};
     use crate::engine::chunk::{ChunkList, ChunkStatus};
-    use crate::engine::types::DownloadStatus;
+    use crate::engine::types::TransferStatus;
 
     #[test]
     fn scheduler_from_chunks_uses_completed_prefixes() {
@@ -875,7 +875,7 @@ mod tests {
         let mut speed = ProgressSpeed::new(1_000);
         speed.window_start = Instant::now() - Duration::from_secs_f64(PROGRESS_WINDOW_SECS + 0.1);
 
-        let sample = speed.sample(DownloadStatus::Downloading, 3_000);
+        let sample = speed.sample(TransferStatus::Downloading, 3_000);
 
         assert!(sample > 0);
         assert!(sample < 1_000);
@@ -885,8 +885,8 @@ mod tests {
     fn progress_speed_reports_zero_for_terminal_status() {
         let mut speed = ProgressSpeed::new(0);
         speed.window_start = Instant::now() - Duration::from_secs_f64(PROGRESS_WINDOW_SECS + 0.1);
-        let _ = speed.sample(DownloadStatus::Downloading, 3_000);
+        let _ = speed.sample(TransferStatus::Downloading, 3_000);
 
-        assert_eq!(speed.sample(DownloadStatus::Finished, 3_000), 0);
+        assert_eq!(speed.sample(TransferStatus::Finished, 3_000), 0);
     }
 }

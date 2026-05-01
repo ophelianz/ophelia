@@ -21,7 +21,7 @@ use std::io::{Error, ErrorKind};
 
 use rusqlite::{Connection, params, types::Type};
 
-use crate::engine::types::{ChunkSnapshot, DownloadId, HttpResumeData, ProviderResumeData};
+use crate::engine::types::{ChunkSnapshot, HttpResumeData, ProviderResumeData, TransferId};
 
 pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -40,7 +40,7 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
 pub(super) fn load_resume_data(
     conn: &Connection,
-    download_id: DownloadId,
+    download_id: TransferId,
 ) -> rusqlite::Result<Option<ProviderResumeData>> {
     let mut stmt = conn.prepare(
         "SELECT start, end_byte, downloaded FROM chunks
@@ -67,7 +67,7 @@ pub(super) fn load_resume_data(
 
 pub(super) fn save_resume_data(
     conn: &Connection,
-    download_id: DownloadId,
+    download_id: TransferId,
     resume_data: Option<&ProviderResumeData>,
 ) -> rusqlite::Result<()> {
     conn.execute(
@@ -124,7 +124,7 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{load_resume_data, migrate, save_resume_data};
-    use crate::engine::types::{ChunkSnapshot, DownloadId, HttpResumeData, ProviderResumeData};
+    use crate::engine::types::{ChunkSnapshot, HttpResumeData, ProviderResumeData, TransferId};
 
     #[test]
     fn load_resume_data_rejects_negative_chunk_values() {
@@ -137,7 +137,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(load_resume_data(&conn, DownloadId(1)).is_err());
+        assert!(load_resume_data(&conn, TransferId(1)).is_err());
     }
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(load_resume_data(&conn, DownloadId(1)).is_err());
+        assert!(load_resume_data(&conn, TransferId(1)).is_err());
     }
 
     #[test]
@@ -164,8 +164,8 @@ mod tests {
             downloaded: 50,
         }]));
 
-        save_resume_data(&conn, DownloadId(1), Some(&resume)).unwrap();
-        let loaded = load_resume_data(&conn, DownloadId(1)).unwrap().unwrap();
+        save_resume_data(&conn, TransferId(1), Some(&resume)).unwrap();
+        let loaded = load_resume_data(&conn, TransferId(1)).unwrap().unwrap();
 
         let ProviderResumeData::Http(data) = loaded;
         assert_eq!(data.chunks[0].downloaded, 10);

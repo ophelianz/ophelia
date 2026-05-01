@@ -17,17 +17,16 @@
 **       じしf_,)ノ
 **************************************************/
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-use crate::config::CorePaths;
+use crate::config::ProfilePaths;
 use crate::engine::destination::part_path_for;
 use crate::engine::state::http;
 use crate::engine::types::{
-    ArtifactState, DbEvent, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
-    PersistedDownloadSource, ProviderResumeData, SavedDownload,
+    ArtifactState, DbEvent, HistoryFilter, HistoryRow, PersistedDownloadSource, ProviderResumeData,
+    SavedDownload, TransferId, TransferStatus,
 };
 
 #[cfg(test)]
@@ -38,13 +37,7 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(paths: &CorePaths) -> rusqlite::Result<Self> {
-        if let Err(error) = ensure_canonical_db_path(paths) {
-            tracing::warn!(
-                destination = %paths.database_path.display(),
-                "failed to migrate legacy database location: {error}"
-            );
-        }
+    pub fn open(paths: &ProfilePaths) -> rusqlite::Result<Self> {
         Self::open_at(&paths.database_path)
     }
 
@@ -166,7 +159,7 @@ impl Db {
                      WHERE id = ?2",
                     params![unix_ms(), id],
                 )?;
-                self.save_resume_data(DownloadId(id as u64), None)?;
+                self.save_resume_data(TransferId(id as u64), None)?;
             }
         }
         Ok(())
@@ -188,7 +181,7 @@ impl Db {
         )?;
 
         struct SavedDownloadRow {
-            id: DownloadId,
+            id: TransferId,
             provider_kind: String,
             url: String,
             destination: PathBuf,
@@ -199,7 +192,7 @@ impl Db {
         let mut downloads = Vec::new();
         let rows = stmt.query_map([], |row| {
             Ok(SavedDownloadRow {
-                id: DownloadId(row.get::<_, i64>(0)? as u64),
+                id: TransferId(row.get::<_, i64>(0)? as u64),
                 provider_kind: row.get(1)?,
                 url: row.get(2)?,
                 destination: PathBuf::from(row.get::<_, String>(3)?),
@@ -325,7 +318,7 @@ impl Db {
 
     fn save_resume_data(
         &self,
-        id: DownloadId,
+        id: TransferId,
         resume_data: Option<&ProviderResumeData>,
     ) -> rusqlite::Result<()> {
         http::save_resume_data(&self.conn, id, resume_data)
@@ -333,69 +326,11 @@ impl Db {
 
     fn load_provider_resume_data(
         &self,
-        download_id: DownloadId,
+        download_id: TransferId,
         source: &PersistedDownloadSource,
     ) -> rusqlite::Result<Option<ProviderResumeData>> {
         match source {
             PersistedDownloadSource::Http { .. } => http::load_resume_data(&self.conn, download_id),
-        }
-    }
-}
-
-fn ensure_canonical_db_path(paths: &CorePaths) -> io::Result<()> {
-    let Some(legacy_path) = &paths.legacy_database_path else {
-        return Ok(());
-    };
-    migrate_legacy_db_files(legacy_path, &paths.database_path)
-}
-
-fn migrate_legacy_db_files(legacy_path: &Path, canonical_path: &Path) -> io::Result<()> {
-    if legacy_path == canonical_path || !legacy_path.exists() {
-        return Ok(());
-    }
-
-    if canonical_path.exists() {
-        tracing::warn!(
-            legacy = %legacy_path.display(),
-            canonical = %canonical_path.display(),
-            "legacy database path still exists, keeping canonical database and skipping migration"
-        );
-        return Ok(());
-    }
-
-    if let Some(parent) = canonical_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    move_or_copy_file(legacy_path, canonical_path)?;
-    move_sidecar_if_present(legacy_path, canonical_path, "-wal")?;
-    move_sidecar_if_present(legacy_path, canonical_path, "-shm")?;
-    Ok(())
-}
-
-fn move_sidecar_if_present(
-    legacy_base: &Path,
-    canonical_base: &Path,
-    suffix: &str,
-) -> io::Result<()> {
-    let legacy = sqlite_sidecar_path(legacy_base, suffix);
-    if !legacy.exists() {
-        return Ok(());
-    }
-    let canonical = sqlite_sidecar_path(canonical_base, suffix);
-    move_or_copy_file(&legacy, &canonical)
-}
-
-fn sqlite_sidecar_path(base: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}{}", base.display(), suffix))
-}
-
-fn move_or_copy_file(from: &Path, to: &Path) -> io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(from, to)?;
-            std::fs::remove_file(from)
         }
     }
 }
@@ -409,7 +344,7 @@ pub struct HistoryReader {
 }
 
 impl HistoryReader {
-    pub fn open(paths: &CorePaths) -> rusqlite::Result<Self> {
+    pub fn open(paths: &ProfilePaths) -> rusqlite::Result<Self> {
         Self::open_at(&paths.database_path)
     }
 
@@ -440,28 +375,41 @@ impl HistoryReader {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![search], |row| {
-                let provider_kind: String = row.get(1)?;
-                let locator: String = row.get(2)?;
-                let status_str: String = row.get(4)?;
-                let artifact_state_str: String = row.get(5)?;
-                Ok(HistoryRow {
-                    id: DownloadId(row.get::<_, i64>(0)? as u64),
-                    provider_kind: provider_kind.clone(),
-                    source_label: history_source_label(&provider_kind, locator),
-                    destination: row.get(3)?,
-                    status: status_from_str(&status_str),
-                    artifact_state: artifact_state_from_str(&artifact_state_str),
-                    total_bytes: row.get::<_, Option<i64>>(6)?.map(|b| b as u64),
-                    downloaded_bytes: row.get::<_, i64>(7)? as u64,
-                    added_at: row.get(8)?,
-                    finished_at: row.get(9)?,
-                })
-            })?
+            .query_map(params![search], history_row_from_sql)?
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
     }
+
+    pub fn load_by_id(&self, id: TransferId) -> rusqlite::Result<Option<HistoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider_kind, url, destination, status, artifact_state, total_bytes, downloaded, added_at, finished_at
+             FROM downloads
+             WHERE id = ?1
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![id.0 as i64], history_row_from_sql)?;
+        rows.next().transpose()
+    }
+}
+
+fn history_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRow> {
+    let provider_kind: String = row.get(1)?;
+    let locator: String = row.get(2)?;
+    let status_str: String = row.get(4)?;
+    let artifact_state_str: String = row.get(5)?;
+    Ok(HistoryRow {
+        id: TransferId(row.get::<_, i64>(0)? as u64),
+        provider_kind: provider_kind.clone(),
+        source_label: history_source_label(&provider_kind, locator),
+        destination: row.get(3)?,
+        status: status_from_str(&status_str),
+        artifact_state: artifact_state_from_str(&artifact_state_str),
+        total_bytes: row.get::<_, Option<i64>>(6)?.map(|b| b as u64),
+        downloaded_bytes: row.get::<_, i64>(7)? as u64,
+        added_at: row.get(8)?,
+        finished_at: row.get(9)?,
+    })
 }
 
 fn history_source_label(provider_kind: &str, locator: String) -> String {
@@ -470,14 +418,14 @@ fn history_source_label(provider_kind: &str, locator: String) -> String {
         .unwrap_or(locator)
 }
 
-fn status_from_str(s: &str) -> DownloadStatus {
+fn status_from_str(s: &str) -> TransferStatus {
     match s {
-        "finished" => DownloadStatus::Finished,
-        "error" => DownloadStatus::Error,
-        "paused" => DownloadStatus::Paused,
-        "downloading" => DownloadStatus::Downloading,
-        "cancelled" => DownloadStatus::Cancelled,
-        _ => DownloadStatus::Pending,
+        "finished" => TransferStatus::Finished,
+        "error" => TransferStatus::Error,
+        "paused" => TransferStatus::Paused,
+        "downloading" => TransferStatus::Downloading,
+        "cancelled" => TransferStatus::Cancelled,
+        _ => TransferStatus::Pending,
     }
 }
 
@@ -514,48 +462,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("downloads.db");
         (dir, path)
-    }
-
-    #[test]
-    fn migrates_legacy_database_and_sidecars_to_canonical_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("legacy").join("downloads.db");
-        let canonical = dir.path().join("data").join("downloads.db");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, b"db").unwrap();
-        std::fs::write(sqlite_sidecar_path(&legacy, "-wal"), b"wal").unwrap();
-        std::fs::write(sqlite_sidecar_path(&legacy, "-shm"), b"shm").unwrap();
-
-        migrate_legacy_db_files(&legacy, &canonical).unwrap();
-
-        assert_eq!(std::fs::read(&canonical).unwrap(), b"db");
-        assert_eq!(
-            std::fs::read(sqlite_sidecar_path(&canonical, "-wal")).unwrap(),
-            b"wal"
-        );
-        assert_eq!(
-            std::fs::read(sqlite_sidecar_path(&canonical, "-shm")).unwrap(),
-            b"shm"
-        );
-        assert!(!legacy.exists());
-        assert!(!sqlite_sidecar_path(&legacy, "-wal").exists());
-        assert!(!sqlite_sidecar_path(&legacy, "-shm").exists());
-    }
-
-    #[test]
-    fn keeps_canonical_database_when_both_paths_exist() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("legacy").join("downloads.db");
-        let canonical = dir.path().join("data").join("downloads.db");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, b"legacy").unwrap();
-        std::fs::write(&canonical, b"canonical").unwrap();
-
-        migrate_legacy_db_files(&legacy, &canonical).unwrap();
-
-        assert_eq!(std::fs::read(&canonical).unwrap(), b"canonical");
-        assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy");
     }
 
     #[test]
@@ -649,7 +555,7 @@ mod tests {
         assert_eq!(downloads.len(), 1);
 
         let saved = &downloads[0];
-        assert_eq!(saved.id, DownloadId(7));
+        assert_eq!(saved.id, TransferId(7));
         assert_eq!(saved.source.kind(), HTTP_PROVIDER_KIND);
         assert_eq!(saved.source.locator(), "https://example.com/file.bin");
         assert_eq!(saved.downloaded_bytes, 25);
@@ -687,7 +593,7 @@ mod tests {
         let db = Db::open_at(&db_path).unwrap();
 
         db.handle(DbEvent::Added {
-            id: DownloadId(11),
+            id: TransferId(11),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/download".to_string(),
             },
@@ -695,12 +601,12 @@ mod tests {
         })
         .unwrap();
         db.handle(DbEvent::DestinationChanged {
-            id: DownloadId(11),
+            id: TransferId(11),
             destination: PathBuf::from("/tmp/Movies/movie.mp4"),
         })
         .unwrap();
         db.handle(DbEvent::Paused {
-            id: DownloadId(11),
+            id: TransferId(11),
             downloaded_bytes: 10,
             resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
@@ -728,42 +634,42 @@ mod tests {
         let db = Db::open_at(&db_path).unwrap();
 
         db.handle(DbEvent::Added {
-            id: DownloadId(1),
+            id: TransferId(1),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/success.zip".to_string(),
             },
             destination: PathBuf::from("/tmp/success.zip"),
         })
         .unwrap();
-        db.handle(DbEvent::Started { id: DownloadId(1) }).unwrap();
+        db.handle(DbEvent::Started { id: TransferId(1) }).unwrap();
         db.handle(DbEvent::Finished {
-            id: DownloadId(1),
+            id: TransferId(1),
             total_bytes: 100,
         })
         .unwrap();
 
         db.handle(DbEvent::Added {
-            id: DownloadId(2),
+            id: TransferId(2),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/failure.zip".to_string(),
             },
             destination: PathBuf::from("/tmp/failure.zip"),
         })
         .unwrap();
-        db.handle(DbEvent::Started { id: DownloadId(2) }).unwrap();
-        db.handle(DbEvent::Error { id: DownloadId(2) }).unwrap();
+        db.handle(DbEvent::Started { id: TransferId(2) }).unwrap();
+        db.handle(DbEvent::Error { id: TransferId(2) }).unwrap();
 
         db.handle(DbEvent::Added {
-            id: DownloadId(3),
+            id: TransferId(3),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/paused.zip".to_string(),
             },
             destination: PathBuf::from("/tmp/paused.zip"),
         })
         .unwrap();
-        db.handle(DbEvent::Started { id: DownloadId(3) }).unwrap();
+        db.handle(DbEvent::Started { id: TransferId(3) }).unwrap();
         db.handle(DbEvent::Paused {
-            id: DownloadId(3),
+            id: TransferId(3),
             downloaded_bytes: 12,
             resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
@@ -779,7 +685,7 @@ mod tests {
 
         let finished = history.load(HistoryFilter::Finished, "").unwrap();
         assert_eq!(finished.len(), 1);
-        assert_eq!(finished[0].status, DownloadStatus::Finished);
+        assert_eq!(finished[0].status, TransferStatus::Finished);
         assert_eq!(finished[0].provider_kind, HTTP_PROVIDER_KIND);
         assert_eq!(finished[0].source_label, "https://example.com/success.zip");
         assert_eq!(finished[0].destination, "/tmp/success.zip");
@@ -790,7 +696,7 @@ mod tests {
 
         let searched = history.load(HistoryFilter::All, "failure").unwrap();
         assert_eq!(searched.len(), 1);
-        assert_eq!(searched[0].status, DownloadStatus::Error);
+        assert_eq!(searched[0].status, TransferStatus::Error);
         assert!(searched[0].source_label.contains("failure"));
 
         let provider_search = history
@@ -805,16 +711,16 @@ mod tests {
         let db = Db::open_at(&db_path).unwrap();
 
         db.handle(DbEvent::Added {
-            id: DownloadId(4),
+            id: TransferId(4),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/deleted.zip".to_string(),
             },
             destination: PathBuf::from("/tmp/deleted.zip"),
         })
         .unwrap();
-        db.handle(DbEvent::Cancelled { id: DownloadId(4) }).unwrap();
+        db.handle(DbEvent::Cancelled { id: TransferId(4) }).unwrap();
         db.handle(DbEvent::ArtifactStateChanged {
-            id: DownloadId(4),
+            id: TransferId(4),
             artifact_state: ArtifactState::Deleted,
         })
         .unwrap();
@@ -822,7 +728,7 @@ mod tests {
         let history = HistoryReader::open_at(&db_path).unwrap();
         let cancelled = history.load(HistoryFilter::Cancelled, "").unwrap();
         assert_eq!(cancelled.len(), 1);
-        assert_eq!(cancelled[0].status, DownloadStatus::Cancelled);
+        assert_eq!(cancelled[0].status, TransferStatus::Cancelled);
         assert_eq!(cancelled[0].artifact_state, ArtifactState::Deleted);
     }
 }

@@ -24,28 +24,28 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::{CoreConfig, DestinationPolicyConfig};
+use crate::config::{DestinationPolicyConfig, EngineConfig};
 use crate::engine::destination::{
     DestinationOverrides, DestinationPolicy, fallback_filename_from_url,
     normalize_filename_component, preview_auto_destination,
 };
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
-    DownloadId, PersistedDownloadSource, ProviderResumeData, SavedDownload, TransferChunkMapState,
-    TransferControlSupport,
+    PersistedDownloadSource, ProviderResumeData, SavedDownload, TransferChunkMapState,
+    TransferControlSupport, TransferId,
 };
 
 /// Add request before the final path is chosen
 #[derive(Debug, Clone)]
-pub struct AddDownloadRequest {
-    pub source: AddDownloadSource,
+pub struct AddTransferRequest {
+    pub source: AddTransferSource,
     pub suggested_filename: Option<String>,
 }
 
-impl AddDownloadRequest {
+impl AddTransferRequest {
     pub fn from_url(url: String) -> Self {
         Self {
-            source: AddDownloadSource::Url(url),
+            source: AddTransferSource::Url(url),
             suggested_filename: None,
         }
     }
@@ -55,7 +55,7 @@ impl AddDownloadRequest {
         suggested_filename: Option<String>,
     ) -> Self {
         Self {
-            source: AddDownloadSource::Url(url),
+            source: AddTransferSource::Url(url),
             suggested_filename: suggested_filename.and_then(normalize_suggested_filename),
         }
     }
@@ -68,9 +68,9 @@ impl AddDownloadRequest {
         preview_auto_destination(self.url(), self.suggested_filename.as_deref(), config)
     }
 
-    pub fn into_spec(self, config: &CoreConfig) -> io::Result<DownloadSpec> {
+    pub fn into_spec(self, config: &EngineConfig) -> io::Result<DownloadSpec> {
         match self.source {
-            AddDownloadSource::Url(url) => {
+            AddTransferSource::Url(url) => {
                 DownloadSpec::from_auto_request(url, self.suggested_filename, config)
             }
         }
@@ -84,11 +84,11 @@ impl AddDownloadRequest {
 }
 
 #[derive(Debug, Clone)]
-pub enum AddDownloadSource {
+pub enum AddTransferSource {
     Url(String),
 }
 
-impl AddDownloadSource {
+impl AddTransferSource {
     pub fn url(&self) -> &str {
         match self {
             Self::Url(url) => url,
@@ -121,7 +121,7 @@ impl DownloadSpec {
     pub fn from_auto_request(
         url: String,
         suggested_filename: Option<String>,
-        config: &CoreConfig,
+        config: &EngineConfig,
     ) -> io::Result<Self> {
         let destination_policy = DestinationPolicy::automatic(&config.destination);
         let destination = destination_policy
@@ -131,14 +131,14 @@ impl DownloadSpec {
             url,
             destination,
             destination_policy,
-            HttpDownloadConfig::from_core_config(&config.http),
+            HttpDownloadConfig::from_engine_config(&config.http),
         ))
     }
 
     pub fn from_user_input(
         url: String,
         typed_destination: PathBuf,
-        config: &CoreConfig,
+        config: &EngineConfig,
     ) -> io::Result<Self> {
         let auto_preview = preview_auto_destination(&url, None, &config.destination);
         let overrides =
@@ -149,7 +149,7 @@ impl DownloadSpec {
             url,
             destination,
             destination_policy,
-            HttpDownloadConfig::from_core_config(&config.http),
+            HttpDownloadConfig::from_engine_config(&config.http),
         ))
     }
 
@@ -229,14 +229,14 @@ impl DownloadSource {
 /// Download restored from saved state on startup
 #[derive(Debug, Clone)]
 pub struct RestoredDownload {
-    pub id: DownloadId,
+    pub id: TransferId,
     pub spec: DownloadSpec,
     pub resume_data: Option<ProviderResumeData>,
 }
 
 impl RestoredDownload {
     pub fn http(
-        id: DownloadId,
+        id: TransferId,
         url: String,
         destination: PathBuf,
         destination_config: &DestinationPolicyConfig,
@@ -255,14 +255,14 @@ impl RestoredDownload {
         }
     }
 
-    pub fn from_saved(saved: &SavedDownload, config: &CoreConfig) -> Self {
+    pub fn from_saved(saved: &SavedDownload, config: &EngineConfig) -> Self {
         match &saved.source {
             PersistedDownloadSource::Http { url } => Self::http(
                 saved.id,
                 url.clone(),
                 saved.destination.clone(),
                 &config.destination,
-                HttpDownloadConfig::from_core_config(&config.http),
+                HttpDownloadConfig::from_engine_config(&config.http),
                 saved.resume_data.clone(),
             ),
         }
@@ -280,15 +280,15 @@ mod tests {
     use crate::engine::types::PersistedDownloadSource;
 
     #[test]
-    fn from_auto_request_uses_core_config_for_http_defaults() {
-        let config = CoreConfig {
-            http: crate::config::HttpCoreConfig {
+    fn from_auto_request_uses_engine_config_for_http_defaults() {
+        let config = EngineConfig {
+            http: crate::config::HttpEngineConfig {
                 max_connections_per_download: 3,
                 ordering_mode: HttpOrderingMode::Sequential,
                 sequential_extensions: vec![".mkv".into()],
-                ..crate::config::HttpCoreConfig::default()
+                ..crate::config::HttpEngineConfig::default()
             },
-            ..CoreConfig::default()
+            ..EngineConfig::default()
         };
 
         let spec = DownloadSpec::from_auto_request(
@@ -309,16 +309,16 @@ mod tests {
     }
 
     #[test]
-    fn restored_download_from_saved_rebuilds_provider_config_from_core_config() {
-        let config = CoreConfig {
-            http: crate::config::HttpCoreConfig {
+    fn restored_download_from_saved_rebuilds_provider_config_from_engine_config() {
+        let config = EngineConfig {
+            http: crate::config::HttpEngineConfig {
                 max_connections_per_download: 5,
-                ..crate::config::HttpCoreConfig::default()
+                ..crate::config::HttpEngineConfig::default()
             },
-            ..CoreConfig::default()
+            ..EngineConfig::default()
         };
         let saved = SavedDownload {
-            id: DownloadId(42),
+            id: TransferId(42),
             source: PersistedDownloadSource::Http {
                 url: "https://example.com/archive.zip".to_string(),
             },
@@ -330,7 +330,7 @@ mod tests {
 
         let restored = RestoredDownload::from_saved(&saved, &config);
 
-        assert_eq!(restored.id, DownloadId(42));
+        assert_eq!(restored.id, TransferId(42));
         match &restored.spec.source {
             DownloadSource::Http { url, config } => {
                 assert_eq!(url, "https://example.com/archive.zip");
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn add_request_sanitizes_suggested_filename_components() {
-        let request = AddDownloadRequest::from_url_with_suggested_filename(
+        let request = AddTransferRequest::from_url_with_suggested_filename(
             "https://example.com/file.bin".to_string(),
             Some("../nested/browser-name.zip\0".to_string()),
         );
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn add_request_drops_suggested_parent_directory_filename() {
-        let request = AddDownloadRequest::from_url_with_suggested_filename(
+        let request = AddTransferRequest::from_url_with_suggested_filename(
             "https://example.com/file.bin".to_string(),
             Some("..".to_string()),
         );
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn from_user_input_changing_only_filename_reroutes_directory_by_extension() {
-        let config = CoreConfig {
+        let config = EngineConfig {
             destination: DestinationPolicyConfig {
                 default_download_dir: PathBuf::from("/tmp/Downloads"),
                 rules_enabled: true,
@@ -393,7 +393,7 @@ mod tests {
                 ],
                 ..DestinationPolicyConfig::default()
             },
-            ..CoreConfig::default()
+            ..EngineConfig::default()
         };
 
         let spec = DownloadSpec::from_user_input(
@@ -408,12 +408,12 @@ mod tests {
 
     #[test]
     fn from_user_input_changing_only_directory_keeps_filename_automatic() {
-        let config = CoreConfig {
+        let config = EngineConfig {
             destination: DestinationPolicyConfig {
                 default_download_dir: PathBuf::from("/tmp/Downloads"),
                 ..DestinationPolicyConfig::default()
             },
-            ..CoreConfig::default()
+            ..EngineConfig::default()
         };
 
         let spec = DownloadSpec::from_user_input(
@@ -431,7 +431,7 @@ mod tests {
         let error = DownloadSpec::from_user_input(
             "https://example.com/song.mp3".to_string(),
             PathBuf::new(),
-            &CoreConfig::default(),
+            &EngineConfig::default(),
         )
         .unwrap_err();
 

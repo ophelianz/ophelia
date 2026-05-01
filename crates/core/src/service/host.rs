@@ -1,0 +1,368 @@
+use super::lock::{ServiceLock, service_lock_path};
+use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
+use super::*;
+
+pub struct OpheliaService {
+    client: OpheliaClient,
+    task: Option<JoinHandle<()>>,
+}
+
+impl OpheliaService {
+    pub fn start(runtime: &Handle, paths: ProfilePaths) -> Result<Self, OpheliaError> {
+        let settings = ServiceSettings::load(&paths);
+        Self::start_with_settings(runtime, paths, settings)
+    }
+
+    pub fn start_with_settings(
+        runtime: &Handle,
+        paths: ProfilePaths,
+        settings: ServiceSettings,
+    ) -> Result<Self, OpheliaError> {
+        let config = settings.to_engine_config(&paths);
+        Self::start_inner(runtime, paths, settings, config)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_engine_config(
+        runtime: &Handle,
+        config: EngineConfig,
+        paths: ProfilePaths,
+    ) -> Result<Self, OpheliaError> {
+        let settings = ServiceSettings::default_for_paths(&paths);
+        Self::start_inner(runtime, paths, settings, config)
+    }
+
+    fn start_inner(
+        runtime: &Handle,
+        paths: ProfilePaths,
+        settings: ServiceSettings,
+        config: EngineConfig,
+    ) -> Result<Self, OpheliaError> {
+        let lock = ServiceLock::acquire(service_lock_path(&paths))?;
+        let bootstrap = state::bootstrap(&paths).map_err(|error| OpheliaError::Io {
+            message: error.to_string(),
+        })?;
+        let service_info = OpheliaServiceInfo::current(&paths);
+        let (tx, rx) = mpsc::channel(SERVICE_COMMAND_CAPACITY);
+        let (event_tx, _) = broadcast::channel(SERVICE_EVENT_CAPACITY);
+        let client = OpheliaClient::in_process(tx);
+        let db_tx = bootstrap.db_tx.clone();
+
+        let engine = DownloadEngine::spawn_on(
+            runtime,
+            config.clone(),
+            bootstrap.db_tx,
+            bootstrap.next_download_id,
+        );
+        let task = runtime.spawn(
+            OpheliaServiceRuntime {
+                config,
+                settings,
+                paths,
+                service_info,
+                engine,
+                history_reader: bootstrap.history_reader,
+                db_tx,
+                saved_downloads: bootstrap.saved_downloads,
+                _db_worker: bootstrap.worker,
+                _lock: lock,
+                read_model: OpheliaReadModel::default(),
+                coalescer: OpheliaEventCoalescer::default(),
+                event_tx,
+            }
+            .run(rx),
+        );
+
+        Ok(Self {
+            client,
+            task: Some(task),
+        })
+    }
+
+    pub fn client(&self) -> OpheliaClient {
+        self.client.clone()
+    }
+
+    pub async fn shutdown(mut self) -> Result<(), OpheliaError> {
+        let result = self.client.shutdown_embedded().await;
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+        result
+    }
+}
+
+impl Drop for OpheliaService {
+    fn drop(&mut self) {
+        self.client.try_shutdown_embedded();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+type OpheliaReply = oneshot::Sender<Result<OpheliaResponse, OpheliaError>>;
+type SubscribeReply = oneshot::Sender<Result<OpheliaSubscription, OpheliaError>>;
+
+pub(super) enum OpheliaRequest {
+    Command {
+        command: OpheliaCommand,
+        reply: OpheliaReply,
+    },
+    Subscribe {
+        reply: SubscribeReply,
+    },
+    Shutdown {
+        reply: OpheliaReply,
+    },
+}
+
+struct OpheliaServiceRuntime {
+    config: EngineConfig,
+    settings: ServiceSettings,
+    paths: ProfilePaths,
+    service_info: OpheliaServiceInfo,
+    engine: DownloadEngine,
+    history_reader: HistoryReader,
+    db_tx: std::sync::mpsc::Sender<DbEvent>,
+    saved_downloads: Vec<crate::engine::SavedDownload>,
+    _db_worker: state::DbWorkerHandle,
+    _lock: ServiceLock,
+    read_model: OpheliaReadModel,
+    coalescer: OpheliaEventCoalescer,
+    event_tx: broadcast::Sender<OpheliaEvent>,
+}
+
+impl OpheliaServiceRuntime {
+    async fn run(mut self, mut rx: mpsc::Receiver<OpheliaRequest>) {
+        self.restore_saved_downloads().await;
+        let mut hot_event_flush =
+            tokio::time::interval(Duration::from_millis(HOT_SERVICE_EVENT_FLUSH_MS));
+        hot_event_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                request = rx.recv() => {
+                    let Some(request) = request else {
+                        break;
+                    };
+                    self.drain_engine_events();
+                    self.flush_coalesced_events();
+                    if self.handle_request(request).await {
+                        break;
+                    }
+                    self.drain_engine_events();
+                }
+                event = self.engine.next_event() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    self.apply_engine_event(event);
+                }
+                _ = hot_event_flush.tick() => {
+                    self.flush_coalesced_events();
+                }
+            }
+        }
+
+        self.flush_coalesced_events();
+        self.log_coalescer_stats();
+        if let Err(error) = self.engine.shutdown().await {
+            tracing::warn!("download engine shutdown failed: {error}");
+        }
+    }
+
+    async fn restore_saved_downloads(&mut self) {
+        for saved in std::mem::take(&mut self.saved_downloads) {
+            let restored = RestoredDownload::from_saved(&saved, &self.config);
+            let (result, events) = self.engine.restore_collecting_events(restored).await;
+            self.apply_engine_events(events);
+            self.flush_coalesced_events();
+            if let Err(error) = result {
+                tracing::warn!(id = saved.id.0, "restore failed: {error}");
+            }
+            self.drain_engine_events();
+        }
+    }
+
+    async fn handle_request(&mut self, request: OpheliaRequest) -> bool {
+        match request {
+            OpheliaRequest::Command { command, reply } => {
+                let response = self.handle_command(command).await;
+                self.flush_coalesced_events();
+                let _ = reply.send(response);
+                false
+            }
+            OpheliaRequest::Subscribe { reply } => {
+                let receiver = self.event_tx.subscribe();
+                let snapshot = self.read_model.snapshot(&self.settings);
+                let _ = reply.send(Ok(OpheliaSubscription::in_process(snapshot, receiver)));
+                false
+            }
+            OpheliaRequest::Shutdown { reply } => {
+                self.flush_coalesced_events();
+                let _ = reply.send(Ok(OpheliaResponse::Ack));
+                true
+            }
+        }
+    }
+
+    async fn handle_command(
+        &mut self,
+        command: OpheliaCommand,
+    ) -> Result<OpheliaResponse, OpheliaError> {
+        match command {
+            OpheliaCommand::Add { request } => {
+                let spec = request.into_spec(&self.config)?;
+                let (result, events) = self.engine.add_collecting_events(spec).await;
+                self.apply_engine_events(events);
+                let id = result?;
+                Ok(OpheliaResponse::TransferAdded { id })
+            }
+            OpheliaCommand::Pause { id } => {
+                let (result, events) = self.engine.pause_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
+                Ok(OpheliaResponse::Ack)
+            }
+            OpheliaCommand::Resume { id } => {
+                let (result, events) = self.engine.resume_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
+                Ok(OpheliaResponse::Ack)
+            }
+            OpheliaCommand::Cancel { id } => {
+                let (result, events) = self.engine.cancel_collecting_events(id).await;
+                self.apply_engine_events(events);
+                result?;
+                Ok(OpheliaResponse::Ack)
+            }
+            OpheliaCommand::DeleteArtifact { id } => {
+                let (result, events) = self.engine.delete_artifact_collecting_events(id).await;
+                self.apply_engine_events(events);
+                match result {
+                    Ok(()) => {}
+                    Err(EngineError::NotFound { id }) => {
+                        self.delete_artifact_from_service_state(id)?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(OpheliaResponse::Ack)
+            }
+            OpheliaCommand::UpdateSettings { settings } => {
+                settings.save(&self.paths)?;
+                let config = settings.to_engine_config(&self.paths);
+                let (result, events) = self
+                    .engine
+                    .update_config_collecting_events(config.clone())
+                    .await;
+                self.apply_engine_events(events);
+                result?;
+                self.config = config;
+                self.settings = settings.clone();
+                let _ = self
+                    .event_tx
+                    .send(OpheliaEvent::SettingsChanged { settings });
+                Ok(OpheliaResponse::Ack)
+            }
+            OpheliaCommand::LoadHistory { filter, query } => {
+                let rows =
+                    self.history_reader
+                        .load(filter, &query)
+                        .map_err(|error| OpheliaError::Io {
+                            message: error.to_string(),
+                        })?;
+                Ok(OpheliaResponse::History { rows })
+            }
+            OpheliaCommand::ServiceInfo => Ok(OpheliaResponse::ServiceInfo {
+                info: self.service_info.clone(),
+            }),
+            OpheliaCommand::Snapshot => Ok(OpheliaResponse::Snapshot {
+                snapshot: self.read_model.snapshot(&self.settings),
+            }),
+            OpheliaCommand::Subscribe => Ok(OpheliaResponse::Snapshot {
+                snapshot: self.read_model.snapshot(&self.settings),
+            }),
+        }
+    }
+
+    fn drain_engine_events(&mut self) {
+        while let Some(event) = self.engine.try_next_event() {
+            self.apply_engine_event(event);
+        }
+    }
+
+    fn apply_engine_events(&mut self, events: Vec<EngineEvent>) {
+        for event in events {
+            self.apply_engine_event(event);
+        }
+    }
+
+    fn apply_engine_event(&mut self, event: EngineEvent) {
+        if should_flush_before_immediate(&event) {
+            self.flush_coalesced_events();
+        }
+        if let Some(event) = self
+            .read_model
+            .apply_engine_event(event, &mut self.coalescer)
+        {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    fn flush_coalesced_events(&mut self) {
+        for event in self.coalescer.drain_events() {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    fn log_coalescer_stats(&self) {
+        let stats = self.coalescer.stats();
+        if stats.raw_transfer_updates == 0 && stats.raw_write_updates == 0 {
+            return;
+        }
+        tracing::debug!(
+            raw_transfer_updates = stats.raw_transfer_updates,
+            emitted_transfer_updates = stats.emitted_transfer_updates,
+            coalesced_transfer_updates = stats.coalesced_transfer_updates(),
+            raw_write_updates = stats.raw_write_updates,
+            emitted_write_updates = stats.emitted_write_updates,
+            coalesced_write_updates = stats.coalesced_write_updates(),
+            "service event coalescing summary"
+        );
+    }
+
+    fn delete_artifact_from_service_state(&mut self, id: TransferId) -> Result<(), OpheliaError> {
+        let destination = if let Some(destination) = self.read_model.destination(id) {
+            Some(destination.to_path_buf())
+        } else {
+            self.history_reader
+                .load_by_id(id)
+                .map_err(|error| OpheliaError::Io {
+                    message: error.to_string(),
+                })?
+                .map(|row| PathBuf::from(row.destination))
+        }
+        .ok_or(OpheliaError::NotFound { id })?;
+
+        let artifact_state = delete_artifact_files(&destination);
+        let _ = self
+            .db_tx
+            .send(DbEvent::ArtifactStateChanged { id, artifact_state });
+        self.read_model.remove(id);
+        let _ = self.event_tx.send(OpheliaEvent::TransferRemoved {
+            id,
+            action: LiveTransferRemovalAction::DeleteArtifact,
+            artifact_state,
+        });
+        Ok(())
+    }
+}
+
+pub(super) fn should_flush_before_immediate(event: &EngineEvent) -> bool {
+    match event {
+        EngineEvent::Progress(update) => update.status != TransferStatus::Downloading,
+        EngineEvent::LiveTransferRemoved { .. } => true,
+        _ => false,
+    }
+}
