@@ -102,9 +102,9 @@ pub struct Settings {
     pub destination_rules_enabled: bool,
     /// First-match-wins routing rules for automatically chosen destinations.
     pub destination_rules: Vec<DestinationRule>,
-    /// HTTP chunk scheduling mode for range-supported downloads.
+    /// HTTP download ordering mode.
     pub http_download_ordering_mode: HttpDownloadOrderingMode,
-    /// Extension list used when HTTP ordering is file-specific.
+    /// Extension list used by file-specific HTTP ordering.
     pub sequential_download_extensions: Vec<String>,
     /// Master switch for in-app popup notifications.
     pub notifications_enabled: bool,
@@ -153,8 +153,7 @@ impl Settings {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)

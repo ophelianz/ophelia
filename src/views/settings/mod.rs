@@ -474,11 +474,7 @@ impl SettingsWindow {
                     .items_center()
                     .gap(px(8.0))
                     .text_sm()
-                    .font_weight(if is_active {
-                        FontWeight::LIGHT
-                    } else {
-                        FontWeight::LIGHT
-                    })
+                    .font_weight(FontWeight::LIGHT)
                     .text_color(if is_active {
                         Colors::foreground()
                     } else {
@@ -728,8 +724,10 @@ mod tests {
     #[test]
     fn language_dropdown_updates_draft_settings_via_real_ui_interaction() {
         let mut app = TestApp::new();
-        let mut settings = Settings::default();
-        settings.language = "en".into();
+        let settings = Settings {
+            language: "en".into(),
+            ..Default::default()
+        };
 
         let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
         let mut window = app.open_window_with_options(
@@ -754,8 +752,10 @@ mod tests {
     #[test]
     fn restart_button_requests_an_app_restart() {
         let mut app = TestAppContext::single();
-        let mut settings = Settings::default();
-        settings.language = "en".into();
+        let settings = Settings {
+            language: "en".into(),
+            ..Default::default()
+        };
         let mut restart = app.expect_restart();
 
         let bounds = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(600.0)));
@@ -804,7 +804,7 @@ mod tests {
 
         window.update(|settings: &mut SettingsWindow, _window, cx| {
             settings.set_http_download_ordering_mode(HttpDownloadOrderingMode::FileSpecific, cx);
-            let _ = settings
+            settings
                 .sequential_download_extensions_input
                 .update(cx, |input, cx| input.set_text(".mkv, .webm", cx));
 

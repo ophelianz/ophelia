@@ -24,6 +24,8 @@ use crate::engine::DownloadId;
 use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 
+pub type TransferRowAction = dyn Fn(&mut Window, &mut App) + 'static;
+
 impl TransferDisplayState {
     fn accent_color(self) -> Hsla {
         match self {
@@ -82,10 +84,10 @@ pub struct TransferRow {
     pub progress: f32,
     pub state: TransferDisplayState,
     pub selected: bool,
-    pub on_select: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
-    pub on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
-    pub on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
-    pub on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+    pub on_select: Option<Box<TransferRowAction>>,
+    pub on_open_destination: Box<TransferRowAction>,
+    pub on_pause_resume: Option<Box<TransferRowAction>>,
+    pub on_remove: Option<Box<TransferRowAction>>,
 }
 
 impl RenderOnce for TransferRow {
@@ -231,18 +233,18 @@ impl RenderOnce for TransferRowDetails {
 struct TransferRowActions {
     id: DownloadId,
     state: TransferDisplayState,
-    on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
-    on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
-    on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_open_destination: Box<TransferRowAction>,
+    on_pause_resume: Option<Box<TransferRowAction>>,
+    on_remove: Option<Box<TransferRowAction>>,
 }
 
 impl TransferRowActions {
     fn new(
         id: DownloadId,
         state: TransferDisplayState,
-        on_open_destination: Box<dyn Fn(&mut Window, &mut App) + 'static>,
-        on_pause_resume: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
-        on_remove: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
+        on_open_destination: Box<TransferRowAction>,
+        on_pause_resume: Option<Box<TransferRowAction>>,
+        on_remove: Option<Box<TransferRowAction>>,
     ) -> Self {
         Self {
             id,
@@ -323,7 +325,7 @@ fn row_action_button(
     id: ElementId,
     debug_selector: Option<&'static str>,
     icon_name: IconName,
-    on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
+    on_click: Box<TransferRowAction>,
 ) -> impl IntoElement {
     let button = IconButton::new(id, icon_name)
         .stop_propagation()

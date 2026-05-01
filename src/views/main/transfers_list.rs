@@ -28,8 +28,9 @@ use crate::app::{Downloads, TransferListRow};
 use crate::engine::{DownloadId, DownloadStatus};
 use crate::settings::{Settings, suggested_destination_rule_icon_name};
 use crate::ui::prelude::*;
-use crate::views::main::transfer_row::TransferRow;
-use crate::views::main::transfer_row::default_transfer_icon_name_for_filename;
+use crate::views::main::transfer_row::{
+    TransferRow, TransferRowAction, default_transfer_icon_name_for_filename,
+};
 
 use rust_i18n::t;
 
@@ -127,32 +128,31 @@ impl TransferList {
                 let id = row.id;
                 let selected = selected_id == Some(id);
                 let icon_name = resolved_transfer_icon_name(&row, settings);
-                let on_pause_resume: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>> =
-                    if row.available_actions.pause {
-                        let downloads = downloads.clone();
-                        Some(Rc::new(move |_window: &mut Window, app: &mut App| {
-                            downloads.update(app, |downloads, cx| downloads.pause(id, cx));
-                        }))
-                    } else if row.available_actions.resume {
-                        let downloads = downloads.clone();
-                        Some(Rc::new(move |_window: &mut Window, app: &mut App| {
-                            downloads.update(app, |downloads, cx| downloads.resume(id, cx));
-                        }))
-                    } else {
-                        None
-                    };
+                let on_pause_resume: Option<Rc<TransferRowAction>> = if row.available_actions.pause
+                {
+                    let downloads = downloads.clone();
+                    Some(Rc::new(move |_window: &mut Window, app: &mut App| {
+                        downloads.update(app, |downloads, cx| downloads.pause(id, cx));
+                    }))
+                } else if row.available_actions.resume {
+                    let downloads = downloads.clone();
+                    Some(Rc::new(move |_window: &mut Window, app: &mut App| {
+                        downloads.update(app, |downloads, cx| downloads.resume(id, cx));
+                    }))
+                } else {
+                    None
+                };
 
                 let on_remove = if row.available_actions.delete_artifact {
                     let downloads = downloads.clone();
                     Some(Rc::new(move |_window: &mut Window, app: &mut App| {
                         downloads.update(app, |downloads, cx| downloads.remove(id, cx));
-                    })
-                        as Rc<dyn Fn(&mut Window, &mut App) + 'static>)
+                    }) as Rc<TransferRowAction>)
                 } else {
                     None
                 };
 
-                let on_open_destination: Rc<dyn Fn(&mut Window, &mut App) + 'static> = {
+                let on_open_destination: Rc<TransferRowAction> = {
                     let downloads = downloads.clone();
                     Rc::new(move |_window: &mut Window, app: &mut App| {
                         downloads.update(app, |downloads, cx| {
@@ -296,7 +296,7 @@ impl Render for TransferList {
                                         Box::new(move |window: &mut Window, cx: &mut App| {
                                             handler(window, cx);
                                         })
-                                            as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                            as Box<TransferRowAction>
                                     },
                                     on_pause_resume: model.on_pause_resume.as_ref().map({
                                         |handler| {
@@ -304,7 +304,7 @@ impl Render for TransferList {
                                             Box::new(move |window: &mut Window, cx: &mut App| {
                                                 handler(window, cx);
                                             })
-                                                as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                                as Box<TransferRowAction>
                                         }
                                     }),
                                     on_remove: model.on_remove.as_ref().map(|handler| {
@@ -312,7 +312,7 @@ impl Render for TransferList {
                                         Box::new(move |window: &mut Window, cx: &mut App| {
                                             handler(window, cx);
                                         })
-                                            as Box<dyn Fn(&mut Window, &mut App) + 'static>
+                                            as Box<TransferRowAction>
                                     }),
                                 }
                             })
@@ -347,9 +347,9 @@ struct TransferRowModel {
     progress: f32,
     state: crate::app::TransferDisplayState,
     selected: bool,
-    on_open_destination: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
-    on_pause_resume: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
-    on_remove: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_open_destination: Rc<TransferRowAction>,
+    on_pause_resume: Option<Rc<TransferRowAction>>,
+    on_remove: Option<Rc<TransferRowAction>>,
 }
 
 #[derive(Clone)]
@@ -516,16 +516,18 @@ mod tests {
 
     #[test]
     fn matched_destination_rule_icon_wins_over_filename_heuristic() {
-        let mut settings = Settings::default();
-        settings.destination_rules_enabled = true;
-        settings.destination_rules = vec![DestinationRule {
-            id: "movies".into(),
-            label: "Movies".into(),
-            enabled: true,
-            target_dir: PathBuf::from("/tmp/Movies"),
-            extensions: vec![".mkv".into()],
-            icon_name: Some("video".into()),
-        }];
+        let settings = Settings {
+            destination_rules_enabled: true,
+            destination_rules: vec![DestinationRule {
+                id: "movies".into(),
+                label: "Movies".into(),
+                enabled: true,
+                target_dir: PathBuf::from("/tmp/Movies"),
+                extensions: vec![".mkv".into()],
+                icon_name: Some("video".into()),
+            }],
+            ..Default::default()
+        };
 
         let row = TransferListRow {
             destination: "/tmp/Movies/movie.mkv".into(),
@@ -538,16 +540,18 @@ mod tests {
 
     #[test]
     fn icon_falls_back_to_filename_when_no_destination_rule_matches() {
-        let mut settings = Settings::default();
-        settings.destination_rules_enabled = true;
-        settings.destination_rules = vec![DestinationRule {
-            id: "docs".into(),
-            label: "Docs".into(),
-            enabled: true,
-            target_dir: PathBuf::from("/tmp/Documents"),
-            extensions: vec![".pdf".into()],
-            icon_name: Some("document".into()),
-        }];
+        let settings = Settings {
+            destination_rules_enabled: true,
+            destination_rules: vec![DestinationRule {
+                id: "docs".into(),
+                label: "Docs".into(),
+                enabled: true,
+                target_dir: PathBuf::from("/tmp/Documents"),
+                extensions: vec![".pdf".into()],
+                icon_name: Some("document".into()),
+            }],
+            ..Default::default()
+        };
 
         let row = TransferListRow {
             destination: "/tmp/Videos/movie.mkv".into(),

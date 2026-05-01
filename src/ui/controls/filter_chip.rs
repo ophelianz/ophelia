@@ -26,12 +26,14 @@ use gpui::{
 
 use crate::ui::prelude::*;
 
+type FilterChipClickHandler = dyn Fn(&ClickEvent, &mut Window, &mut App);
+
 #[derive(IntoElement)]
 pub struct FilterChip {
     id: ElementId,
     label: SharedString,
     active: bool,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<Rc<FilterChipClickHandler>>,
 }
 
 impl FilterChip {

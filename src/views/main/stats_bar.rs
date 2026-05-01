@@ -29,8 +29,8 @@ use rust_i18n::t;
 pub struct StatsBar {
     pub download_samples: Vec<f32>,
     pub download_speed: f32,
-    pub disk_read_speed: Option<f32>,
-    pub disk_write_speed: Option<f32>,
+    pub file_read_speed: Option<f32>,
+    pub file_write_speed: Option<f32>,
     pub active_count: usize,
     pub finished_count: usize,
     pub queued_count: usize,
@@ -62,9 +62,9 @@ impl RenderOnce for StatsBar {
                         .into_any_element(),
                     )
                     .child(
-                        disk_io_metric(
-                            self.disk_read_speed,
-                            self.disk_write_speed,
+                        file_io_metric(
+                            self.file_read_speed,
+                            self.file_write_speed,
                             t!("stats.disk_io").to_string(),
                         )
                         .into_any_element(),
@@ -83,18 +83,18 @@ impl RenderOnce for StatsBar {
                     .gap(px(Spacing::SECTION_GAP))
                     .flex_wrap()
                     .child(count_metric(
-                        &t!("stats.active").to_string(),
-                        &self.active_count.to_string(),
+                        t!("stats.active").to_string(),
+                        self.active_count.to_string(),
                         Colors::active().into(),
                     ))
                     .child(count_metric(
-                        &t!("stats.finished").to_string(),
-                        &self.finished_count.to_string(),
+                        t!("stats.finished").to_string(),
+                        self.finished_count.to_string(),
                         Colors::finished().into(),
                     ))
                     .child(count_metric(
-                        &t!("stats.queued").to_string(),
-                        &self.queued_count.to_string(),
+                        t!("stats.queued").to_string(),
+                        self.queued_count.to_string(),
                         Colors::queued().into(),
                     )),
             )
@@ -311,7 +311,7 @@ fn primary_speed_metric(label: String, value: DataLabel, caption: String) -> imp
         )
 }
 
-fn disk_io_metric(
+fn file_io_metric(
     read_speed: Option<f32>,
     write_speed: Option<f32>,
     label: String,
@@ -372,7 +372,14 @@ fn io_metric(label: String, speed: Option<f32>) -> impl IntoElement {
         )
 }
 
-fn count_metric(label: &str, value: &str, color: Hsla) -> impl IntoElement {
+fn count_metric(
+    label: impl Into<gpui::SharedString>,
+    value: impl Into<gpui::SharedString>,
+    color: Hsla,
+) -> impl IntoElement {
+    let label = label.into();
+    let value = value.into();
+
     h_flex()
         .items_center()
         .gap(px(6.0))
@@ -381,13 +388,13 @@ fn count_metric(label: &str, value: &str, color: Hsla) -> impl IntoElement {
                 .text_sm()
                 .font_weight(gpui::FontWeight::LIGHT)
                 .text_color(Colors::muted_foreground())
-                .child(label.to_string()),
+                .child(label),
         )
         .child(
             div()
                 .text_sm()
                 .font_weight(gpui::FontWeight::EXTRA_BOLD)
                 .text_color(color)
-                .child(value.to_string()),
+                .child(value),
         )
 }

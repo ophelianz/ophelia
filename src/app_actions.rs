@@ -205,7 +205,7 @@ fn open_settings_impl(cx: &mut App) {
                 px(SETTINGS_WINDOW_MIN_HEIGHT),
             ),
         ),
-        |_, cx| cx.new(|cx| SettingsWindow::new(cx)),
+        |_, cx| cx.new(SettingsWindow::new),
     ) else {
         return;
     };

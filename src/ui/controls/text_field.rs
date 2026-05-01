@@ -778,6 +778,54 @@ impl Element for TextFieldElement {
     }
 }
 
+impl Render for TextField {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus_handle.is_focused(window);
+
+        div()
+            .id(("text-field", cx.entity_id()))
+            .flex()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .key_context("TextField")
+            .track_focus(&self.focus_handle(cx))
+            .cursor_text()
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::submit))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .line_height(px(20.0))
+            .text_size(px(14.0))
+            .when(!self.embedded, |this| {
+                this.bg(Colors::background())
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if focused {
+                        Colors::ring()
+                    } else {
+                        Colors::input_border()
+                    })
+            })
+            .px(px(12.0))
+            .py(px(10.0))
+            .child(TextFieldElement { input: cx.entity() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,53 +889,5 @@ mod tests {
             ),
             px(-20.0)
         );
-    }
-}
-
-impl Render for TextField {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.is_focused(window);
-
-        div()
-            .id(("text-field", cx.entity_id()))
-            .flex()
-            .w_full()
-            .min_w_0()
-            .overflow_hidden()
-            .key_context("TextField")
-            .track_focus(&self.focus_handle(cx))
-            .cursor_text()
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::submit))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(20.0))
-            .text_size(px(14.0))
-            .when(!self.embedded, |this| {
-                this.bg(Colors::background())
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(if focused {
-                        Colors::ring()
-                    } else {
-                        Colors::input_border()
-                    })
-            })
-            .px(px(12.0))
-            .py(px(10.0))
-            .child(TextFieldElement { input: cx.entity() })
     }
 }

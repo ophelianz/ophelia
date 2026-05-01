@@ -36,7 +36,7 @@ pub fn init(cx: &mut App) {
         let mut ticks_until_refresh = TRAY_REFRESH_INTERVAL_TICKS;
         loop {
             cx.background_executor().timer(TRAY_POLL_INTERVAL).await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 drain_tray_intents(cx);
                 ticks_until_refresh = ticks_until_refresh.saturating_sub(1);
                 if ticks_until_refresh == 0 {

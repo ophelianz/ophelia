@@ -129,7 +129,7 @@ fn render_menu_popup(
     popup_surface(("menu-popup", index))
         .min_width(px(Chrome::MENU_POPUP_MIN_WIDTH))
         .on_close(move |_, app| {
-            let _ = entity.update(app, |this, cx| {
+            entity.update(app, |this, cx| {
                 this.close_menu(cx);
             });
         })

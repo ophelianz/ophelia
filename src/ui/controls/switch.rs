@@ -32,11 +32,13 @@ use gpui::{
 
 use crate::ui::prelude::*;
 
+type SwitchClickHandler = dyn Fn(bool, &mut Window, &mut App);
+
 #[derive(IntoElement)]
 pub struct Switch {
     id: ElementId,
     checked: bool,
-    on_click: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+    on_click: Option<Rc<SwitchClickHandler>>,
 }
 
 impl Switch {

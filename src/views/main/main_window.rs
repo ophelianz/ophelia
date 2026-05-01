@@ -137,15 +137,15 @@ impl MainWindow {
                 stats: stats_bar_view_model(
                     downloads.speed_samples_mbs(),
                     downloads.download_speed_bps(),
-                    downloads.disk_read_speed_bps(),
-                    downloads.disk_write_speed_bps(),
+                    downloads.file_read_speed_bps(),
+                    downloads.file_write_speed_bps(),
                     active,
                     finished,
                     queued,
                 ),
                 chunk_map: ChunkMapCardModel::from_transfer_rows(
                     &transfer_rows,
-                    &downloads,
+                    downloads,
                     selected_transfer_id,
                 ),
             })
@@ -168,8 +168,8 @@ fn resolve_selected_transfer_id_for_transfers(
 fn stats_bar_view_model(
     download_samples: Vec<f32>,
     download_speed_bps: u64,
-    disk_read_speed_bps: Option<u64>,
-    disk_write_speed_bps: Option<u64>,
+    file_read_speed_bps: Option<u64>,
+    file_write_speed_bps: Option<u64>,
     active_count: usize,
     finished_count: usize,
     queued_count: usize,
@@ -177,8 +177,8 @@ fn stats_bar_view_model(
     StatsBarViewModel {
         download_samples,
         download_speed: speed_bps_to_mbs(download_speed_bps),
-        disk_read_speed: disk_speed_bps_to_mbs(disk_read_speed_bps),
-        disk_write_speed: disk_speed_bps_to_mbs(disk_write_speed_bps),
+        file_read_speed: file_speed_bps_to_mbs(file_read_speed_bps),
+        file_write_speed: file_speed_bps_to_mbs(file_write_speed_bps),
         active_count,
         finished_count,
         queued_count,
@@ -189,74 +189,8 @@ fn speed_bps_to_mbs(speed_bps: u64) -> f32 {
     speed_bps as f32 / 1_000_000.0
 }
 
-fn disk_speed_bps_to_mbs(speed_bps: Option<u64>) -> Option<f32> {
+fn file_speed_bps_to_mbs(speed_bps: Option<u64>) -> Option<f32> {
     speed_bps.map(speed_bps_to_mbs)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::{TransferAvailableActions, TransferDisplayState, TransferListRow};
-    use crate::engine::DownloadStatus;
-
-    #[test]
-    fn chunk_map_selection_defaults_to_first_visible_transfer() {
-        let rows = vec![test_row(DownloadId(4)), test_row(DownloadId(9))];
-
-        assert_eq!(
-            resolve_selected_transfer_id_for_transfers(&rows, None),
-            Some(DownloadId(4))
-        );
-    }
-
-    #[test]
-    fn chunk_map_selection_falls_back_when_current_transfer_disappears() {
-        let rows = vec![test_row(DownloadId(12)), test_row(DownloadId(15))];
-
-        assert_eq!(
-            resolve_selected_transfer_id_for_transfers(&rows, Some(DownloadId(99))),
-            Some(DownloadId(12))
-        );
-    }
-
-    #[test]
-    fn stats_bar_view_model_threads_disk_speeds() {
-        let view_model = stats_bar_view_model(
-            vec![1.0, 2.0],
-            3_000_000,
-            Some(1_500_000),
-            Some(500_000),
-            2,
-            3,
-            4,
-        );
-
-        assert_eq!(view_model.download_speed, 3.0);
-        assert_eq!(view_model.disk_read_speed, Some(1.5));
-        assert_eq!(view_model.disk_write_speed, Some(0.5));
-    }
-
-    fn test_row(id: DownloadId) -> TransferListRow {
-        TransferListRow {
-            id,
-            provider_kind: "http".into(),
-            source_label: "https://example.com/file.bin".into(),
-            filename: "file.bin".into(),
-            destination: "/tmp/file.bin".into(),
-            status: DownloadStatus::Downloading,
-            downloaded_bytes: 512,
-            total_bytes: Some(1024),
-            progress: 0.5,
-            speed_bps: 0,
-            display_state: TransferDisplayState::Active,
-            available_actions: TransferAvailableActions {
-                pause: true,
-                resume: false,
-                cancel: true,
-                delete_artifact: true,
-            },
-        }
-    }
 }
 
 impl Render for MainWindow {
@@ -334,7 +268,7 @@ impl MainWindow {
                             .first()
                             .copied()
                             .unwrap_or(px(Spacing::SIDEBAR_WIDTH));
-                        let _ = sidebar_entity.update(cx, |sidebar, cx| {
+                        sidebar_entity.update(cx, |sidebar, cx| {
                             sidebar.set_expanded_width(f32::from(width));
                             cx.notify();
                         });
@@ -414,8 +348,8 @@ impl MainWindow {
                     .child(transfers_summary_panel(StatsBar {
                         download_samples: summary.stats.download_samples,
                         download_speed: summary.stats.download_speed,
-                        disk_read_speed: summary.stats.disk_read_speed,
-                        disk_write_speed: summary.stats.disk_write_speed,
+                        file_read_speed: summary.stats.file_read_speed,
+                        file_write_speed: summary.stats.file_write_speed,
                         active_count: summary.stats.active_count,
                         finished_count: summary.stats.finished_count,
                         queued_count: summary.stats.queued_count,
@@ -463,8 +397,8 @@ enum MainContentViewModel {
 struct StatsBarViewModel {
     download_samples: Vec<f32>,
     download_speed: f32,
-    disk_read_speed: Option<f32>,
-    disk_write_speed: Option<f32>,
+    file_read_speed: Option<f32>,
+    file_write_speed: Option<f32>,
     active_count: usize,
     finished_count: usize,
     queued_count: usize,
@@ -473,4 +407,70 @@ struct StatsBarViewModel {
 struct TransfersSummaryViewModel {
     stats: StatsBarViewModel,
     chunk_map: ChunkMapCardModel,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{TransferAvailableActions, TransferDisplayState, TransferListRow};
+    use crate::engine::DownloadStatus;
+
+    #[test]
+    fn chunk_map_selection_defaults_to_first_visible_transfer() {
+        let rows = vec![test_row(DownloadId(4)), test_row(DownloadId(9))];
+
+        assert_eq!(
+            resolve_selected_transfer_id_for_transfers(&rows, None),
+            Some(DownloadId(4))
+        );
+    }
+
+    #[test]
+    fn chunk_map_selection_falls_back_when_current_transfer_disappears() {
+        let rows = vec![test_row(DownloadId(12)), test_row(DownloadId(15))];
+
+        assert_eq!(
+            resolve_selected_transfer_id_for_transfers(&rows, Some(DownloadId(99))),
+            Some(DownloadId(12))
+        );
+    }
+
+    #[test]
+    fn stats_bar_view_model_threads_file_speeds() {
+        let view_model = stats_bar_view_model(
+            vec![1.0, 2.0],
+            3_000_000,
+            Some(1_500_000),
+            Some(500_000),
+            2,
+            3,
+            4,
+        );
+
+        assert_eq!(view_model.download_speed, 3.0);
+        assert_eq!(view_model.file_read_speed, Some(1.5));
+        assert_eq!(view_model.file_write_speed, Some(0.5));
+    }
+
+    fn test_row(id: DownloadId) -> TransferListRow {
+        TransferListRow {
+            id,
+            provider_kind: "http".into(),
+            source_label: "https://example.com/file.bin".into(),
+            filename: "file.bin".into(),
+            destination: "/tmp/file.bin".into(),
+            status: DownloadStatus::Downloading,
+            downloaded_bytes: 512,
+            total_bytes: Some(1024),
+            progress: 0.5,
+            speed_bps: 0,
+            display_state: TransferDisplayState::Active,
+            available_actions: TransferAvailableActions {
+                pause: true,
+                resume: false,
+                cancel: true,
+                delete_artifact: true,
+            },
+        }
+    }
 }

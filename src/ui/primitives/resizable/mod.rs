@@ -434,16 +434,20 @@ mod tests {
 
     #[test]
     fn insert_panel_initializes_sizes() {
-        let mut state = ResizableState::default();
-        state.bounds = bounds(point(px(0.0), px(0.0)), size(px(500.0), px(300.0)));
+        let mut state = ResizableState {
+            bounds: bounds(point(px(0.0), px(0.0)), size(px(500.0), px(300.0))),
+            ..Default::default()
+        };
         assert!(state.insert_panel_internal(Some(px(180.0)), None));
         assert_eq!(state.sizes, vec![px(500.0)]);
     }
 
     #[test]
     fn sync_panels_count_adds_and_removes_panels() {
-        let mut state = ResizableState::default();
-        state.bounds = bounds(point(px(0.0), px(0.0)), size(px(600.0), px(400.0)));
+        let mut state = ResizableState {
+            bounds: bounds(point(px(0.0), px(0.0)), size(px(600.0), px(400.0))),
+            ..Default::default()
+        };
         assert!(state.sync_panels_count_internal(Axis::Horizontal, 3));
         assert_eq!(state.sizes.len(), 3);
         assert!(state.sync_panels_count_internal(Axis::Horizontal, 2));
@@ -452,22 +456,24 @@ mod tests {
 
     #[test]
     fn resize_panel_clamps_to_size_range() {
-        let mut state = ResizableState::default();
-        state.axis = Axis::Horizontal;
-        state.bounds = bounds(point(px(0.0), px(0.0)), size(px(600.0), px(300.0)));
-        state.panels = vec![
-            ResizablePanelState {
-                size: Some(px(200.0)),
-                size_range: px(180.0)..px(220.0),
-                bounds: bounds(point(px(0.0), px(0.0)), size(px(200.0), px(300.0))),
-            },
-            ResizablePanelState {
-                size: Some(px(400.0)),
-                size_range: px(200.0)..Pixels::MAX,
-                bounds: bounds(point(px(200.0), px(0.0)), size(px(400.0), px(300.0))),
-            },
-        ];
-        state.sizes = vec![px(200.0), px(400.0)];
+        let mut state = ResizableState {
+            axis: Axis::Horizontal,
+            bounds: bounds(point(px(0.0), px(0.0)), size(px(600.0), px(300.0))),
+            panels: vec![
+                ResizablePanelState {
+                    size: Some(px(200.0)),
+                    size_range: px(180.0)..px(220.0),
+                    bounds: bounds(point(px(0.0), px(0.0)), size(px(200.0), px(300.0))),
+                },
+                ResizablePanelState {
+                    size: Some(px(400.0)),
+                    size_range: px(200.0)..Pixels::MAX,
+                    bounds: bounds(point(px(200.0), px(0.0)), size(px(400.0), px(300.0))),
+                },
+            ],
+            sizes: vec![px(200.0), px(400.0)],
+            ..Default::default()
+        };
 
         assert!(state.resize_panel_internal(0, px(260.0)));
         assert_eq!(state.sizes[0], px(220.0));
@@ -476,22 +482,24 @@ mod tests {
 
     #[test]
     fn container_resize_respects_panel_minimums() {
-        let mut state = ResizableState::default();
-        state.axis = Axis::Horizontal;
-        state.bounds = bounds(point(px(0.0), px(0.0)), size(px(600.0), px(300.0)));
-        state.panels = vec![
-            ResizablePanelState {
-                size: Some(px(240.0)),
-                size_range: px(200.0)..Pixels::MAX,
-                bounds: Bounds::default(),
-            },
-            ResizablePanelState {
-                size: Some(px(360.0)),
-                size_range: px(260.0)..Pixels::MAX,
-                bounds: Bounds::default(),
-            },
-        ];
-        state.sizes = vec![px(240.0), px(360.0)];
+        let mut state = ResizableState {
+            axis: Axis::Horizontal,
+            bounds: bounds(point(px(0.0), px(0.0)), size(px(600.0), px(300.0))),
+            panels: vec![
+                ResizablePanelState {
+                    size: Some(px(240.0)),
+                    size_range: px(200.0)..Pixels::MAX,
+                    bounds: Bounds::default(),
+                },
+                ResizablePanelState {
+                    size: Some(px(360.0)),
+                    size_range: px(260.0)..Pixels::MAX,
+                    bounds: Bounds::default(),
+                },
+            ],
+            sizes: vec![px(240.0), px(360.0)],
+            ..Default::default()
+        };
 
         state.bounds = bounds(point(px(0.0), px(0.0)), size(px(500.0), px(300.0)));
         assert!(state.adjust_to_container_size_internal());
@@ -502,8 +510,10 @@ mod tests {
 
     #[test]
     fn done_resizing_returns_resized_event() {
-        let mut state = ResizableState::default();
-        state.resizing_panel_ix = Some(0);
+        let mut state = ResizableState {
+            resizing_panel_ix: Some(0),
+            ..Default::default()
+        };
         assert_eq!(
             state.done_resizing_internal(),
             Some(ResizablePanelEvent::Resized)

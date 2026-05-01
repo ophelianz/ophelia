@@ -79,7 +79,7 @@ history:
 stats:
     title: "NETWORK THROUGHPUT"
     download: "Download"
-    disk_io: "Disk I/O"
+    disk_io: "File I/O"
     read: "Read"
     write: "Write"
     window: "last 60s"
@@ -133,14 +133,14 @@ settings:
             same name."
         collision_strategy_rename: "Rename"
         collision_strategy_replace: "Replace"
-        http_download_ordering_mode_label: "HTTP Download Ordering"
-        http_download_ordering_mode_description: "Controls how range-supported HTTP downloads schedule chunks."
+        http_download_ordering_mode_label: "HTTP ordering"
+        http_download_ordering_mode_description: "Choose how HTTP downloads are ordered."
         http_download_ordering_mode_balanced: "Balanced"
-        http_download_ordering_mode_file_specific: "File-Specific"
+        http_download_ordering_mode_file_specific: "File-specific"
         http_download_ordering_mode_sequential: "Sequential"
-        sequential_download_extensions_label: "Sequential Extensions"
-        sequential_download_extensions_description: "Used only in File-Specific mode.
-            Matches the final resolved filename extension for HTTP downloads."
+        sequential_download_extensions_label: "Sequential extensions"
+        sequential_download_extensions_description: "Used in File-specific mode.
+            Matching file types use sequential downloads."
         destination_rules_enabled_label: "Enable Destination Rules"
         destination_rules_enabled_description: "Turn on extension-based folders for
             future automatic/browser downloads."

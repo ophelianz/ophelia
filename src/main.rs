@@ -51,7 +51,7 @@ fn run() {
         let initial_settings = settings::Settings::load();
         rust_i18n::set_locale(initial_settings.resolved_language());
 
-        let downloads = cx.new(|cx| app::Downloads::new(cx));
+        let downloads = cx.new(app::Downloads::new);
 
         app_menu::init(cx);
         app_actions::init(downloads, cx);

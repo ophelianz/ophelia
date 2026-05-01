@@ -17,6 +17,7 @@
 **       じしf_,)ノ
 **************************************************/
 
+#[cfg(debug_assertions)]
 use std::sync::{
     OnceLock,
     atomic::{AtomicUsize, Ordering},
@@ -83,7 +84,7 @@ fn render_collision_strategy(
             .on_click({
                 let entity = entity.clone();
                 move |_, _, app| {
-                    let _ = entity.update(app, |this, cx| {
+                    entity.update(app, |this, cx| {
                         this.set_collision_strategy(CollisionStrategy::Rename, cx);
                     });
                 }
@@ -97,7 +98,7 @@ fn render_collision_strategy(
             .selected(this.settings.collision_strategy == CollisionStrategy::Replace)
             .min_width(88.0)
             .on_click(move |_, _, app| {
-                let _ = entity.update(app, |this, cx| {
+                entity.update(app, |this, cx| {
                     this.set_collision_strategy(CollisionStrategy::Replace, cx);
                 });
             }),
@@ -113,7 +114,7 @@ fn render_destination_rules_switch(
     Switch::new("destination-rules-enabled")
         .checked(this.settings.destination_rules_enabled)
         .on_click(move |checked, _, app| {
-            let _ = entity.update(app, |this, cx| {
+            entity.update(app, |this, cx| {
                 this.set_destination_rules_enabled(checked, cx)
             });
         })
@@ -138,7 +139,7 @@ fn render_http_download_ordering_mode(
             .on_click({
                 let entity = entity.clone();
                 move |_, _, app| {
-                    let _ = entity.update(app, |this, cx| {
+                    entity.update(app, |this, cx| {
                         this.set_http_download_ordering_mode(
                             HttpDownloadOrderingMode::Balanced,
                             cx,
@@ -159,7 +160,7 @@ fn render_http_download_ordering_mode(
             .on_click({
                 let entity = entity.clone();
                 move |_, _, app| {
-                    let _ = entity.update(app, |this, cx| {
+                    entity.update(app, |this, cx| {
                         this.set_http_download_ordering_mode(
                             HttpDownloadOrderingMode::FileSpecific,
                             cx,
@@ -178,7 +179,7 @@ fn render_http_download_ordering_mode(
             )
             .min_width(108.0)
             .on_click(move |_, _, app| {
-                let _ = entity.update(app, |this, cx| {
+                entity.update(app, |this, cx| {
                     this.set_http_download_ordering_mode(HttpDownloadOrderingMode::Sequential, cx);
                 });
             }),
@@ -247,7 +248,7 @@ fn render_destination_rules_section(
                                     .to_string(),
                             )
                             .on_click(move |_, _, app| {
-                                let _ = restore_entity.update(app, |this, cx| {
+                                restore_entity.update(app, |this, cx| {
                                     this.restore_default_destination_rules(cx)
                                 });
                             }),
@@ -363,7 +364,7 @@ fn render_destination_rule_row(
                     Switch::new(format!("destination-rule-enabled-{}", rule.id))
                         .checked(rule.enabled)
                         .on_click(move |checked, _, app| {
-                            let _ = toggle_entity.update(app, |this, cx| {
+                            toggle_entity.update(app, |this, cx| {
                                 this.set_destination_rule_enabled(index, checked, cx)
                             });
                         }),
@@ -406,34 +407,34 @@ fn destination_rule_extensions_preview(
     }
 }
 
+#[cfg(debug_assertions)]
 fn debug_destinations_render(rule_count: usize) {
-    #[cfg(debug_assertions)]
-    {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
 
-        if *ENABLED.get_or_init(|| std::env::var_os("OPHELIA_DEBUG_DESTINATIONS_RENDER").is_some())
-        {
-            let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 10 || count % 25 == 0 {
-                eprintln!("[settings/destinations] render #{count} (rules={rule_count})");
-            }
+    if *ENABLED.get_or_init(|| std::env::var_os("OPHELIA_DEBUG_DESTINATIONS_RENDER").is_some()) {
+        let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if count <= 10 || count.is_multiple_of(25) {
+            eprintln!("[settings/destinations] render #{count} (rules={rule_count})");
         }
     }
 }
 
+#[cfg(not(debug_assertions))]
+fn debug_destinations_render(_rule_count: usize) {}
+
+#[cfg(debug_assertions)]
 fn debug_destination_rule_row_render() {
-    #[cfg(debug_assertions)]
-    {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
 
-        if *ENABLED.get_or_init(|| std::env::var_os("OPHELIA_DEBUG_DESTINATIONS_RENDER").is_some())
-        {
-            let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 20 || count % 50 == 0 {
-                eprintln!("[settings/destination-rule-row] render #{count}");
-            }
+    if *ENABLED.get_or_init(|| std::env::var_os("OPHELIA_DEBUG_DESTINATIONS_RENDER").is_some()) {
+        let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if count <= 20 || count.is_multiple_of(50) {
+            eprintln!("[settings/destination-rule-row] render #{count}");
         }
     }
 }
+
+#[cfg(not(debug_assertions))]
+fn debug_destination_rule_row_render() {}

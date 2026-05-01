@@ -186,7 +186,7 @@ fn render_popup(
         .match_trigger_width()
         .min_width(px(220.0))
         .on_close(move |_, app| {
-            let _ = close_entity.update(app, |this, cx| {
+            close_entity.update(app, |this, cx| {
                 this.close(cx);
             });
         })
@@ -214,7 +214,7 @@ fn render_popup(
                 .hover(|style| style.bg(Colors::muted()))
                 .on_click(move |_, _, app| {
                     let value = value.clone();
-                    let _ = entity.update(app, |this, cx| this.select(value.clone(), cx));
+                    entity.update(app, |this, cx| this.select(value.clone(), cx));
                 })
                 .child(
                     div()

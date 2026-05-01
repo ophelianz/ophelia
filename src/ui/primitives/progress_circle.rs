@@ -99,38 +99,43 @@ impl RenderOnce for ProgressCircle {
                     let center_y = origin_y + size / 2.0;
                     let radius = (size - thickness) / 2.0;
 
-                    paint_arc(
-                        window,
+                    let geometry = ArcGeometry {
                         center_x,
                         center_y,
                         radius,
-                        0.0,
-                        TAU,
-                        thickness,
-                        track_color,
+                    };
+                    paint_arc(
+                        window,
+                        geometry,
+                        ArcAngles {
+                            start: 0.0,
+                            end: TAU,
+                        },
+                        ArcStroke {
+                            thickness,
+                            color: track_color,
+                        },
                     );
 
                     if loading {
                         paint_arc(
                             window,
-                            center_x,
-                            center_y,
-                            radius,
-                            -FRAC_PI_2,
-                            PI * 0.95,
-                            thickness,
-                            color,
+                            geometry,
+                            ArcAngles {
+                                start: -FRAC_PI_2,
+                                end: PI * 0.95,
+                            },
+                            ArcStroke { thickness, color },
                         );
                     } else if value > 0.0 {
                         paint_arc(
                             window,
-                            center_x,
-                            center_y,
-                            radius,
-                            -FRAC_PI_2,
-                            -FRAC_PI_2 + TAU * value,
-                            thickness,
-                            color,
+                            geometry,
+                            ArcAngles {
+                                start: -FRAC_PI_2,
+                                end: -FRAC_PI_2 + TAU * value,
+                            },
+                            ArcStroke { thickness, color },
                         );
                     }
                 },
@@ -140,29 +145,53 @@ impl RenderOnce for ProgressCircle {
     }
 }
 
-fn paint_arc(
-    window: &mut Window,
+#[derive(Clone, Copy)]
+struct ArcGeometry {
     center_x: f32,
     center_y: f32,
     radius: f32,
-    start_angle: f32,
-    end_angle: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ArcAngles {
+    start: f32,
+    end: f32,
+}
+
+struct ArcStroke<C> {
     thickness: f32,
-    color: impl Into<Background>,
+    color: C,
+}
+
+fn paint_arc(
+    window: &mut Window,
+    geometry: ArcGeometry,
+    angles: ArcAngles,
+    stroke: ArcStroke<impl Into<Background>>,
 ) {
-    let delta = end_angle - start_angle;
+    let delta = angles.end - angles.start;
     if delta.abs() <= f32::EPSILON {
         return;
     }
 
-    let mut path = PathBuilder::stroke(px(thickness));
-    let start = arc_point(center_x, center_y, radius, start_angle);
+    let mut path = PathBuilder::stroke(px(stroke.thickness));
+    let start = arc_point(
+        geometry.center_x,
+        geometry.center_y,
+        geometry.radius,
+        angles.start,
+    );
     path.move_to(point(px(start.0), px(start.1)));
 
-    for (segment_start, segment_end) in arc_segments(start_angle, end_angle) {
-        let end = arc_point(center_x, center_y, radius, segment_end);
+    for (segment_start, segment_end) in arc_segments(angles.start, angles.end) {
+        let end = arc_point(
+            geometry.center_x,
+            geometry.center_y,
+            geometry.radius,
+            segment_end,
+        );
         path.arc_to(
-            point(px(radius), px(radius)),
+            point(px(geometry.radius), px(geometry.radius)),
             px(0.0),
             (segment_end - segment_start).abs() > PI,
             segment_end >= segment_start,
@@ -171,7 +200,7 @@ fn paint_arc(
     }
 
     if let Ok(path) = path.build() {
-        window.paint_path(path, color);
+        window.paint_path(path, stroke.color);
     }
 }
 
