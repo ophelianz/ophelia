@@ -31,6 +31,7 @@ use crate::ui::prelude::*;
 use crate::updater;
 use crate::views::overlays::about_modal::AboutLayer;
 use crate::views::overlays::download_modal::DownloadModalLayer;
+use crate::views::overlays::toast::{Toast, ToastLayer};
 
 use super::chunk_map::{ChunkMapCard, ChunkMapCardModel};
 use super::history::HistoryView;
@@ -63,6 +64,7 @@ pub struct MainWindow {
     history_view: Entity<HistoryView>,
     about_modal: Entity<AboutLayer>,
     download_modal: Entity<DownloadModalLayer>,
+    toast_layer: Entity<ToastLayer>,
 }
 
 impl MainWindow {
@@ -80,6 +82,7 @@ impl MainWindow {
         let about_modal = cx.new(|cx| AboutLayer::new(about_visibility, cx));
         let download_modal =
             cx.new(|cx| DownloadModalLayer::new(downloads.clone(), download_modal_visibility, cx));
+        let toast_layer = cx.new(|_| ToastLayer::new());
 
         // Re-render when sidebar nav changes (to switch content pane).
         cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
@@ -106,7 +109,14 @@ impl MainWindow {
             history_view,
             about_modal,
             download_modal,
+            toast_layer,
         }
+    }
+
+    pub(crate) fn show_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
+        self.toast_layer.update(cx, |layer, cx| {
+            layer.show(toast, cx);
+        });
     }
 
     pub(crate) fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
@@ -206,6 +216,7 @@ impl Render for MainWindow {
         let view_model = self.view_model(cx);
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -222,6 +233,7 @@ impl Render for MainWindow {
             )
             .child(self.download_modal.clone())
             .child(self.about_modal.clone())
+            .child(self.toast_layer.clone())
     }
 }
 

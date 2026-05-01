@@ -29,7 +29,7 @@ const ICON_GLYPH_MD: f32 = 20.0;
 const ICON_ACTION_FRAME: f32 = 32.0;
 
 /// Icon names map to SVG files in assets/icons/
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     Inbox,
     ArrowDownToLine,
@@ -41,12 +41,15 @@ pub enum IconName {
     Folder,
     GeneralSettings,
     History,
+    Info,
     Network,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
     Storage,
     Trash2,
+    TriangleAlert,
+    X,
 }
 
 impl IconName {
@@ -62,12 +65,15 @@ impl IconName {
             Self::Folder => "folder",
             Self::GeneralSettings => "general-settings",
             Self::History => "history",
+            Self::Info => "info",
             Self::Network => "network",
             Self::Plus => "plus",
             Self::PanelLeftClose => "panel-left-close",
             Self::PanelLeftOpen => "panel-left-open",
             Self::Storage => "storage",
             Self::Trash2 => "trash",
+            Self::TriangleAlert => "triangle-alert",
+            Self::X => "x",
         };
         SharedString::from(format!("icons/{name}.svg"))
     }

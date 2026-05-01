@@ -89,6 +89,7 @@ fn run() {
             .unwrap();
 
         let _ = app_actions::ensure_main_window(cx);
+        service_services::warn_if_owner_mismatch(service_client, cx);
 
         app_menu::refresh(cx);
         tray::refresh(cx, true);

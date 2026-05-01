@@ -28,6 +28,7 @@ use crate::platform;
 use crate::tray;
 use crate::updater;
 use crate::views::main::main_window::MainWindow;
+use crate::views::overlays::toast::Toast;
 use crate::views::settings::{SettingsClosed, SettingsWindow};
 
 pub struct AppState {
@@ -70,6 +71,23 @@ pub fn init(downloads: Entity<Downloads>, cx: &mut App) {
 pub(crate) fn downloads(cx: &App) -> Option<Entity<Downloads>> {
     cx.has_global::<AppState>()
         .then(|| cx.global::<AppState>().downloads.clone())
+}
+
+pub(crate) fn show_toast(toast: Toast, cx: &mut App) {
+    if !cx.has_global::<AppState>() {
+        return;
+    }
+
+    let Some(main_window) = cx.global::<AppState>().main_window else {
+        return;
+    };
+    if !window_is_open(main_window, cx) {
+        return;
+    }
+
+    let _ = main_window.update(cx, |window, _, cx| {
+        window.show_toast(toast, cx);
+    });
 }
 
 pub(crate) fn ensure_main_window(cx: &mut App) -> Option<WindowHandle<MainWindow>> {
