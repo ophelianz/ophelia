@@ -61,7 +61,6 @@ impl OpheliaService {
                 paths,
                 service_info,
                 engine,
-                history_reader: bootstrap.history_reader,
                 db_tx,
                 saved_downloads: bootstrap.saved_downloads,
                 _db_worker: bootstrap.worker,
@@ -123,7 +122,6 @@ struct OpheliaServiceRuntime {
     paths: ProfilePaths,
     service_info: OpheliaServiceInfo,
     engine: DownloadEngine,
-    history_reader: HistoryReader,
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     saved_downloads: Vec<crate::engine::SavedDownload>,
     _db_worker: state::DbWorkerHandle,
@@ -243,7 +241,7 @@ impl OpheliaServiceRuntime {
                 match result {
                     Ok(()) => {}
                     Err(EngineError::NotFound { id }) => {
-                        self.delete_artifact_from_service_state(id)?;
+                        self.delete_artifact_from_service_state(id).await?;
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -266,12 +264,7 @@ impl OpheliaServiceRuntime {
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::LoadHistory { filter, query } => {
-                let rows =
-                    self.history_reader
-                        .load(filter, &query)
-                        .map_err(|error| OpheliaError::Io {
-                            message: error.to_string(),
-                        })?;
+                let rows = load_history_rows(self.paths.clone(), filter, query).await?;
                 Ok(OpheliaResponse::History { rows })
             }
             OpheliaCommand::ServiceInfo => Ok(OpheliaResponse::ServiceInfo {
@@ -332,15 +325,15 @@ impl OpheliaServiceRuntime {
         );
     }
 
-    fn delete_artifact_from_service_state(&mut self, id: TransferId) -> Result<(), OpheliaError> {
+    async fn delete_artifact_from_service_state(
+        &mut self,
+        id: TransferId,
+    ) -> Result<(), OpheliaError> {
         let destination = if let Some(destination) = self.read_model.destination(id) {
             Some(destination.to_path_buf())
         } else {
-            self.history_reader
-                .load_by_id(id)
-                .map_err(|error| OpheliaError::Io {
-                    message: error.to_string(),
-                })?
+            load_history_row_by_id(self.paths.clone(), id)
+                .await?
                 .map(|row| PathBuf::from(row.destination))
         }
         .ok_or(OpheliaError::NotFound { id })?;
@@ -356,6 +349,43 @@ impl OpheliaServiceRuntime {
             artifact_state,
         });
         Ok(())
+    }
+}
+
+async fn load_history_rows(
+    paths: ProfilePaths,
+    filter: HistoryFilter,
+    query: String,
+) -> Result<Vec<HistoryRow>, OpheliaError> {
+    tokio::task::spawn_blocking(move || {
+        let reader = HistoryReader::open(&paths).map_err(history_error)?;
+        reader.load(filter, &query).map_err(history_error)
+    })
+    .await
+    .map_err(history_join_error)?
+}
+
+async fn load_history_row_by_id(
+    paths: ProfilePaths,
+    id: TransferId,
+) -> Result<Option<HistoryRow>, OpheliaError> {
+    tokio::task::spawn_blocking(move || {
+        let reader = HistoryReader::open(&paths).map_err(history_error)?;
+        reader.load_by_id(id).map_err(history_error)
+    })
+    .await
+    .map_err(history_join_error)?
+}
+
+fn history_error(error: rusqlite::Error) -> OpheliaError {
+    OpheliaError::Io {
+        message: error.to_string(),
+    }
+}
+
+fn history_join_error(error: tokio::task::JoinError) -> OpheliaError {
+    OpheliaError::Io {
+        message: format!("history query worker failed: {error}"),
     }
 }
 
