@@ -48,17 +48,30 @@ fn task_state(
     }
 }
 
-pub async fn single_download(
-    id: DownloadId,
-    client: Arc<reqwest::Client>,
-    url: String,
-    resolved_destination: ResolvedDestination,
-    stall_timeout_secs: u64,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
-    pause_token: CancellationToken,
-    throttle: Arc<Throttle>,
-) -> TaskFinalState {
+pub(super) struct SingleDownloadRequest {
+    pub(super) id: DownloadId,
+    pub(super) client: Arc<reqwest::Client>,
+    pub(super) url: String,
+    pub(super) resolved_destination: ResolvedDestination,
+    pub(super) stall_timeout_secs: u64,
+    pub(super) progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+    pub(super) runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pub(super) pause_token: CancellationToken,
+    pub(super) throttle: Arc<Throttle>,
+}
+
+pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
+    let SingleDownloadRequest {
+        id,
+        client,
+        url,
+        resolved_destination,
+        stall_timeout_secs,
+        progress_tx,
+        runtime_update_tx,
+        pause_token,
+        throttle,
+    } = request;
     let ResolvedDestination {
         part_path,
         destination,

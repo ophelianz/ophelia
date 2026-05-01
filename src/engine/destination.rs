@@ -173,15 +173,14 @@ impl DestinationPolicy {
             return explicit_directory.clone();
         }
 
-        if self.rules_enabled {
-            if let Some(dir) = self
+        if self.rules_enabled
+            && let Some(dir) = self
                 .rules
                 .iter()
                 .find(|rule| rule.enabled && rule_matches_extension(rule, filename))
                 .map(|rule| rule.target_dir.clone())
-            {
-                return dir;
-            }
+        {
+            return dir;
         }
 
         self.default_download_dir.clone()
@@ -218,10 +217,10 @@ pub fn part_path_for(destination: &Path) -> PathBuf {
 }
 
 pub fn prepare_resolved_destination(resolved: &ResolvedDestination) -> io::Result<()> {
-    if let Some(parent) = resolved.destination.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = resolved.destination.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     if resolved.part_path.exists() {
         return Err(io::Error::new(
@@ -260,10 +259,7 @@ pub(crate) fn normalize_filename_component(filename: &str) -> Option<String> {
         return None;
     }
 
-    let base = trimmed
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(trimmed);
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     let cleaned: String = base.chars().filter(|&c| c != '\0').collect();
     let cleaned = cleaned.trim();
     match cleaned {

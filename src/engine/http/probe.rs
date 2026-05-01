@@ -50,7 +50,7 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> Result<ProbeResult, r
             .headers()
             .get("content-range")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split('/').last())
+            .and_then(|v| v.split('/').next_back())
             .and_then(|v| v.parse::<u64>().ok());
         Ok(ProbeResult {
             content_length: total,

@@ -35,5 +35,5 @@ mod scheduler;
 mod single;
 
 pub use config::{HttpDownloadConfig, HttpRangeStrategyConfig};
-pub use task::{TaskFinalState, download_task};
+pub use task::{DownloadTaskRequest, TaskFinalState, download_task};
 pub use throttle::TokenBucket;

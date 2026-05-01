@@ -33,10 +33,10 @@ fn wait_for_matching_notification(
 ) -> EngineNotification {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if let Some(notification) = engine.poll_notification() {
-            if predicate(&notification) {
-                return notification;
-            }
+        if let Some(notification) = engine.poll_notification()
+            && predicate(&notification)
+        {
+            return notification;
         }
         assert!(
             Instant::now() < deadline,

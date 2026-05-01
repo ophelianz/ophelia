@@ -19,7 +19,7 @@
 
 //! Starts downloads for the engine actor
 //!
-//! Keeps HTTP task setup and HTTP pause data out of `engine.rs`
+//! Keeps HTTP task setup and HTTP pause data out of `actor.rs`
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,7 +28,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::http::{TaskFinalState, TokenBucket, download_task};
+use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
     PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TaskRuntimeUpdate,
@@ -137,21 +137,21 @@ pub(super) fn spawn_task(
                 let gt_ = Arc::clone(&global_throttle);
                 let ru_ = runtime_update_tx.clone();
                 async move {
-                    let final_state = download_task(
+                    let final_state = download_task(DownloadTaskRequest {
                         id,
-                        url_,
-                        dest_,
-                        destination_policy_,
-                        cfg_,
+                        url: url_,
+                        destination: dest_,
+                        destination_policy: destination_policy_,
+                        config: cfg_,
                         progress_tx,
-                        pt_,
-                        ps_,
-                        ds_,
+                        pause_token: pt_,
+                        pause_sink: ps_,
+                        destination_sink: ds_,
                         resume_from,
-                        shared_scheduler_semaphore,
-                        gt_,
-                        ru_,
-                    )
+                        server_semaphore: shared_scheduler_semaphore,
+                        global_throttle: gt_,
+                        runtime_update_tx: ru_,
+                    })
                     .await;
                     let _ = done_tx.send(TaskDone { id, final_state });
                     final_state
