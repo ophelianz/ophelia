@@ -65,14 +65,13 @@ pub struct DownloadTaskRequest {
     pub destination: PathBuf,
     pub destination_policy: DestinationPolicy,
     pub config: HttpDownloadConfig,
-    pub progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     pub pause_token: CancellationToken,
     pub pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
     pub destination_sink: Arc<Mutex<Option<PathBuf>>>,
     pub resume_from: Option<Vec<ChunkSnapshot>>,
     pub server_semaphore: Arc<Semaphore>,
     pub global_throttle: Arc<TokenBucket>,
-    pub runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pub runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
 fn task_state(
@@ -120,11 +119,29 @@ struct ResolveChunksRequest<'a> {
     destination_policy: &'a DestinationPolicy,
     config: &'a HttpDownloadConfig,
     id: DownloadId,
-    progress_tx: &'a mpsc::UnboundedSender<ProgressUpdate>,
-    runtime_update_tx: &'a mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    runtime_update_tx: &'a mpsc::Sender<TaskRuntimeUpdate>,
     destination_sink: &'a Arc<Mutex<Option<PathBuf>>>,
     pause_token: &'a CancellationToken,
     throttle: Arc<Throttle>,
+}
+
+async fn send_progress_update(
+    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    id: DownloadId,
+    status: DownloadStatus,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    speed_bytes_per_sec: u64,
+) {
+    let _ = runtime_update_tx
+        .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+            id,
+            status,
+            downloaded_bytes,
+            total_bytes,
+            speed_bytes_per_sec,
+        }))
+        .await;
 }
 
 async fn resolve_chunks(
@@ -139,26 +156,17 @@ async fn resolve_chunks(
         destination_policy,
         config,
         id,
-        progress_tx,
         runtime_update_tx,
         destination_sink,
         pause_token,
         throttle,
     } = request;
-    let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>| {
-        let _ = progress_tx.send(ProgressUpdate {
-            id,
-            status,
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            speed_bytes_per_sec: 0,
-        });
-    };
 
     match resume_from {
         Some(snapshots) => {
             let Some(snapshot) = RangeResumeSnapshot::from_old_chunks(&snapshots) else {
-                send(DownloadStatus::Error, 0, None);
+                send_progress_update(runtime_update_tx, id, DownloadStatus::Error, 0, None, 0)
+                    .await;
                 return Err(task_state(DownloadStatus::Error, 0, None));
             };
             let total = snapshot.total_bytes();
@@ -167,7 +175,15 @@ async fn resolve_chunks(
             let probe_result = match probe(probe_client, url).await {
                 Ok(result) => result,
                 Err(_) => {
-                    send(DownloadStatus::Error, downloaded, Some(total));
+                    send_progress_update(
+                        runtime_update_tx,
+                        id,
+                        DownloadStatus::Error,
+                        downloaded,
+                        Some(total),
+                        0,
+                    )
+                    .await;
                     return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
                 }
             };
@@ -178,7 +194,15 @@ async fn resolve_chunks(
                     accepts_ranges = probe_result.accepts_ranges,
                     "resume data no longer matches remote range response"
                 );
-                send(DownloadStatus::Error, downloaded, Some(total));
+                send_progress_update(
+                    runtime_update_tx,
+                    id,
+                    DownloadStatus::Error,
+                    downloaded,
+                    Some(total),
+                    0,
+                )
+                .await;
                 return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
             }
 
@@ -188,7 +212,15 @@ async fn resolve_chunks(
             let file = match std::fs::OpenOptions::new().write(true).open(&part_path) {
                 Ok(f) => f,
                 Err(_) => {
-                    send(DownloadStatus::Error, downloaded, Some(total));
+                    send_progress_update(
+                        runtime_update_tx,
+                        id,
+                        DownloadStatus::Error,
+                        downloaded,
+                        Some(total),
+                        0,
+                    )
+                    .await;
                     return Err(task_state(DownloadStatus::Error, downloaded, Some(total)));
                 }
             };
@@ -215,7 +247,8 @@ async fn resolve_chunks(
             let probe_result = match probe(probe_client, url).await {
                 Ok(p) => p,
                 Err(_) => {
-                    send(DownloadStatus::Error, 0, None);
+                    send_progress_update(runtime_update_tx, id, DownloadStatus::Error, 0, None, 0)
+                        .await;
                     return Err(task_state(DownloadStatus::Error, 0, None));
                 }
             };
@@ -230,7 +263,15 @@ async fn resolve_chunks(
                 match destination_policy.resolve_checked(url, probe_result.filename.as_deref()) {
                     Ok(resolved) => resolved,
                     Err(_) => {
-                        send(DownloadStatus::Error, 0, probe_result.content_length);
+                        send_progress_update(
+                            runtime_update_tx,
+                            id,
+                            DownloadStatus::Error,
+                            0,
+                            probe_result.content_length,
+                            0,
+                        )
+                        .await;
                         return Err(task_state(
                             DownloadStatus::Error,
                             0,
@@ -245,10 +286,12 @@ async fn resolve_chunks(
             } = resolved_destination;
             *destination_sink.lock().unwrap() = Some(destination.clone());
             if destination != initial_destination {
-                let _ = runtime_update_tx.send(TaskRuntimeUpdate::DestinationChanged {
-                    id,
-                    destination: destination.clone(),
-                });
+                let _ = runtime_update_tx
+                    .send(TaskRuntimeUpdate::DestinationChanged {
+                        id,
+                        destination: destination.clone(),
+                    })
+                    .await;
             }
             let ordering = config.resolved_ordering_for_destination(&destination);
 
@@ -258,14 +301,18 @@ async fn resolve_chunks(
                     has_content_length = probe_result.content_length.is_some(),
                     "falling back to single stream"
                 );
-                let _ = runtime_update_tx.send(TaskRuntimeUpdate::ControlSupportChanged {
-                    id,
-                    support: single_stream_control_support(),
-                });
-                let _ = runtime_update_tx.send(TaskRuntimeUpdate::ChunkMapStateChanged {
-                    id,
-                    state: crate::engine::TransferChunkMapState::Unsupported,
-                });
+                let _ = runtime_update_tx
+                    .send(TaskRuntimeUpdate::ControlSupportChanged {
+                        id,
+                        support: single_stream_control_support(),
+                    })
+                    .await;
+                let _ = runtime_update_tx
+                    .send(TaskRuntimeUpdate::ChunkMapChanged {
+                        id,
+                        state: crate::engine::TransferChunkMapState::Unsupported,
+                    })
+                    .await;
                 return Err(single_download(SingleDownloadRequest {
                     id,
                     client: Arc::clone(chunk_client),
@@ -276,7 +323,6 @@ async fn resolve_chunks(
                         finalize_strategy,
                     },
                     stall_timeout_secs: config.stall_timeout_secs,
-                    progress_tx: progress_tx.clone(),
                     runtime_update_tx: runtime_update_tx.clone(),
                     pause_token: pause_token.clone(),
                     throttle,
@@ -299,7 +345,15 @@ async fn resolve_chunks(
                         path = %part_path.display(),
                         "part file already exists, another download may be active"
                     );
-                    send(DownloadStatus::Error, 0, Some(total_bytes));
+                    send_progress_update(
+                        runtime_update_tx,
+                        id,
+                        DownloadStatus::Error,
+                        0,
+                        Some(total_bytes),
+                        0,
+                    )
+                    .await;
                     return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
                 Err(error) => {
@@ -308,7 +362,15 @@ async fn resolve_chunks(
                         path = %part_path.display(),
                         "failed to create part file"
                     );
-                    send(DownloadStatus::Error, 0, Some(total_bytes));
+                    send_progress_update(
+                        runtime_update_tx,
+                        id,
+                        DownloadStatus::Error,
+                        0,
+                        Some(total_bytes),
+                        0,
+                    )
+                    .await;
                     return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
                 }
             };
@@ -320,7 +382,15 @@ async fn resolve_chunks(
                     total_bytes,
                     "failed to preallocate part file"
                 );
-                send(DownloadStatus::Error, 0, Some(total_bytes));
+                send_progress_update(
+                    runtime_update_tx,
+                    id,
+                    DownloadStatus::Error,
+                    0,
+                    Some(total_bytes),
+                    0,
+                )
+                .await;
                 return Err(task_state(DownloadStatus::Error, 0, Some(total_bytes)));
             }
 
@@ -418,7 +488,6 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         destination,
         destination_policy,
         config,
-        progress_tx,
         pause_token,
         pause_sink,
         destination_sink,
@@ -456,7 +525,6 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         destination_policy: &destination_policy,
         config: &config,
         id,
-        progress_tx: &progress_tx,
         runtime_update_tx: &runtime_update_tx,
         destination_sink: &destination_sink,
         pause_token: &pause_token,
@@ -522,7 +590,6 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         pause_sink,
         server_semaphore,
         throttle,
-        progress_tx,
         runtime_update_tx,
     })
     .await

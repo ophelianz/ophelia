@@ -57,6 +57,7 @@ const HEALTH_SLOW_FACTOR: f64 = 0.5;
 const HEALTH_EMA_ALPHA: f64 = 0.3;
 const PROGRESS_EMA_ALPHA: f64 = 0.3;
 const PROGRESS_WINDOW_SECS: f64 = 2.0;
+const WORKER_EVENT_CAPACITY: usize = 256;
 
 pub(super) struct RangeDownloadConfig {
     pub(super) id: DownloadId,
@@ -82,8 +83,7 @@ pub(super) struct RangeDownloadConfig {
     pub(super) pause_sink: Arc<std::sync::Mutex<Option<Vec<ChunkSnapshot>>>>,
     pub(super) server_semaphore: Arc<Semaphore>,
     pub(super) throttle: Arc<Throttle>,
-    pub(super) progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    pub(super) runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
 pub(super) async fn run_range_download(config: RangeDownloadConfig) -> super::task::TaskFinalState {
@@ -123,10 +123,9 @@ struct RangeDownload {
     pause_sink: Arc<std::sync::Mutex<Option<Vec<ChunkSnapshot>>>>,
     server_semaphore: Arc<Semaphore>,
     throttle: Arc<Throttle>,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
-    events_tx: mpsc::UnboundedSender<WorkerEvent>,
-    events_rx: mpsc::UnboundedReceiver<WorkerEvent>,
+    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    events_tx: mpsc::Sender<WorkerEvent>,
+    events_rx: mpsc::Receiver<WorkerEvent>,
     workers: JoinSet<()>,
     attempts: HashMap<AttemptId, AttemptControl>,
     retry_counts: HashMap<(u64, u64), u32>,
@@ -187,7 +186,7 @@ impl ProgressSpeed {
 
 impl RangeDownload {
     fn new(config: RangeDownloadConfig) -> Self {
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = mpsc::channel(WORKER_EVENT_CAPACITY);
         let scheduler = scheduler_from_chunks(config.total_bytes, &config.chunks);
         let initial_downloaded = scheduler.downloaded_bytes();
 
@@ -214,7 +213,6 @@ impl RangeDownload {
             pause_sink: config.pause_sink,
             server_semaphore: config.server_semaphore,
             throttle: config.throttle,
-            progress_tx: config.progress_tx,
             runtime_update_tx: config.runtime_update_tx,
             events_tx,
             events_rx,
@@ -236,8 +234,8 @@ impl RangeDownload {
     }
 
     async fn run(mut self) -> super::task::TaskFinalState {
-        self.send_progress(DownloadStatus::Downloading);
-        self.send_chunk_map();
+        self.send_progress(DownloadStatus::Downloading).await;
+        self.send_chunk_map().await;
 
         while !self.should_stop() {
             self.start_ready_attempts();
@@ -255,7 +253,7 @@ impl RangeDownload {
         }
 
         self.stop_workers().await;
-        self.finish()
+        self.finish().await
     }
 
     fn should_stop(&self) -> bool {
@@ -372,7 +370,7 @@ impl RangeDownload {
                 biased;
                 _ = pause_token.cancelled() => {
                     let event = WorkerEvent::Paused { attempt: attempt.id() };
-                    let _ = events.send(event);
+                    let _ = events.send(event).await;
                     return;
                 }
                 result = semaphore.acquire_owned() => {
@@ -405,8 +403,8 @@ impl RangeDownload {
                 self.check_health();
             }
             _ = self.progress_tick.tick() => {
-                self.send_progress(DownloadStatus::Downloading);
-                self.flush_runtime_updates();
+                self.send_progress(DownloadStatus::Downloading).await;
+                self.flush_runtime_updates().await;
             }
             _ = retry_cooldown_sleep(self.retry_cooldown_until), if self.retry_cooldown_until.is_some() => {
                 self.retry_cooldown_until = None;
@@ -570,30 +568,30 @@ impl RangeDownload {
         self.file.take();
     }
 
-    fn finish(mut self) -> super::task::TaskFinalState {
+    async fn finish(mut self) -> super::task::TaskFinalState {
         if self.paused {
             self.save_pause_snapshot();
-            self.flush_runtime_updates();
-            self.send_progress(DownloadStatus::Paused);
+            self.flush_runtime_updates().await;
+            self.send_progress(DownloadStatus::Paused).await;
             return self.task_state(DownloadStatus::Paused);
         }
 
         if self.failed || !self.scheduler.is_complete() {
-            self.flush_runtime_updates();
-            self.send_progress(DownloadStatus::Error);
+            self.flush_runtime_updates().await;
+            self.send_progress(DownloadStatus::Error).await;
             return self.task_state(DownloadStatus::Error);
         }
 
         match finalize_part_file(&self.part_path, &self.destination, self.finalize_strategy) {
             Ok(()) => {
-                self.flush_runtime_updates();
-                self.send_progress(DownloadStatus::Finished);
+                self.flush_runtime_updates().await;
+                self.send_progress(DownloadStatus::Finished).await;
                 self.task_state(DownloadStatus::Finished)
             }
             Err(error) => {
                 tracing::error!(err = %error, "rename failed after range download");
-                self.flush_runtime_updates();
-                self.send_progress(DownloadStatus::Error);
+                self.flush_runtime_updates().await;
+                self.send_progress(DownloadStatus::Error).await;
                 self.task_state(DownloadStatus::Error)
             }
         }
@@ -626,16 +624,19 @@ impl RangeDownload {
         *self.pause_sink.lock().unwrap() = Some(snapshots);
     }
 
-    fn send_progress(&mut self, status: DownloadStatus) {
+    async fn send_progress(&mut self, status: DownloadStatus) {
         let downloaded = self.downloaded_for_status(status);
         let speed = self.speed.sample(status, downloaded);
-        let _ = self.progress_tx.send(ProgressUpdate {
-            id: self.id,
-            status,
-            downloaded_bytes: downloaded,
-            total_bytes: Some(self.total_bytes),
-            speed_bytes_per_sec: speed,
-        });
+        let _ = self
+            .runtime_update_tx
+            .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+                id: self.id,
+                status,
+                downloaded_bytes: downloaded,
+                total_bytes: Some(self.total_bytes),
+                speed_bytes_per_sec: speed,
+            }))
+            .await;
     }
 
     fn downloaded_for_status(&self, status: DownloadStatus) -> u64 {
@@ -646,12 +647,12 @@ impl RangeDownload {
         }
     }
 
-    fn flush_runtime_updates(&mut self) {
-        self.flush_written_bytes();
-        self.send_dirty_chunk_map();
+    async fn flush_runtime_updates(&mut self) {
+        self.flush_written_bytes().await;
+        self.send_dirty_chunk_map().await;
     }
 
-    fn flush_written_bytes(&mut self) {
+    async fn flush_written_bytes(&mut self) {
         if self.pending_written_bytes == 0 {
             return;
         }
@@ -660,19 +661,20 @@ impl RangeDownload {
         self.pending_written_bytes = 0;
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::DownloadBytesWritten { id: self.id, bytes });
+            .send(TaskRuntimeUpdate::DownloadBytesWritten { id: self.id, bytes })
+            .await;
     }
 
-    fn send_dirty_chunk_map(&mut self) {
+    async fn send_dirty_chunk_map(&mut self) {
         if !self.chunk_map_dirty {
             return;
         }
 
         self.chunk_map_dirty = false;
-        self.send_chunk_map();
+        self.send_chunk_map().await;
     }
 
-    fn send_chunk_map(&self) {
+    async fn send_chunk_map(&self) {
         if !self.chunk_map_supported {
             return;
         }
@@ -686,10 +688,11 @@ impl RangeDownload {
         );
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::ChunkMapStateChanged {
+            .send(TaskRuntimeUpdate::ChunkMapChanged {
                 id: self.id,
                 state: TransferChunkMapState::Http(snapshot),
-            });
+            })
+            .await;
     }
 
     fn task_state(&self, status: DownloadStatus) -> super::task::TaskFinalState {

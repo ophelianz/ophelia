@@ -22,11 +22,13 @@ use std::time::Duration;
 use ophelia::engine::destination::{DestinationPolicy, part_path_for};
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::{
-    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineNotification,
+    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineEvent,
     LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
 };
 use ophelia::engine::{CoreConfig, DestinationPolicyConfig};
 use tokio::runtime::Handle;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
     DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
@@ -47,14 +49,14 @@ fn start_engine(
     DownloadEngine::spawn_on(&Handle::current(), config, db_tx, initial_next_id)
 }
 
-async fn wait_for_matching_notification(
+async fn wait_for_matching_event(
     engine: &mut DownloadEngine,
-    mut predicate: impl FnMut(&EngineNotification) -> bool,
-) -> EngineNotification {
+    mut predicate: impl FnMut(&EngineEvent) -> bool,
+) -> EngineEvent {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let notification = engine
-                .next_notification()
+                .next_event()
                 .await
                 .expect("engine notification channel closed");
             if predicate(&notification) {
@@ -72,10 +74,13 @@ async fn wait_for_matching_progress(
 ) -> ophelia::engine::ProgressUpdate {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let update = engine
-                .next_progress()
+            let event = engine
+                .next_event()
                 .await
                 .expect("engine progress channel closed");
+            let EngineEvent::Progress(update) = event else {
+                continue;
+            };
             if predicate(&update) {
                 return update;
             }
@@ -194,24 +199,27 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
 
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine.add(DownloadSpec::http(
-        "https://example.com/file.bin".to_string(),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig::default(),
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            "https://example.com/file.bin".to_string(),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
 
-    engine.pause(id);
-    match wait_for_matching_notification(&mut engine, |notification| {
+    engine.pause(id).await.unwrap();
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::Update(update)
+            EngineEvent::Progress(update)
                 if update.id == id && update.status == DownloadStatus::Paused
         )
     })
     .await
     {
-        EngineNotification::Update(update) => {
+        EngineEvent::Progress(update) => {
             assert_eq!(update.id, id);
             assert_eq!(update.status, DownloadStatus::Paused);
             assert_eq!(update.downloaded_bytes, 0);
@@ -220,17 +228,17 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         other => panic!("expected pause update, got {other:?}"),
     }
 
-    engine.resume(id);
-    match wait_for_matching_notification(&mut engine, |notification| {
+    engine.resume(id).await.unwrap();
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::Update(update)
+            EngineEvent::Progress(update)
                 if update.id == id && update.status == DownloadStatus::Pending
         )
     })
     .await
     {
-        EngineNotification::Update(update) => {
+        EngineEvent::Progress(update) => {
             assert_eq!(update.id, id);
             assert_eq!(update.status, DownloadStatus::Pending);
             assert_eq!(update.downloaded_bytes, 0);
@@ -239,16 +247,16 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         other => panic!("expected pending update, got {other:?}"),
     }
 
-    engine.cancel(id);
-    match wait_for_matching_notification(&mut engine, |notification| {
+    engine.cancel(id).await.unwrap();
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::LiveTransferRemoved { id: removed, .. } if *removed == id
+            EngineEvent::LiveTransferRemoved { id: removed, .. } if *removed == id
         )
     })
     .await
     {
-        EngineNotification::LiveTransferRemoved {
+        EngineEvent::LiveTransferRemoved {
             id: removed,
             action,
             artifact_state,
@@ -260,23 +268,29 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         other => panic!("expected cancelled removal notification, got {other:?}"),
     }
 
-    let id = engine.add(DownloadSpec::http(
-        "https://example.com/file.bin".to_string(),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig::default(),
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            "https://example.com/file.bin".to_string(),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
     std::fs::write(&destination, b"partial").unwrap();
-    engine.delete_artifact(id, destination.clone());
-    match wait_for_matching_notification(&mut engine, |notification| {
+    engine
+        .delete_artifact(id, destination.clone())
+        .await
+        .unwrap();
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::LiveTransferRemoved { id: removed, .. } if *removed == id
+            EngineEvent::LiveTransferRemoved { id: removed, .. } if *removed == id
         )
     })
     .await
     {
-        EngineNotification::LiveTransferRemoved {
+        EngineEvent::LiveTransferRemoved {
             id: removed,
             action,
             artifact_state,
@@ -298,22 +312,25 @@ async fn single_stream_http_emits_runtime_control_support_narrowing() {
     let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine.add(DownloadSpec::http(
-        format!("http://{server}/file.bin"),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig::default(),
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
 
-    match wait_for_matching_notification(&mut engine, |notification| {
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ControlSupportChanged { id: changed, .. } if *changed == id
+            EngineEvent::ControlSupportChanged { id: changed, .. } if *changed == id
         )
     })
     .await
     {
-        EngineNotification::ControlSupportChanged {
+        EngineEvent::ControlSupportChanged {
             id: changed,
             support,
         } => {
@@ -333,6 +350,108 @@ async fn single_stream_http_emits_runtime_control_support_narrowing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn single_stream_http_emits_download_bytes_written_event() {
+    let server = spawn_no_content_length_server(vec![3u8; 4096]);
+
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
+
+    match wait_for_matching_event(&mut engine, |event| {
+        matches!(event, EngineEvent::DownloadBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
+    })
+    .await
+    {
+        EngineEvent::DownloadBytesWritten { id: changed, bytes } => {
+            assert_eq!(changed, id);
+            assert!(bytes > 0);
+        }
+        other => panic!("expected write stats event, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_change_event_arrives_before_finished_progress() {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/file.bin"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-disposition", "attachment; filename=\"server.bin\""),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/file.bin"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-disposition", "attachment; filename=\"server.bin\"")
+                .set_body_bytes(vec![4u8; 2048]),
+        )
+        .mount(&server)
+        .await;
+
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+    let tempdir = tempfile::tempdir().unwrap();
+    let requested_destination = tempdir.path().join("file.bin");
+    let server_destination = tempdir.path().join("server.bin");
+    let destination_config = DestinationPolicyConfig {
+        default_download_dir: tempdir.path().to_path_buf(),
+        ..DestinationPolicyConfig::default()
+    };
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("{}/file.bin", server.uri()),
+            requested_destination.clone(),
+            DestinationPolicy::automatic(&destination_config),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_destination_change = false;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match engine
+                .next_event()
+                .await
+                .expect("engine event channel closed")
+            {
+                EngineEvent::DestinationChanged {
+                    id: changed,
+                    destination,
+                } => {
+                    if changed == id {
+                        assert_eq!(destination, server_destination);
+                        saw_destination_change = true;
+                    }
+                }
+                EngineEvent::Progress(update)
+                    if update.id == id && update.status == DownloadStatus::Finished =>
+                {
+                    assert!(saw_destination_change);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for destination and finish events");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
 
@@ -340,14 +459,17 @@ async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine.add(DownloadSpec::http(
-        format!("http://{server}/file.bin"),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig::default(),
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
 
-    engine.pause(id);
+    engine.pause(id).await.unwrap();
 
     let update = wait_for_matching_progress(&mut engine, |update| {
         update.id == id && update.status == DownloadStatus::Error
@@ -365,21 +487,24 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine.add(DownloadSpec::http(
-        format!("http://{server}/file.bin"),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig {
-            speed_limit_bps: 20_000,
-            write_buffer_size: 1024,
-            ..HttpDownloadConfig::default()
-        },
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig {
+                speed_limit_bps: 20_000,
+                write_buffer_size: 1024,
+                ..HttpDownloadConfig::default()
+            },
+        ))
+        .await
+        .unwrap();
 
-    match wait_for_matching_notification(&mut engine, |notification| {
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id: changed,
                 state: TransferChunkMapState::Loading,
             } if *changed == id
@@ -387,17 +512,17 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     })
     .await
     {
-        EngineNotification::ChunkMapStateChanged {
+        EngineEvent::ChunkMapChanged {
             id: changed,
             state: TransferChunkMapState::Loading,
         } => assert_eq!(changed, id),
         other => panic!("expected loading chunk-map state, got {other:?}"),
     }
 
-    match wait_for_matching_notification(&mut engine, |notification| {
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id: changed,
                 state: TransferChunkMapState::Http(_),
             } if *changed == id
@@ -405,7 +530,7 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     })
     .await
     {
-        EngineNotification::ChunkMapStateChanged {
+        EngineEvent::ChunkMapChanged {
             id: changed,
             state: TransferChunkMapState::Http(snapshot),
         } => {
@@ -415,10 +540,10 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
         other => panic!("expected http chunk-map snapshot, got {other:?}"),
     }
 
-    match wait_for_matching_notification(&mut engine, |notification| {
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id: changed,
                 state: TransferChunkMapState::Unsupported,
             } if *changed == id
@@ -426,7 +551,7 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     })
     .await
     {
-        EngineNotification::ChunkMapStateChanged {
+        EngineEvent::ChunkMapChanged {
             id: changed,
             state: TransferChunkMapState::Unsupported,
         } => assert_eq!(changed, id),
@@ -442,21 +567,24 @@ async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine.add(DownloadSpec::http(
-        format!("http://{server}/file.bin"),
-        destination.clone(),
-        exact_destination_policy(&destination),
-        HttpDownloadConfig {
-            speed_limit_bps: 20_000,
-            write_buffer_size: 1024,
-            ..HttpDownloadConfig::default()
-        },
-    ));
+    let id = engine
+        .add(DownloadSpec::http(
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig {
+                speed_limit_bps: 20_000,
+                write_buffer_size: 1024,
+                ..HttpDownloadConfig::default()
+            },
+        ))
+        .await
+        .unwrap();
 
-    let _ = wait_for_matching_notification(&mut engine, |notification| {
+    let _ = wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id: changed,
                 state: TransferChunkMapState::Http(_),
             } if *changed == id
@@ -464,11 +592,11 @@ async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     })
     .await;
 
-    engine.pause(id);
-    match wait_for_matching_notification(&mut engine, |notification| {
+    engine.pause(id).await.unwrap();
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id: changed,
                 state: TransferChunkMapState::Unsupported,
             } if *changed == id
@@ -476,7 +604,7 @@ async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     })
     .await
     {
-        EngineNotification::ChunkMapStateChanged {
+        EngineEvent::ChunkMapChanged {
             id: changed,
             state: TransferChunkMapState::Unsupported,
         } => assert_eq!(changed, id),
@@ -497,31 +625,37 @@ async fn pausing_active_http_starts_next_queued_download() {
     let first_destination = tempdir.path().join("first.bin");
     let second_destination = tempdir.path().join("second.bin");
 
-    let first_id = engine.add(DownloadSpec::http(
-        format!("http://{first_server}/first.bin"),
-        first_destination.clone(),
-        exact_destination_policy(&first_destination),
-        HttpDownloadConfig {
-            speed_limit_bps: 20_000,
-            write_buffer_size: 1024,
-            ..HttpDownloadConfig::default()
-        },
-    ));
-    let second_id = engine.add(DownloadSpec::http(
-        format!("http://{second_server}/second.bin"),
-        second_destination.clone(),
-        exact_destination_policy(&second_destination),
-        HttpDownloadConfig {
-            speed_limit_bps: 20_000,
-            write_buffer_size: 1024,
-            ..HttpDownloadConfig::default()
-        },
-    ));
+    let first_id = engine
+        .add(DownloadSpec::http(
+            format!("http://{first_server}/first.bin"),
+            first_destination.clone(),
+            exact_destination_policy(&first_destination),
+            HttpDownloadConfig {
+                speed_limit_bps: 20_000,
+                write_buffer_size: 1024,
+                ..HttpDownloadConfig::default()
+            },
+        ))
+        .await
+        .unwrap();
+    let second_id = engine
+        .add(DownloadSpec::http(
+            format!("http://{second_server}/second.bin"),
+            second_destination.clone(),
+            exact_destination_policy(&second_destination),
+            HttpDownloadConfig {
+                speed_limit_bps: 20_000,
+                write_buffer_size: 1024,
+                ..HttpDownloadConfig::default()
+            },
+        ))
+        .await
+        .unwrap();
 
-    let _ = wait_for_matching_notification(&mut engine, |notification| {
+    let _ = wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Http(_),
             } if *id == first_id
@@ -529,12 +663,12 @@ async fn pausing_active_http_starts_next_queued_download() {
     })
     .await;
 
-    engine.pause(first_id);
+    engine.pause(first_id).await.unwrap();
 
-    match wait_for_matching_notification(&mut engine, |notification| {
+    match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
-            EngineNotification::ChunkMapStateChanged {
+            EngineEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Loading,
             } if *id == second_id
@@ -542,7 +676,7 @@ async fn pausing_active_http_starts_next_queued_download() {
     })
     .await
     {
-        EngineNotification::ChunkMapStateChanged {
+        EngineEvent::ChunkMapChanged {
             id,
             state: TransferChunkMapState::Loading,
         } => assert_eq!(id, second_id),
@@ -563,16 +697,19 @@ async fn restored_http_without_resume_data_discards_stale_part_file_before_resta
     std::fs::write(&part_path, b"stale partial bytes").unwrap();
 
     let id = DownloadId(77);
-    engine.restore(RestoredDownload::http(
-        id,
-        format!("http://{server}/file.bin"),
-        destination.clone(),
-        &DestinationPolicyConfig::default(),
-        HttpDownloadConfig::default(),
-        None,
-    ));
+    engine
+        .restore(RestoredDownload::http(
+            id,
+            format!("http://{server}/file.bin"),
+            destination.clone(),
+            &DestinationPolicyConfig::default(),
+            HttpDownloadConfig::default(),
+            None,
+        ))
+        .await
+        .unwrap();
 
-    engine.resume(id);
+    engine.resume(id).await.unwrap();
 
     let update = wait_for_matching_progress(&mut engine, |update| {
         update.id == id && update.status == DownloadStatus::Finished

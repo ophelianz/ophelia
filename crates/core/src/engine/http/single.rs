@@ -55,10 +55,28 @@ pub(super) struct SingleDownloadRequest {
     pub(super) url: String,
     pub(super) resolved_destination: ResolvedDestination,
     pub(super) stall_timeout_secs: u64,
-    pub(super) progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    pub(super) runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
     pub(super) pause_token: CancellationToken,
     pub(super) throttle: Arc<Throttle>,
+}
+
+async fn send_progress(
+    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    id: DownloadId,
+    status: DownloadStatus,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    speed_bytes_per_sec: u64,
+) {
+    let _ = runtime_update_tx
+        .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+            id,
+            status,
+            downloaded_bytes,
+            total_bytes,
+            speed_bytes_per_sec,
+        }))
+        .await;
 }
 
 pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
@@ -68,7 +86,6 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
         url,
         resolved_destination,
         stall_timeout_secs,
-        progress_tx,
         runtime_update_tx,
         pause_token,
         throttle,
@@ -80,40 +97,30 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
     } = resolved_destination;
     let stall_timeout = Duration::from_secs(stall_timeout_secs);
 
-    let send = |status: DownloadStatus, downloaded: u64, total: Option<u64>, speed: u64| {
-        let _ = progress_tx.send(ProgressUpdate {
-            id,
-            status,
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-            speed_bytes_per_sec: speed,
-        });
-    };
-
     let response = tokio::select! {
         biased;
         _ = pause_token.cancelled() => {
-            send(DownloadStatus::Error, 0, None, 0);
+            send_progress(&runtime_update_tx, id, DownloadStatus::Error, 0, None, 0).await;
             return task_state(DownloadStatus::Error, 0, None);
         }
         result = client.get(&url).send() => match result {
             Ok(r) => r,
             Err(_) => {
-                send(DownloadStatus::Error, 0, None, 0);
+                send_progress(&runtime_update_tx, id, DownloadStatus::Error, 0, None, 0).await;
                 return task_state(DownloadStatus::Error, 0, None);
             }
         }
     };
     if !response.status().is_success() {
         tracing::warn!(status = %response.status(), "single-stream request failed");
-        send(DownloadStatus::Error, 0, None, 0);
+        send_progress(&runtime_update_tx, id, DownloadStatus::Error, 0, None, 0).await;
         return task_state(DownloadStatus::Error, 0, None);
     }
 
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(f) => f,
         Err(_) => {
-            send(DownloadStatus::Error, 0, None, 0);
+            send_progress(&runtime_update_tx, id, DownloadStatus::Error, 0, None, 0).await;
             return task_state(DownloadStatus::Error, 0, None);
         }
     };
@@ -124,41 +131,75 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
     let mut window_start = Instant::now();
     let mut window_bytes: u64 = 0;
 
-    send(DownloadStatus::Downloading, 0, None, 0);
+    send_progress(
+        &runtime_update_tx,
+        id,
+        DownloadStatus::Downloading,
+        0,
+        None,
+        0,
+    )
+    .await;
 
     loop {
         let result = tokio::select! {
             biased;
             _ = pause_token.cancelled() => {
-                send(DownloadStatus::Error, downloaded, None, 0);
+                send_progress(&runtime_update_tx, id, DownloadStatus::Error, downloaded, None, 0).await;
                 return task_state(DownloadStatus::Error, downloaded, None);
             }
             result = tokio::time::timeout(stall_timeout, stream.next()) => result,
         };
         let Ok(maybe) = result else {
-            send(DownloadStatus::Error, downloaded, None, 0);
+            send_progress(
+                &runtime_update_tx,
+                id,
+                DownloadStatus::Error,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
             return task_state(DownloadStatus::Error, downloaded, None);
         };
         let Some(item) = maybe else { break };
         let Ok(chunk) = item else {
-            send(DownloadStatus::Error, downloaded, None, 0);
+            send_progress(
+                &runtime_update_tx,
+                id,
+                DownloadStatus::Error,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
             return task_state(DownloadStatus::Error, downloaded, None);
         };
 
         if file.write_all(&chunk).await.is_err() {
-            send(DownloadStatus::Error, downloaded, None, 0);
+            send_progress(
+                &runtime_update_tx,
+                id,
+                DownloadStatus::Error,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
             return task_state(DownloadStatus::Error, downloaded, None);
         }
-        let _ = runtime_update_tx.send(TaskRuntimeUpdate::DownloadBytesWritten {
-            id,
-            bytes: chunk.len() as u64,
-        });
+        let _ = runtime_update_tx
+            .send(TaskRuntimeUpdate::DownloadBytesWritten {
+                id,
+                bytes: chunk.len() as u64,
+            })
+            .await;
         let wait = throttle.consume(chunk.len() as u64);
         if !wait.is_zero() {
             tokio::select! {
                 biased;
                 _ = pause_token.cancelled() => {
-                    send(DownloadStatus::Error, downloaded, None, 0);
+                    send_progress(&runtime_update_tx, id, DownloadStatus::Error, downloaded, None, 0).await;
                     return task_state(DownloadStatus::Error, downloaded, None);
                 }
                 _ = tokio::time::sleep(wait) => {}
@@ -173,27 +214,54 @@ pub async fn single_download(request: SingleDownloadRequest) -> TaskFinalState {
             window_bytes = 0;
             window_start = Instant::now();
         }
-        send(
+        send_progress(
+            &runtime_update_tx,
+            id,
             DownloadStatus::Downloading,
             downloaded,
             None,
             ema_speed as u64,
-        );
+        )
+        .await;
     }
 
     if file.flush().await.is_err() {
-        send(DownloadStatus::Error, downloaded, None, 0);
+        send_progress(
+            &runtime_update_tx,
+            id,
+            DownloadStatus::Error,
+            downloaded,
+            None,
+            0,
+        )
+        .await;
         return task_state(DownloadStatus::Error, downloaded, None);
     }
     drop(file);
     match finalize_part_file(&part_path, &destination, finalize_strategy) {
         Ok(()) => {
-            send(DownloadStatus::Finished, downloaded, None, 0);
+            send_progress(
+                &runtime_update_tx,
+                id,
+                DownloadStatus::Finished,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
             task_state(DownloadStatus::Finished, downloaded, None)
         }
         Err(e) => {
             tracing::error!(err = %e, "rename failed after single download");
-            send(DownloadStatus::Error, downloaded, None, 0);
+            send_progress(
+                &runtime_update_tx,
+                id,
+                DownloadStatus::Error,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
             task_state(DownloadStatus::Error, downloaded, None)
         }
     }

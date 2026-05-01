@@ -32,8 +32,7 @@ use crate::config::CoreConfig;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadControlAction, DownloadId, DownloadSource, DownloadSpec, HttpResumeData,
-    PersistedDownloadSource, ProgressUpdate, ProviderResumeData, TaskRuntimeUpdate,
-    TransferControlSupport,
+    PersistedDownloadSource, ProviderResumeData, TaskRuntimeUpdate, TransferControlSupport,
 };
 
 pub(super) struct TaskDone {
@@ -64,7 +63,7 @@ pub(super) struct ProviderCapabilities {
 pub(super) struct ProviderRuntimeContext {
     pub(super) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
     pub(super) global_throttle: Arc<TokenBucket>,
-    pub(super) runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
 pub(super) enum TaskPauseSink {
@@ -105,8 +104,7 @@ pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &CoreConfig) ->
 pub(super) fn spawn_task(
     id: DownloadId,
     spec: &DownloadSpec,
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    done_tx: mpsc::UnboundedSender<TaskDone>,
+    done_tx: mpsc::Sender<TaskDone>,
     pause_token: CancellationToken,
     resume_data: Option<ProviderResumeData>,
     runtime: ProviderRuntimeContext,
@@ -143,7 +141,6 @@ pub(super) fn spawn_task(
                         destination: dest_,
                         destination_policy: destination_policy_,
                         config: cfg_,
-                        progress_tx,
                         pause_token: pt_,
                         pause_sink: ps_,
                         destination_sink: ds_,
@@ -153,7 +150,7 @@ pub(super) fn spawn_task(
                         runtime_update_tx: ru_,
                     })
                     .await;
-                    let _ = done_tx.send(TaskDone { id, final_state });
+                    let _ = done_tx.send(TaskDone { id, final_state }).await;
                     final_state
                 }
             });

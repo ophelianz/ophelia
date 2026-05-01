@@ -49,7 +49,7 @@ pub(super) struct RangeWorkerConfig {
     pub(super) health_retry_token: CancellationToken,
     pub(super) hedge_lost_token: CancellationToken,
     pub(super) throttle: Arc<Throttle>,
-    pub(super) events: mpsc::UnboundedSender<WorkerEvent>,
+    pub(super) events: mpsc::Sender<WorkerEvent>,
 }
 
 pub(super) async fn run_range_worker(config: RangeWorkerConfig) {
@@ -59,7 +59,8 @@ pub(super) async fn run_range_worker(config: RangeWorkerConfig) {
             WorkerEvent::Finished {
                 attempt: config.attempt.id(),
             },
-        );
+        )
+        .await;
         return;
     };
 
@@ -69,7 +70,8 @@ pub(super) async fn run_range_worker(config: RangeWorkerConfig) {
             WorkerEvent::Finished {
                 attempt: config.attempt.id(),
             },
-        );
+        )
+        .await;
         return;
     };
 
@@ -116,7 +118,7 @@ impl RangeWorker {
         };
 
         if let Some(failure) = response_failure(&response, self.request_range) {
-            self.fail(failure);
+            self.fail(failure).await;
             return;
         }
 
@@ -133,21 +135,21 @@ impl RangeWorker {
         tokio::select! {
             biased;
             _ = self.config.pause_token.cancelled() => {
-                self.report_signal(WorkerSignal::Pause);
+                self.report_signal(WorkerSignal::Pause).await;
                 None
             }
             _ = self.config.hedge_lost_token.cancelled() => {
-                self.report_signal(WorkerSignal::HedgeLost);
+                self.report_signal(WorkerSignal::HedgeLost).await;
                 None
             }
             _ = self.config.health_retry_token.cancelled() => {
-                self.report_signal(WorkerSignal::HealthRetry);
+                self.report_signal(WorkerSignal::HealthRetry).await;
                 None
             }
             result = self.config.client
                 .get(&self.config.url)
                 .header("Range", range_header)
-                .send() => self.request_result(result),
+                .send() => self.request_result(result).await,
         }
     }
 
@@ -158,21 +160,21 @@ impl RangeWorker {
             let read = tokio::select! {
                 biased;
                 _ = self.config.pause_token.cancelled() => {
-                    self.stop_after_flush(WorkerSignal::Pause);
+                    self.stop_after_flush(WorkerSignal::Pause).await;
                     return;
                 }
                 _ = self.config.hedge_lost_token.cancelled() => {
-                    self.stop_after_flush(WorkerSignal::HedgeLost);
+                    self.stop_after_flush(WorkerSignal::HedgeLost).await;
                     return;
                 }
                 _ = self.config.health_retry_token.cancelled() => {
-                    self.stop_after_flush(WorkerSignal::HealthRetry);
+                    self.stop_after_flush(WorkerSignal::HealthRetry).await;
                     return;
                 }
                 result = tokio::time::timeout(self.config.stall_timeout, stream.next()) => result,
             };
 
-            let should_stop = match self.read_outcome(read) {
+            let should_stop = match self.read_outcome(read).await {
                 ReadOutcome::Bytes(bytes) => self.handle_bytes(&bytes).await,
                 ReadOutcome::EndOfBody => break,
                 ReadOutcome::Done => return,
@@ -182,39 +184,39 @@ impl RangeWorker {
             }
         }
 
-        self.finish_after_body();
+        self.finish_after_body().await;
     }
 
     async fn handle_bytes(&mut self, bytes: &[u8]) -> bool {
-        self.data_received(bytes.len());
+        self.data_received(bytes.len()).await;
         self.accept_bytes(bytes).await
     }
 
-    fn request_result(
+    async fn request_result(
         &self,
         result: Result<reqwest::Response, reqwest::Error>,
     ) -> Option<reqwest::Response> {
         match result {
             Ok(response) => Some(response),
             Err(error) => {
-                self.fail(request_error_failure(&error));
+                self.fail(request_error_failure(&error)).await;
                 None
             }
         }
     }
 
-    fn read_outcome<T>(
+    async fn read_outcome<T>(
         &self,
         read: Result<Option<Result<T, reqwest::Error>>, tokio::time::error::Elapsed>,
     ) -> ReadOutcome<T> {
         match read {
             Err(_elapsed) => {
-                self.fail(WorkerFailure::Timeout);
+                self.fail(WorkerFailure::Timeout).await;
                 ReadOutcome::Done
             }
             Ok(None) => ReadOutcome::EndOfBody,
             Ok(Some(Err(error))) => {
-                self.fail(request_error_failure(&error));
+                self.fail(request_error_failure(&error)).await;
                 ReadOutcome::Done
             }
             Ok(Some(Ok(bytes))) => ReadOutcome::Bytes(bytes),
@@ -225,11 +227,12 @@ impl RangeWorker {
         match self.append_bytes(bytes) {
             AppendOutcome::Accepted => {}
             AppendOutcome::ReachedStop => {
-                self.finish_after_flush();
+                self.finish_after_flush().await;
                 return true;
             }
             AppendOutcome::BadResponse => {
-                self.fail(WorkerFailure::BadRangeResponse { status: 206 });
+                self.fail(WorkerFailure::BadRangeResponse { status: 206 })
+                    .await;
                 return true;
             }
         }
@@ -239,7 +242,7 @@ impl RangeWorker {
             return true;
         }
 
-        self.buffer.len() >= self.flush_size && self.flush_buffer().is_err()
+        self.buffer.len() >= self.flush_size && self.flush_buffer().await.is_err()
     }
 
     fn append_bytes(&mut self, bytes: &[u8]) -> AppendOutcome {
@@ -256,20 +259,20 @@ impl RangeWorker {
         tokio::select! {
             biased;
             _ = self.config.pause_token.cancelled() => {
-                self.stop_after_flush(WorkerSignal::Pause);
+                self.stop_after_flush(WorkerSignal::Pause).await;
                 true
             }
             _ = self.config.hedge_lost_token.cancelled() => {
-                self.stop_after_flush(WorkerSignal::HedgeLost);
+                self.stop_after_flush(WorkerSignal::HedgeLost).await;
                 true
             }
             _ = self.config.health_retry_token.cancelled() => {
-                self.stop_after_flush(WorkerSignal::HealthRetry);
+                self.stop_after_flush(WorkerSignal::HealthRetry).await;
                 true
             }
             _ = tokio::time::sleep(wait) => {
                 if self.buffer_has_reached_live_stop() {
-                    self.finish_after_flush();
+                    self.finish_after_flush().await;
                     true
                 } else {
                     false
@@ -278,27 +281,28 @@ impl RangeWorker {
         }
     }
 
-    fn finish_after_body(&mut self) {
-        if self.flush_buffer().is_err() {
+    async fn finish_after_body(&mut self) {
+        if self.flush_buffer().await.is_err() {
             return;
         }
 
         if self.offset >= self.live_stop() {
-            self.finish();
+            self.finish().await;
         } else {
-            self.fail(WorkerFailure::BadRangeResponse { status: 206 });
+            self.fail(WorkerFailure::BadRangeResponse { status: 206 })
+                .await;
         }
     }
 
-    fn finish_after_flush(&mut self) {
-        if self.flush_buffer().is_ok() {
-            self.finish();
+    async fn finish_after_flush(&mut self) {
+        if self.flush_buffer().await.is_ok() {
+            self.finish().await;
         }
     }
 
-    fn stop_after_flush(&mut self, signal: WorkerSignal) {
-        if self.flush_buffer().is_ok() {
-            self.report_signal(signal);
+    async fn stop_after_flush(&mut self, signal: WorkerSignal) {
+        if self.flush_buffer().await.is_ok() {
+            self.report_signal(signal).await;
         }
     }
 
@@ -310,7 +314,7 @@ impl RangeWorker {
         current_stop_at(self.request_range, self.config.live_stop_at.as_ref())
     }
 
-    fn flush_buffer(&mut self) -> Result<(), ()> {
+    async fn flush_buffer(&mut self) -> Result<(), ()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
@@ -325,7 +329,7 @@ impl RangeWorker {
         }
 
         if let Err(error) = write_at(&self.config.file, &self.buffer[..writable_len], self.offset) {
-            self.fail(io_failure(error));
+            self.fail(io_failure(error)).await;
             return Err(());
         }
 
@@ -333,7 +337,8 @@ impl RangeWorker {
             self.event(WorkerEvent::BytesWritten {
                 attempt: self.config.attempt.id(),
                 written,
-            });
+            })
+            .await;
         }
 
         self.offset += writable_len as u64;
@@ -341,35 +346,40 @@ impl RangeWorker {
         Ok(())
     }
 
-    fn finish(&self) {
+    async fn finish(&self) {
         self.event(WorkerEvent::Finished {
             attempt: self.config.attempt.id(),
-        });
+        })
+        .await;
     }
 
-    fn data_received(&self, bytes: usize) {
+    async fn data_received(&self, bytes: usize) {
         self.event(WorkerEvent::DataReceived {
             attempt: self.config.attempt.id(),
             bytes: bytes as u64,
-        });
+        })
+        .await;
     }
 
-    fn fail(&self, failure: WorkerFailure) {
-        send_failure(&self.config.events, self.config.attempt, failure);
+    async fn fail(&self, failure: WorkerFailure) {
+        send_failure(&self.config.events, self.config.attempt, failure).await;
     }
 
-    fn report_signal(&self, signal: WorkerSignal) {
+    async fn report_signal(&self, signal: WorkerSignal) {
         match signal {
-            WorkerSignal::Pause => self.event(WorkerEvent::Paused {
-                attempt: self.config.attempt.id(),
-            }),
-            WorkerSignal::HedgeLost => self.fail(WorkerFailure::HedgeLost),
-            WorkerSignal::HealthRetry => self.fail(WorkerFailure::HealthRetry),
+            WorkerSignal::Pause => {
+                self.event(WorkerEvent::Paused {
+                    attempt: self.config.attempt.id(),
+                })
+                .await
+            }
+            WorkerSignal::HedgeLost => self.fail(WorkerFailure::HedgeLost).await,
+            WorkerSignal::HealthRetry => self.fail(WorkerFailure::HealthRetry).await,
         }
     }
 
-    fn event(&self, event: WorkerEvent) {
-        send_event(&self.config.events, event);
+    async fn event(&self, event: WorkerEvent) {
+        send_event(&self.config.events, event).await;
     }
 }
 
@@ -465,8 +475,8 @@ fn parse_content_range(value: &str) -> Option<(u64, u64)> {
     Some((start.trim().parse().ok()?, end.trim().parse().ok()?))
 }
 
-fn send_failure(
-    events: &mpsc::UnboundedSender<WorkerEvent>,
+async fn send_failure(
+    events: &mpsc::Sender<WorkerEvent>,
     attempt: ActiveAttempt,
     failure: WorkerFailure,
 ) {
@@ -476,11 +486,12 @@ fn send_failure(
             attempt: attempt.id(),
             failure,
         },
-    );
+    )
+    .await;
 }
 
-fn send_event(events: &mpsc::UnboundedSender<WorkerEvent>, event: WorkerEvent) {
-    let _ = events.send(event);
+async fn send_event(events: &mpsc::Sender<WorkerEvent>, event: WorkerEvent) {
+    let _ = events.send(event).await;
 }
 
 fn request_error_failure(error: &reqwest::Error) -> WorkerFailure {
@@ -582,7 +593,7 @@ mod tests {
         (dir, Arc::new(file))
     }
 
-    fn events_from(rx: &mut mpsc::UnboundedReceiver<WorkerEvent>) -> Vec<WorkerEvent> {
+    fn events_from(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<WorkerEvent> {
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
             events.push(event);
@@ -593,7 +604,7 @@ mod tests {
     fn worker_config(
         url: String,
         file: Arc<std::fs::File>,
-        events: mpsc::UnboundedSender<WorkerEvent>,
+        events: mpsc::Sender<WorkerEvent>,
     ) -> RangeWorkerConfig {
         let mut scheduler = RangeScheduler::new(8, [range(0, 8)]);
         let attempt = scheduler.start_next_attempt().unwrap();
@@ -635,16 +646,16 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
-    #[test]
-    fn flush_buffer_trims_to_live_stop_before_write() {
+    #[tokio::test]
+    async fn flush_buffer_trims_to_live_stop_before_write() {
         let (dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let config = worker_config("http://example.invalid/file.bin".to_string(), file, tx);
         config.live_stop_at.store(4, Ordering::Release);
         let mut worker = RangeWorker::new(config, range(0, 8));
         worker.buffer = b"abcdefgh".to_vec();
 
-        worker.flush_buffer().unwrap();
+        worker.flush_buffer().await.unwrap();
 
         assert_eq!(worker.offset, 4);
         assert!(worker.buffer.is_empty());
@@ -679,7 +690,7 @@ mod tests {
             .await;
 
         let (dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -719,7 +730,7 @@ mod tests {
             .await;
 
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -750,7 +761,7 @@ mod tests {
             .await;
 
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -777,7 +788,7 @@ mod tests {
             .await;
 
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -808,7 +819,7 @@ mod tests {
             .await;
 
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -840,7 +851,7 @@ mod tests {
             .await;
 
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         run_range_worker(worker_config(
             format!("{}/file.bin", server.uri()),
             Arc::clone(&file),
@@ -862,7 +873,7 @@ mod tests {
     async fn range_worker_reports_pause_before_request() {
         let server = MockServer::start().await;
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
         config.pause_token.cancel();
 
@@ -878,7 +889,7 @@ mod tests {
     async fn range_worker_reports_hedge_lost_before_request() {
         let server = MockServer::start().await;
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
         config.hedge_lost_token.cancel();
 
@@ -897,7 +908,7 @@ mod tests {
     async fn range_worker_reports_health_retry_before_request() {
         let server = MockServer::start().await;
         let (_dir, file) = test_file();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(256);
         let config = worker_config(format!("{}/file.bin", server.uri()), Arc::clone(&file), tx);
         config.health_retry_token.cancel();
 
