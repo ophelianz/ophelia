@@ -22,8 +22,9 @@ use std::time::Duration;
 use ophelia::engine::destination::{DestinationPolicy, part_path_for};
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::{
-    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineEvent,
-    LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
+    ArtifactState, DownloadEngine, DownloadId, DownloadSpec, DownloadStatus, EngineError,
+    EngineEvent, LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState,
+    TransferControlSupport,
 };
 use ophelia::engine::{CoreConfig, DestinationPolicyConfig};
 use tokio::runtime::Handle;
@@ -278,10 +279,7 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         .await
         .unwrap();
     std::fs::write(&destination, b"partial").unwrap();
-    engine
-        .delete_artifact(id, destination.clone())
-        .await
-        .unwrap();
+    engine.delete_artifact(id).await.unwrap();
     match wait_for_matching_event(&mut engine, |notification| {
         matches!(
             notification,
@@ -302,6 +300,99 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
         }
         other => panic!("expected removed notification, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn add_emits_transfer_snapshot_for_frontends() {
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = start_engine(engine_config(0), db_tx, 1);
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
+    let id = engine
+        .add(DownloadSpec::http(
+            "https://example.com/file.bin".to_string(),
+            destination.clone(),
+            exact_destination_policy(&destination),
+            HttpDownloadConfig::default(),
+        ))
+        .await
+        .unwrap();
+
+    match wait_for_matching_event(
+        &mut engine,
+        |event| matches!(event, EngineEvent::TransferAdded { snapshot } if snapshot.id == id),
+    )
+    .await
+    {
+        EngineEvent::TransferAdded { snapshot } => {
+            assert_eq!(snapshot.id, id);
+            assert_eq!(snapshot.provider_kind, "http");
+            assert_eq!(snapshot.source_label, "https://example.com/file.bin");
+            assert_eq!(snapshot.destination, destination);
+            assert_eq!(snapshot.status, DownloadStatus::Pending);
+            assert_eq!(snapshot.downloaded_bytes, 0);
+            assert_eq!(snapshot.total_bytes, None);
+            assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Unsupported);
+        }
+        other => panic!("expected transfer-added event, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_emits_transfer_snapshot_for_frontends() {
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let mut engine = start_engine(CoreConfig::default(), db_tx, 1);
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("file.bin");
+    let id = DownloadId(77);
+    engine
+        .restore(RestoredDownload::http(
+            id,
+            "https://example.com/file.bin".to_string(),
+            destination.clone(),
+            &DestinationPolicyConfig::default(),
+            HttpDownloadConfig::default(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    match wait_for_matching_event(
+        &mut engine,
+        |event| matches!(event, EngineEvent::TransferRestored { snapshot } if snapshot.id == id),
+    )
+    .await
+    {
+        EngineEvent::TransferRestored { snapshot } => {
+            assert_eq!(snapshot.id, id);
+            assert_eq!(snapshot.destination, destination);
+            assert_eq!(snapshot.status, DownloadStatus::Paused);
+            assert_eq!(snapshot.downloaded_bytes, 0);
+            assert_eq!(snapshot.total_bytes, None);
+        }
+        other => panic!("expected transfer-restored event, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_delete_rejects_id_and_leaves_caller_path_alone() {
+    let (db_tx, _db_rx) = std::sync::mpsc::channel();
+    let engine = start_engine(CoreConfig::default(), db_tx, 1);
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let destination = tempdir.path().join("caller-owned.bin");
+    std::fs::write(&destination, b"do not delete").unwrap();
+
+    let err = engine.delete_artifact(DownloadId(999)).await.unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::NotFound {
+            id: DownloadId(999)
+        }
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"do not delete");
 }
 
 #[tokio::test(flavor = "multi_thread")]

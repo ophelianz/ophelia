@@ -25,14 +25,12 @@
 //!
 //! Queue flow:
 //!   Add    → if tasks < max_concurrent, spawn immediately; else push to queue
-//!   Done   → done_rx receives the task's final state; remove from tasks,
-//!            save final state, advance queue
-//!   Pause  → cancel the task's CancellationToken and await the handle
-//!            If it returns paused with resume data, store it in `paused`
+//!   Done   → the task sends `TaskRuntimeUpdate::Done` after its last update
+//!   Pause  → cancel the task's CancellationToken and let the actor keep draining task updates
+//!            If the task reports paused with resume data, store it in `paused`
 //!            If it is still queued, move it directly to `paused`
 //!   Resume → if at capacity, push to front of queue; else spawn immediately
-//!   Cancel → abort the handle (prevents done_tx from firing), drain from queue,
-//!            then advance queue manually since done_rx won't fire
+//!   Cancel → abort the handle, drain from queue, then advance queue manually
 
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
@@ -40,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -48,46 +46,55 @@ use crate::config::CoreConfig;
 use crate::engine::destination::part_path_for;
 use crate::engine::http::TokenBucket;
 use crate::engine::provider::{
-    self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskDone,
-    TaskPauseSink,
+    self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskPauseSink,
 };
 use crate::engine::{
     ArtifactState, DbEvent, DownloadControlAction, DownloadId, DownloadSpec, DownloadStatus,
     EngineError, EngineEvent, LiveTransferRemovalAction, ProgressUpdate, ProviderResumeData,
     RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState, TransferControlSupport,
+    TransferSnapshot,
 };
 
 const ENGINE_COMMAND_CAPACITY: usize = 64;
 const ENGINE_EVENT_CAPACITY: usize = 512;
-const TASK_DONE_CAPACITY: usize = 64;
 const TASK_RUNTIME_UPDATE_CAPACITY: usize = 256;
+
+type CommandReply<T> = oneshot::Sender<Result<T, EngineError>>;
 
 #[allow(dead_code)]
 enum EngineCommand {
     Add {
         id: DownloadId,
         spec: DownloadSpec,
+        reply: CommandReply<DownloadId>,
     },
     Pause {
         id: DownloadId,
+        reply: CommandReply<()>,
     },
     Resume {
         id: DownloadId,
+        reply: CommandReply<()>,
     },
     Cancel {
         id: DownloadId,
+        reply: CommandReply<()>,
     },
     DeleteArtifact {
         id: DownloadId,
-        destination: PathBuf,
+        reply: CommandReply<()>,
     },
     Restore {
         download: RestoredDownload,
+        reply: CommandReply<()>,
     },
     UpdateConfig {
         config: CoreConfig,
+        reply: CommandReply<()>,
     },
-    Shutdown,
+    Shutdown {
+        reply: Option<CommandReply<()>>,
+    },
 }
 
 // --- per-task bookkeeping ------------------------------------------------
@@ -98,12 +105,14 @@ struct TaskEntry {
     /// Fired on soft pause
     /// Hard cancel uses handle.abort()
     pause_token: CancellationToken,
-    /// Written by the task on pause, read by the engine after awaiting the handle
+    /// Written by the task on pause, read when TaskRuntimeUpdate::Done arrives
     pause_sink: TaskPauseSink,
     /// Updated if the server suggests a better filename
     destination_sink: TaskDestinationSink,
     /// May narrow after the task starts
     control_support: TransferControlSupport,
+    /// Pause finishes through TaskRuntimeUpdate::Done so the actor can keep draining channels
+    pause_requested: bool,
     /// Kept for resume
     spec: DownloadSpec,
 }
@@ -140,16 +149,12 @@ impl DownloadEngine {
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(ENGINE_COMMAND_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(ENGINE_EVENT_CAPACITY);
-        let (done_tx, done_rx) = mpsc::channel::<TaskDone>(TASK_DONE_CAPACITY);
         let (runtime_update_tx, runtime_update_rx) =
             mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
 
         let actor = runtime.spawn(
-            EngineActor::new(event_tx, config, db_tx, done_tx, runtime_update_tx).run(
-                cmd_rx,
-                done_rx,
-                runtime_update_rx,
-            ),
+            EngineActor::new(event_tx, config, db_tx, runtime_update_tx)
+                .run(cmd_rx, runtime_update_rx),
         );
 
         Self {
@@ -163,43 +168,47 @@ impl DownloadEngine {
     /// Add a saved download to the paused map
     /// The user must resume it explicitly
     pub async fn restore(&self, download: RestoredDownload) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::Restore { download }).await
+        self.command_reply(|reply| EngineCommand::Restore { download, reply })
+            .await
     }
 
     pub async fn add(&mut self, spec: DownloadSpec) -> Result<DownloadId, EngineError> {
         let id = DownloadId(self.next_id);
         self.next_id += 1;
-        if let Err(error) = self.send_command(EngineCommand::Add { id, spec }).await {
+        let result = self
+            .command_reply(|reply| EngineCommand::Add { id, spec, reply })
+            .await;
+        if result.is_err() {
             self.next_id -= 1;
-            return Err(error);
         }
-        Ok(id)
+        result
     }
 
+    /// Returns when the actor accepts the pause request
+    /// The paused state arrives later through EngineEvent::Progress
     pub async fn pause(&self, id: DownloadId) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::Pause { id }).await
+        self.command_reply(|reply| EngineCommand::Pause { id, reply })
+            .await
     }
 
     pub async fn resume(&self, id: DownloadId) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::Resume { id }).await
+        self.command_reply(|reply| EngineCommand::Resume { id, reply })
+            .await
     }
 
     #[allow(dead_code)] // kept as an explicit backend control even though the current UI deletes artifacts instead.
     pub async fn cancel(&self, id: DownloadId) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::Cancel { id }).await
+        self.command_reply(|reply| EngineCommand::Cancel { id, reply })
+            .await
     }
 
-    pub async fn delete_artifact(
-        &self,
-        id: DownloadId,
-        destination: PathBuf,
-    ) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::DeleteArtifact { id, destination })
+    pub async fn delete_artifact(&self, id: DownloadId) -> Result<(), EngineError> {
+        self.command_reply(|reply| EngineCommand::DeleteArtifact { id, reply })
             .await
     }
 
     pub async fn update_config(&self, config: CoreConfig) -> Result<(), EngineError> {
-        self.send_command(EngineCommand::UpdateConfig { config })
+        self.command_reply(|reply| EngineCommand::UpdateConfig { config, reply })
             .await
     }
 
@@ -208,24 +217,33 @@ impl DownloadEngine {
     }
 
     pub async fn shutdown(mut self) -> Result<(), EngineError> {
-        let send_result = self.send_command(EngineCommand::Shutdown).await;
+        let send_result = self
+            .command_reply(|reply| EngineCommand::Shutdown { reply: Some(reply) })
+            .await;
         if let Some(actor) = self.actor.take() {
             let _ = actor.await;
         }
         send_result
     }
 
-    async fn send_command(&self, command: EngineCommand) -> Result<(), EngineError> {
+    async fn command_reply<T>(
+        &self,
+        make_command: impl FnOnce(CommandReply<T>) -> EngineCommand,
+    ) -> Result<T, EngineError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
-            .send(command)
+            .send(make_command(reply_tx))
             .await
-            .map_err(|_| EngineError::Closed)
+            .map_err(|_| EngineError::Closed)?;
+        reply_rx.await.map_err(|_| EngineError::Closed)?
     }
 }
 
 impl Drop for DownloadEngine {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.try_send(EngineCommand::Shutdown);
+        let _ = self
+            .cmd_tx
+            .try_send(EngineCommand::Shutdown { reply: None });
     }
 }
 
@@ -239,7 +257,6 @@ struct EngineActor {
     paused: HashMap<DownloadId, PausedTask>,
     queue: VecDeque<QueuedTask>,
     max_concurrent: usize,
-    done_tx: mpsc::Sender<TaskDone>,
     event_tx: mpsc::Sender<EngineEvent>,
     config: CoreConfig,
     /// Shared semaphores for source-wide limits
@@ -256,7 +273,6 @@ impl EngineActor {
         event_tx: mpsc::Sender<EngineEvent>,
         config: CoreConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
-        done_tx: mpsc::Sender<TaskDone>,
         runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
     ) -> Self {
         let max_concurrent = config.max_concurrent_downloads;
@@ -266,7 +282,6 @@ impl EngineActor {
             paused: HashMap::new(),
             queue: VecDeque::new(),
             max_concurrent,
-            done_tx,
             event_tx,
             config,
             shared_schedulers: HashMap::new(),
@@ -289,7 +304,6 @@ impl EngineActor {
     async fn run(
         mut self,
         mut cmd_rx: mpsc::Receiver<EngineCommand>,
-        mut done_rx: mpsc::Receiver<TaskDone>,
         mut runtime_update_rx: mpsc::Receiver<TaskRuntimeUpdate>,
     ) {
         loop {
@@ -301,48 +315,35 @@ impl EngineActor {
                         break;
                     };
                     match cmd {
-                        EngineCommand::Add { id, spec } =>
-                            self.handle_add(id, spec).await,
-                        EngineCommand::Pause { id } =>
-                            self.handle_pause(id).await,
-                        EngineCommand::Resume { id } =>
-                            self.handle_resume(id).await,
-                        EngineCommand::Cancel { id } =>
-                            self.handle_cancel(id).await,
-                        EngineCommand::DeleteArtifact { id, destination } =>
-                            self.handle_delete_artifact(id, &destination).await,
-                        EngineCommand::Restore { download } => {
-                            if !provider::supports_control_action(
-                                &download.spec,
-                                DownloadControlAction::Restore,
-                            ) {
-                                self.notify_unsupported_control(
-                                    download.id,
-                                    DownloadControlAction::Restore,
-                                ).await;
-                                tracing::warn!(
-                                    id = download.id.0,
-                                    "provider does not support restart restore for this download"
-                                );
-                                continue;
-                            }
-                            tracing::info!(id = download.id.0, "restoring paused download from database");
-                            self.paused.insert(download.id, PausedTask {
-                                spec: download.spec,
-                                resume_data: download.resume_data,
-                            });
+                        EngineCommand::Add { id, spec, reply } => {
+                            let _ = reply.send(self.handle_add(id, spec).await);
                         }
-                        EngineCommand::UpdateConfig { config } => {
-                            self.handle_update_config(config).await;
+                        EngineCommand::Pause { id, reply } => {
+                            let _ = reply.send(self.handle_pause(id).await);
                         }
-                        EngineCommand::Shutdown => {
+                        EngineCommand::Resume { id, reply } => {
+                            let _ = reply.send(self.handle_resume(id).await);
+                        }
+                        EngineCommand::Cancel { id, reply } => {
+                            let _ = reply.send(self.handle_cancel(id).await);
+                        }
+                        EngineCommand::DeleteArtifact { id, reply } => {
+                            let _ = reply.send(self.handle_delete_artifact(id).await);
+                        }
+                        EngineCommand::Restore { download, reply } => {
+                            let _ = reply.send(self.handle_restore(download).await);
+                        }
+                        EngineCommand::UpdateConfig { config, reply } => {
+                            let _ = reply.send(self.handle_update_config(config).await);
+                        }
+                        EngineCommand::Shutdown { reply } => {
                             self.handle_shutdown();
+                            if let Some(reply) = reply {
+                                let _ = reply.send(Ok(()));
+                            }
                             break;
                         }
                     }
-                }
-                Some(done) = done_rx.recv() => {
-                    self.handle_task_done(done).await;
                 }
                 Some(update) = runtime_update_rx.recv() => {
                     self.handle_runtime_update(update).await;
@@ -365,7 +366,6 @@ impl EngineActor {
         } = provider::spawn_task(
             id,
             &spec,
-            self.done_tx.clone(),
             pause_token.clone(),
             resume_data,
             ProviderRuntimeContext {
@@ -384,6 +384,7 @@ impl EngineActor {
                 pause_sink,
                 destination_sink,
                 control_support: spec.control_support(),
+                pause_requested: false,
                 spec,
             },
         );
@@ -410,8 +411,23 @@ impl EngineActor {
         }
     }
 
-    async fn handle_add(&mut self, id: DownloadId, spec: DownloadSpec) {
+    async fn handle_add(
+        &mut self,
+        id: DownloadId,
+        spec: DownloadSpec,
+    ) -> Result<DownloadId, EngineError> {
         let _ = self.db_tx.send(self.added_event(id, &spec));
+        self.emit(EngineEvent::TransferAdded {
+            snapshot: self.transfer_snapshot(
+                id,
+                &spec,
+                DownloadStatus::Pending,
+                0,
+                None,
+                TransferChunkMapState::Unsupported,
+            ),
+        })
+        .await;
         if self.tasks.len() < self.max_concurrent {
             tracing::info!(id = id.0, url = spec.url(), "download starting");
             let _ = self.db_tx.send(DbEvent::Started { id });
@@ -429,107 +445,28 @@ impl EngineActor {
                 resume_data: None,
             });
         }
+        Ok(id)
     }
 
-    /// Soft pause: fire the CancellationToken, wait for the task to drain, then
-    /// read the resume state it left in the pause sink
+    /// Soft pause: fire the CancellationToken, then wait for TaskRuntimeUpdate::Done
     /// If the download is still queued, move it to paused directly
-    async fn handle_pause(&mut self, id: DownloadId) {
-        let Some(spec) = self.pause_target_spec(id) else {
-            return;
+    async fn handle_pause(&mut self, id: DownloadId) -> Result<(), EngineError> {
+        let Some((supports_pause, _)) = self.pause_target(id) else {
+            return Err(EngineError::NotFound { id });
         };
-        if !provider::supports_control_action(spec, DownloadControlAction::Pause) {
+        if !supports_pause {
             self.notify_unsupported_control(id, DownloadControlAction::Pause)
                 .await;
-            return;
+            return Err(EngineError::Unsupported {
+                id,
+                action: DownloadControlAction::Pause,
+            });
         }
 
-        if let Some(entry) = self.tasks.remove(&id) {
+        if let Some(entry) = self.tasks.get_mut(&id) {
             tracing::info!(id = id.0, "pausing download");
             entry.pause_token.cancel();
-            // Range workers flush buffered bytes and report saved ranges for
-            // resume. Single-stream fallback just stops because it cannot save
-            // resume data
-            let final_state = match entry.handle.await {
-                Ok(final_state) => final_state,
-                Err(error) => {
-                    tracing::warn!(id = id.0, ?error, "download task failed while pausing");
-                    let _ = self.db_tx.send(DbEvent::Error { id });
-                    self.emit(EngineEvent::ChunkMapChanged {
-                        id,
-                        state: TransferChunkMapState::Unsupported,
-                    })
-                    .await;
-                    self.try_start_next().await;
-                    return;
-                }
-            };
-            let mut spec = entry.spec;
-            self.sync_runtime_destination(id, &mut spec, &entry.destination_sink)
-                .await;
-            let resume_data = provider::take_resume_data(entry.pause_sink);
-
-            match final_state.status {
-                DownloadStatus::Paused => {
-                    if let Some(resume_data) = resume_data {
-                        let downloaded_bytes = resume_data.downloaded_bytes();
-                        let _ = self.db_tx.send(DbEvent::Paused {
-                            id,
-                            downloaded_bytes,
-                            resume_data: Some(resume_data.clone()),
-                        });
-                        self.emit(EngineEvent::ChunkMapChanged {
-                            id,
-                            state: TransferChunkMapState::Unsupported,
-                        })
-                        .await;
-                        self.paused.insert(
-                            id,
-                            PausedTask {
-                                spec,
-                                resume_data: Some(resume_data),
-                            },
-                        );
-                    } else {
-                        tracing::warn!(id = id.0, "download reported paused without resume data");
-                        let _ = self.db_tx.send(DbEvent::Error { id });
-                        self.emit(EngineEvent::ChunkMapChanged {
-                            id,
-                            state: TransferChunkMapState::Unsupported,
-                        })
-                        .await;
-                    }
-                    self.try_start_next().await;
-                }
-                DownloadStatus::Finished => {
-                    self.emit(EngineEvent::ChunkMapChanged {
-                        id,
-                        state: TransferChunkMapState::Unsupported,
-                    })
-                    .await;
-                    let _ = self.db_tx.send(DbEvent::Finished {
-                        id,
-                        total_bytes: final_state
-                            .total_bytes
-                            .unwrap_or(final_state.downloaded_bytes),
-                    });
-                    self.try_start_next().await;
-                }
-                DownloadStatus::Error => {
-                    self.emit(EngineEvent::ChunkMapChanged {
-                        id,
-                        state: TransferChunkMapState::Unsupported,
-                    })
-                    .await;
-                    let _ = self.db_tx.send(DbEvent::Error { id });
-                    self.try_start_next().await;
-                }
-                DownloadStatus::Pending
-                | DownloadStatus::Downloading
-                | DownloadStatus::Cancelled => {
-                    self.try_start_next().await;
-                }
-            }
+            entry.pause_requested = true;
         } else if let Some(pos) = self.queue.iter().position(|t| t.id == id) {
             // Not started yet -> pull from queue and park in paused with no progress
             let task = self.queue.remove(pos).unwrap();
@@ -554,16 +491,60 @@ impl EngineActor {
                 },
             );
         }
+        Ok(())
     }
 
-    async fn handle_resume(&mut self, id: DownloadId) {
+    async fn handle_restore(&mut self, download: RestoredDownload) -> Result<(), EngineError> {
+        if !provider::supports_control_action(&download.spec, DownloadControlAction::Restore) {
+            self.notify_unsupported_control(download.id, DownloadControlAction::Restore)
+                .await;
+            tracing::warn!(
+                id = download.id.0,
+                "provider does not support restart restore for this download"
+            );
+            return Err(EngineError::Unsupported {
+                id: download.id,
+                action: DownloadControlAction::Restore,
+            });
+        }
+
+        let (downloaded_bytes, total_bytes) = snapshot_totals(download.resume_data.as_ref());
+        self.emit(EngineEvent::TransferRestored {
+            snapshot: self.transfer_snapshot(
+                download.id,
+                &download.spec,
+                DownloadStatus::Paused,
+                downloaded_bytes,
+                total_bytes,
+                TransferChunkMapState::Unsupported,
+            ),
+        })
+        .await;
+        tracing::info!(
+            id = download.id.0,
+            "restoring paused download from database"
+        );
+        self.paused.insert(
+            download.id,
+            PausedTask {
+                spec: download.spec,
+                resume_data: download.resume_data,
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_resume(&mut self, id: DownloadId) -> Result<(), EngineError> {
         let Some(spec) = self.resume_target_spec(id) else {
-            return;
+            return Err(EngineError::NotFound { id });
         };
         if !provider::supports_control_action(spec, DownloadControlAction::Resume) {
             self.notify_unsupported_control(id, DownloadControlAction::Resume)
                 .await;
-            return;
+            return Err(EngineError::Unsupported {
+                id,
+                action: DownloadControlAction::Resume,
+            });
         }
 
         if let Some(pt) = self.paused.remove(&id) {
@@ -599,22 +580,26 @@ impl EngineActor {
                 });
             }
         }
+        Ok(())
     }
 
-    async fn handle_cancel(&mut self, id: DownloadId) {
+    async fn handle_cancel(&mut self, id: DownloadId) -> Result<(), EngineError> {
         let Some((supports_cancel, destination)) = self.cancel_target(id) else {
-            return;
+            return Err(EngineError::NotFound { id });
         };
         if !supports_cancel {
             self.notify_unsupported_control(id, DownloadControlAction::Cancel)
                 .await;
-            return;
+            return Err(EngineError::Unsupported {
+                id,
+                action: DownloadControlAction::Cancel,
+            });
         }
 
         let mut removed = false;
         if let Some(entry) = self.tasks.remove(&id) {
             tracing::info!(id = id.0, "download cancelled");
-            // abort() prevents done_tx from firing, so advance the queue here
+            // abort() prevents TaskRuntimeUpdate::Done, so advance the queue here
             entry.handle.abort();
             self.try_start_next().await;
             removed = true;
@@ -642,12 +627,13 @@ impl EngineActor {
             })
             .await;
         }
+        Ok(())
     }
 
-    async fn handle_delete_artifact(&mut self, id: DownloadId, destination: &Path) {
-        let resolved_destination = self
-            .known_destination(id)
-            .unwrap_or_else(|| destination.to_path_buf());
+    async fn handle_delete_artifact(&mut self, id: DownloadId) -> Result<(), EngineError> {
+        let Some(resolved_destination) = self.known_destination(id) else {
+            return Err(EngineError::NotFound { id });
+        };
         let was_active = self.tasks.remove(&id).map(|entry| {
             entry.handle.abort();
         });
@@ -679,6 +665,7 @@ impl EngineActor {
             artifact_state,
         })
         .await;
+        Ok(())
     }
 
     fn handle_shutdown(&mut self) {
@@ -695,45 +682,51 @@ impl EngineActor {
         self.queue.clear();
     }
 
-    async fn handle_task_done(&mut self, done: TaskDone) {
-        let active_entry = self.tasks.remove(&done.id);
-        if active_entry.is_none() && !self.paused.contains_key(&done.id) {
+    async fn handle_task_done(
+        &mut self,
+        id: DownloadId,
+        status: DownloadStatus,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    ) {
+        let active_entry = self.tasks.remove(&id);
+        if active_entry.is_none() && !self.paused.contains_key(&id) {
             return;
         }
-        if let Some(mut entry) = active_entry {
-            self.sync_runtime_destination(done.id, &mut entry.spec, &entry.destination_sink)
+        let mut active_entry = active_entry;
+        if let Some(entry) = active_entry.as_mut() {
+            let destination_sink = &entry.destination_sink;
+            self.sync_runtime_destination(id, &mut entry.spec, destination_sink)
                 .await;
         }
 
-        match done.final_state.status {
+        match status {
             DownloadStatus::Finished => {
                 self.emit(EngineEvent::ChunkMapChanged {
-                    id: done.id,
+                    id,
                     state: TransferChunkMapState::Unsupported,
                 })
                 .await;
                 let _ = self.db_tx.send(DbEvent::Finished {
-                    id: done.id,
-                    total_bytes: done
-                        .final_state
-                        .total_bytes
-                        .unwrap_or(done.final_state.downloaded_bytes),
+                    id,
+                    total_bytes: total_bytes.unwrap_or(downloaded_bytes),
                 });
                 self.try_start_next().await;
             }
             DownloadStatus::Error => {
                 self.emit(EngineEvent::ChunkMapChanged {
-                    id: done.id,
+                    id,
                     state: TransferChunkMapState::Unsupported,
                 })
                 .await;
-                let _ = self.db_tx.send(DbEvent::Error { id: done.id });
+                let _ = self.db_tx.send(DbEvent::Error { id });
                 self.try_start_next().await;
             }
             DownloadStatus::Paused => {
-                if !self.paused.contains_key(&done.id) {
-                    self.try_start_next().await;
+                if let Some(entry) = active_entry {
+                    self.finish_active_pause(id, entry).await;
                 }
+                self.try_start_next().await;
             }
             DownloadStatus::Pending | DownloadStatus::Downloading | DownloadStatus::Cancelled => {
                 self.try_start_next().await;
@@ -741,7 +734,7 @@ impl EngineActor {
         }
     }
 
-    async fn handle_update_config(&mut self, config: CoreConfig) {
+    async fn handle_update_config(&mut self, config: CoreConfig) -> Result<(), EngineError> {
         let old_max_concurrent = self.max_concurrent;
         let old_config = self.config.clone();
 
@@ -754,6 +747,7 @@ impl EngineActor {
         if self.max_concurrent > old_max_concurrent {
             self.try_start_next().await;
         }
+        Ok(())
     }
 
     async fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
@@ -767,6 +761,15 @@ impl EngineActor {
                 {
                     self.emit(EngineEvent::Progress(update)).await;
                 }
+            }
+            TaskRuntimeUpdate::Done {
+                id,
+                status,
+                downloaded_bytes,
+                total_bytes,
+            } => {
+                self.handle_task_done(id, status, downloaded_bytes, total_bytes)
+                    .await;
             }
             TaskRuntimeUpdate::DownloadBytesWritten { id, bytes } => {
                 if !self.tasks.contains_key(&id) {
@@ -857,30 +860,89 @@ impl EngineActor {
         })
     }
 
+    fn transfer_snapshot(
+        &self,
+        id: DownloadId,
+        spec: &DownloadSpec,
+        status: DownloadStatus,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        chunk_map_state: TransferChunkMapState,
+    ) -> TransferSnapshot {
+        TransferSnapshot {
+            id,
+            provider_kind: spec.provider_kind().to_string(),
+            source_label: spec.source_label().to_string(),
+            destination: spec.destination().to_path_buf(),
+            status,
+            downloaded_bytes,
+            total_bytes,
+            speed_bytes_per_sec: 0,
+            control_support: spec.control_support(),
+            chunk_map_state,
+        }
+    }
+
+    async fn finish_active_pause(&mut self, id: DownloadId, entry: TaskEntry) {
+        if !entry.pause_requested {
+            tracing::warn!(id = id.0, "download paused without an actor pause request");
+        }
+        let resume_data = provider::take_resume_data(entry.pause_sink);
+        if let Some(resume_data) = resume_data {
+            let downloaded_bytes = resume_data.downloaded_bytes();
+            let total_bytes = resume_data.total_bytes();
+            let _ = self.db_tx.send(DbEvent::Paused {
+                id,
+                downloaded_bytes,
+                resume_data: Some(resume_data.clone()),
+            });
+            self.emit(EngineEvent::ChunkMapChanged {
+                id,
+                state: TransferChunkMapState::Unsupported,
+            })
+            .await;
+            self.emit(self.status_event(id, DownloadStatus::Paused, downloaded_bytes, total_bytes))
+                .await;
+            self.paused.insert(
+                id,
+                PausedTask {
+                    spec: entry.spec,
+                    resume_data: Some(resume_data),
+                },
+            );
+        } else {
+            tracing::warn!(id = id.0, "download reported paused without resume data");
+            let _ = self.db_tx.send(DbEvent::Error { id });
+            self.emit(EngineEvent::ChunkMapChanged {
+                id,
+                state: TransferChunkMapState::Unsupported,
+            })
+            .await;
+            self.emit(self.status_event(id, DownloadStatus::Error, 0, None))
+                .await;
+        }
+    }
+
     async fn notify_unsupported_control(&self, id: DownloadId, action: DownloadControlAction) {
         self.emit(EngineEvent::ControlUnsupported { id, action })
             .await;
     }
 
     async fn emit(&self, event: EngineEvent) {
+        // TODO: split lossless events from coalesced UI updates if this send wait shows up in benchmarks
         let _ = self.event_tx.send(event).await;
     }
 
-    fn pause_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
-        self.tasks
-            .get(&id)
-            .and_then(|entry| {
-                entry
-                    .control_support
-                    .supports(DownloadControlAction::Pause)
-                    .then_some(&entry.spec)
-            })
-            .or_else(|| {
-                self.queue
-                    .iter()
-                    .find(|task| task.id == id)
-                    .map(|task| &task.spec)
-            })
+    fn pause_target(&self, id: DownloadId) -> Option<(bool, &DownloadSpec)> {
+        if let Some(entry) = self.tasks.get(&id) {
+            return Some((entry.control_support.can_pause, &entry.spec));
+        }
+        self.queue.iter().find(|task| task.id == id).map(|task| {
+            (
+                provider::supports_control_action(&task.spec, DownloadControlAction::Pause),
+                &task.spec,
+            )
+        })
     }
 
     fn resume_target_spec(&self, id: DownloadId) -> Option<&DownloadSpec> {
