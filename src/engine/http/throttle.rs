@@ -20,11 +20,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Token bucket rate limiter. `limit_bps = 0` means unlimited.
+/// Token bucket rate limiter
+/// `limit_bps = 0` means unlimited
 ///
-/// Tokens refill continuously based on elapsed wall time, capped at 1 second
-/// of burst. `consume` returns how long the caller should sleep before
-/// proceeding, the lock is dropped before the caller sleeps.
+/// Tokens refill over time, capped at 1 second of burst
+/// `consume` returns how long the caller should sleep
 #[derive(Debug)]
 pub struct TokenBucket {
     inner: Mutex<TbInner>,
@@ -67,14 +67,14 @@ impl TokenBucket {
         let now = Instant::now();
         let elapsed = now.duration_since(inner.last_refill).as_secs_f64();
         inner.last_refill = now;
-        // Refill up to 1 second's worth (max burst = 1s of bandwidth).
+        // Refill up to 1 second of bandwidth
         inner.available =
             (inner.available + elapsed * inner.limit_bps as f64).min(inner.limit_bps as f64);
     }
 
     /// Consume `bytes` tokens. Returns the duration to sleep to stay within
     /// the rate limit. Returns `Duration::ZERO` when unlimited or when tokens
-    /// are available.
+    /// are available
     pub fn consume(&self, bytes: u64) -> Duration {
         let mut inner = self.inner.lock().unwrap();
         if inner.limit_bps == 0 {
@@ -90,9 +90,8 @@ impl TokenBucket {
     }
 }
 
-/// Pairs a per-download bucket with the global bucket.
-/// `consume` returns the larger of the two required waits so both limits
-/// are respected simultaneously.
+/// Per-download and global speed limits used together
+/// `consume` returns the larger wait so both limits are kept
 pub struct Throttle {
     pub per_download: Arc<TokenBucket>,
     pub global: Arc<TokenBucket>,

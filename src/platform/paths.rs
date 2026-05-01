@@ -17,10 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Shared platform-aware application paths.
+//! App paths that depend on the OS
 //!
-//! This module is for OS-facing path policy shared across subsystems:
-//! config/data directories, default downloads, and app log locations.
+//! Covers config dirs, data dirs, default downloads, and log files
 
 use std::path::PathBuf;
 

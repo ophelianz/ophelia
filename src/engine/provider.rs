@@ -17,10 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Internal provider dispatch helpers used by the engine actor.
+//! Starts downloads for the engine actor
 //!
-//! This keeps provider-specific task spawning, pause-state extraction, and
-//! persisted-source mapping out of the generic scheduler loop in `engine.rs`.
+//! Keeps HTTP task setup and HTTP pause data out of `engine.rs`
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -43,7 +42,7 @@ pub(super) struct TaskDone {
 }
 
 pub(super) struct SpawnedTask {
-    pub(super) handle: JoinHandle<()>,
+    pub(super) handle: JoinHandle<TaskFinalState>,
     pub(super) pause_sink: TaskPauseSink,
     pub(super) destination_sink: TaskDestinationSink,
 }
@@ -155,6 +154,7 @@ pub(super) fn spawn_task(
                     )
                     .await;
                     let _ = done_tx.send(TaskDone { id, final_state });
+                    final_state
                 }
             });
             SpawnedTask {

@@ -17,11 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Shared destination resolution and final-file commit behavior.
+//! Destination paths and final file moves
 //!
-//! All downloads resolve through the same settings-driven policy. Entry points
-//! can optionally provide explicit directory and/or filename overrides, but
-//! folder rules and collision handling still live here.
+//! Applies folder rules, filename overrides, and collision handling
 
 use std::ffi::OsStr;
 use std::io::{self, Error, ErrorKind};
@@ -31,11 +29,10 @@ use crate::settings::{CollisionStrategy, DestinationRule, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStrategy {
-    /// Move into a path that was pre-resolved to be unique; fail instead of
-    /// clobbering if that path unexpectedly appears before commit.
+    /// Move into a path that should already be unique
+    /// Fail if that path appears before commit
     MoveNoReplace,
-    /// Replace any existing destination only after the download completed
-    /// successfully.
+    /// Replace an existing destination after the download succeeds
     ReplaceExisting,
 }
 

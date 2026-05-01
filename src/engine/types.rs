@@ -17,11 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Shared engine-facing types.
+//! Shared engine types
 //!
-//! Most types in this module are protocol-neutral. Persistence now keeps
-//! provider-specific source and resume details behind small enums so the
-//! generic engine/app layers do not have to traffic in raw HTTP chunk vectors.
+//! Most of this is not HTTP-only
 
 use std::path::PathBuf;
 
@@ -38,7 +36,7 @@ pub enum DownloadStatus {
     Cancelled,
 }
 
-/// Engine-level control actions. Providers may support only a subset of these.
+/// Controls the engine can ask a download to perform
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadControlAction {
     Pause,
@@ -47,7 +45,7 @@ pub enum DownloadControlAction {
     Restore,
 }
 
-/// Provider-declared lifecycle controls exposed at the app/UI boundary.
+/// Controls this transfer supports
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferControlSupport {
     pub can_pause: bool,
@@ -76,8 +74,7 @@ impl TransferControlSupport {
     }
 }
 
-/// Artifact state is tracked separately from transfer outcome so history can say
-/// "finished, but deleted" or "cancelled, and missing on disk".
+/// File state for history rows
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactState {
     Present,
@@ -105,8 +102,8 @@ pub enum TransferChunkMapState {
     Http(HttpChunkMapSnapshot),
 }
 
-/// Events emitted by the engine actor and app layer, consumed by the DbEventWorker.
-/// The worker is the sole writer to SQLite and nothing else touches the DB.
+/// Events sent to the SQLite worker
+/// The worker is the only writer
 pub enum DbEvent {
     Added {
         id: DownloadId,
@@ -147,37 +144,35 @@ pub enum DbEvent {
     },
 }
 
-/// Filter for the history view.
+/// Filter for the history view
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryFilter {
     All,
     Finished,
     Error,
     Paused,
-    #[allow(dead_code)] // backend-ready filter; the current UI has not added a dedicated chip yet.
     Cancelled,
 }
 
-/// A row returned by the history query, one entry per download ever recorded.
+/// One download shown in history
 #[derive(Debug, Clone)]
 pub struct HistoryRow {
     pub id: DownloadId,
-    /// Storage-facing provider identifier. Kept as a string so history can still
-    /// display rows for providers this build does not yet support restoring.
+    /// Source kind saved in the database
+    /// Kept as a string so old rows can still display
     pub provider_kind: String,
-    /// User-facing source label for the transfer, derived from the persisted
-    /// provider/source pair when possible and falling back to the stored locator.
+    /// Source label shown to the user
     pub source_label: String,
     pub destination: String,
     pub status: DownloadStatus,
     #[allow(dead_code)]
-    // tracked for history semantics; fuller presentation wiring can land separately.
+    /// Lets history say whether the file still exists
     pub artifact_state: ArtifactState,
     pub total_bytes: Option<u64>,
     pub downloaded_bytes: u64,
-    /// Unix milliseconds when the download was added.
+    /// Unix milliseconds when the download was added
     pub added_at: i64,
-    /// Unix milliseconds when the download finished (if it did).
+    /// Unix milliseconds when the download finished
     pub finished_at: Option<i64>,
 }
 
@@ -190,7 +185,7 @@ impl HistoryRow {
     }
 }
 
-/// A download loaded from SQLite on startup to restore paused/pending state.
+/// A download loaded from SQLite on startup to restore paused/pending state
 #[derive(Debug, Clone)]
 pub struct SavedDownload {
     pub id: DownloadId,
@@ -201,7 +196,7 @@ pub struct SavedDownload {
     pub resume_data: Option<ProviderResumeData>,
 }
 
-/// Provider-specific source information persisted with a transfer record.
+/// Source saved with a transfer record
 #[derive(Debug, Clone)]
 pub enum PersistedDownloadSource {
     Http { url: String },
@@ -238,8 +233,9 @@ impl PersistedDownloadSource {
     }
 }
 
-/// Per-chunk resume state. `start` is the stable identity (aria2 / AB DM both key on
-/// the first byte of a chunk). `downloaded` is how many bytes of the chunk are on disk.
+/// One saved byte range for HTTP resume
+///
+/// `downloaded` is how many bytes from `start..end` are already on disk
 #[derive(Debug, Clone)]
 pub struct ChunkSnapshot {
     pub start: u64,
@@ -247,7 +243,7 @@ pub struct ChunkSnapshot {
     pub downloaded: u64,
 }
 
-/// HTTP-specific resume data persisted for byte-range downloads.
+/// Resume data for HTTP range downloads
 #[derive(Debug, Clone)]
 pub struct HttpResumeData {
     pub chunks: Vec<ChunkSnapshot>,
@@ -263,11 +259,11 @@ impl HttpResumeData {
     }
 
     pub fn total_bytes(&self) -> Option<u64> {
-        self.chunks.last().map(|chunk| chunk.end)
+        self.chunks.iter().map(|chunk| chunk.end).max()
     }
 }
 
-/// Provider-specific resume data stored behind a generic boundary.
+/// Resume data grouped by source kind
 #[derive(Debug, Clone)]
 pub enum ProviderResumeData {
     Http(HttpResumeData),
@@ -305,6 +301,10 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone)]
 pub enum EngineNotification {
     Update(ProgressUpdate),
+    DownloadBytesWritten {
+        id: DownloadId,
+        bytes: u64,
+    },
     DestinationChanged {
         id: DownloadId,
         destination: PathBuf,
@@ -328,20 +328,22 @@ pub enum EngineNotification {
     },
 }
 
-/// Why a live transfer row left the active/transfers surface.
+/// Why a live transfer row left the Transfers view
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTransferRemovalAction {
     Cancelled,
     DeleteArtifact,
 }
 
-/// Internal task-to-engine runtime updates.
-///
-/// This is public because the direct HTTP task tests call `download_task`
-/// directly, but it is not intended as a stable external extension surface.
+/// Task-to-engine updates
+/// Public only because direct HTTP task tests call `download_task`
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub enum TaskRuntimeUpdate {
+    DownloadBytesWritten {
+        id: DownloadId,
+        bytes: u64,
+    },
     DestinationChanged {
         id: DownloadId,
         destination: PathBuf,

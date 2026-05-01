@@ -17,18 +17,19 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Single-stream fallback for servers that don't support range requests or
-//! don't send Content-Length.
+//! Single-stream fallback
+//! Used when the server does not support ranges or does not send Content-Length
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::engine::destination::{ResolvedDestination, finalize_part_file};
 use crate::engine::http::throttle::Throttle;
-use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate};
+use crate::engine::types::{DownloadId, DownloadStatus, ProgressUpdate, TaskRuntimeUpdate};
 
 use super::task::TaskFinalState;
 
@@ -54,6 +55,8 @@ pub async fn single_download(
     resolved_destination: ResolvedDestination,
     stall_timeout_secs: u64,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
+    pause_token: CancellationToken,
     throttle: Arc<Throttle>,
 ) -> TaskFinalState {
     let ResolvedDestination {
@@ -73,11 +76,18 @@ pub async fn single_download(
         });
     };
 
-    let response = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(_) => {
+    let response = tokio::select! {
+        biased;
+        _ = pause_token.cancelled() => {
             send(DownloadStatus::Error, 0, None, 0);
             return task_state(DownloadStatus::Error, 0, None);
+        }
+        result = client.get(&url).send() => match result {
+            Ok(r) => r,
+            Err(_) => {
+                send(DownloadStatus::Error, 0, None, 0);
+                return task_state(DownloadStatus::Error, 0, None);
+            }
         }
     };
     if !response.status().is_success() {
@@ -103,7 +113,14 @@ pub async fn single_download(
     send(DownloadStatus::Downloading, 0, None, 0);
 
     loop {
-        let result = tokio::time::timeout(stall_timeout, stream.next()).await;
+        let result = tokio::select! {
+            biased;
+            _ = pause_token.cancelled() => {
+                send(DownloadStatus::Error, downloaded, None, 0);
+                return task_state(DownloadStatus::Error, downloaded, None);
+            }
+            result = tokio::time::timeout(stall_timeout, stream.next()) => result,
+        };
         let Ok(maybe) = result else {
             send(DownloadStatus::Error, downloaded, None, 0);
             return task_state(DownloadStatus::Error, downloaded, None);
@@ -121,9 +138,20 @@ pub async fn single_download(
             send(DownloadStatus::Error, downloaded, None, 0);
             return task_state(DownloadStatus::Error, downloaded, None);
         }
+        let _ = runtime_update_tx.send(TaskRuntimeUpdate::DownloadBytesWritten {
+            id,
+            bytes: chunk.len() as u64,
+        });
         let wait = throttle.consume(chunk.len() as u64);
         if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
+            tokio::select! {
+                biased;
+                _ = pause_token.cancelled() => {
+                    send(DownloadStatus::Error, downloaded, None, 0);
+                    return task_state(DownloadStatus::Error, downloaded, None);
+                }
+                _ = tokio::time::sleep(wait) => {}
+            }
         }
         downloaded += chunk.len() as u64;
         window_bytes += chunk.len() as u64;

@@ -17,89 +17,15 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! HTTP chunk-map snapshots for the Transfers view.
+//! Chunk-map snapshots for the Transfers view
 //!
-//! The executor keeps per-slot atomic counters for chunking, stealing, and
-//! hedging. This module converts those executor-shaped internals into a compact
-//! fixed-width read model that the app layer can hand to the frontend without
-//! leaking raw slot arrays across the boundary.
+//! Turns completed byte ranges into fixed-width cells
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio::time::Duration;
-
-use crate::engine::{
-    ChunkMapCellState, DownloadId, HttpChunkMapSnapshot, TaskRuntimeUpdate, TransferChunkMapState,
-};
+use crate::engine::{ChunkMapCellState, HttpChunkMapSnapshot};
 
 pub(crate) const HTTP_CHUNK_MAP_CELLS: usize = 128;
-const HTTP_CHUNK_MAP_INTERVAL_MS: u64 = 250;
 
-pub(crate) fn spawn_chunk_map_reporter(
-    id: DownloadId,
-    starts: Arc<Vec<AtomicU64>>,
-    ends: Arc<Vec<AtomicU64>>,
-    downloaded: Arc<Vec<AtomicU64>>,
-    slot_count: Arc<AtomicUsize>,
-    total_bytes: u64,
-    runtime_update_tx: mpsc::UnboundedSender<TaskRuntimeUpdate>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last: Option<HttpChunkMapSnapshot> = None;
-
-        loop {
-            let snapshot = snapshot_from_slot_arrays(
-                total_bytes,
-                &starts,
-                &ends,
-                &downloaded,
-                slot_count.load(Ordering::Relaxed),
-            );
-
-            if last.as_ref() != Some(&snapshot) {
-                last = Some(snapshot.clone());
-                if runtime_update_tx
-                    .send(TaskRuntimeUpdate::ChunkMapStateChanged {
-                        id,
-                        state: TransferChunkMapState::Http(snapshot),
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(HTTP_CHUNK_MAP_INTERVAL_MS)).await;
-        }
-    })
-}
-
-pub(crate) fn snapshot_from_slot_arrays(
-    total_bytes: u64,
-    starts: &[AtomicU64],
-    ends: &[AtomicU64],
-    downloaded: &[AtomicU64],
-    populated_slots: usize,
-) -> HttpChunkMapSnapshot {
-    let populated = populated_slots
-        .min(starts.len())
-        .min(ends.len())
-        .min(downloaded.len());
-    let covered_ranges = (0..populated).filter_map(|index| {
-        let start = starts[index].load(Ordering::Relaxed);
-        let end = ends[index].load(Ordering::Relaxed);
-        let covered_end = start.saturating_add(downloaded[index].load(Ordering::Relaxed));
-        let clamped_end = covered_end.min(end);
-        (clamped_end > start).then_some((start, clamped_end))
-    });
-
-    snapshot_from_covered_ranges(total_bytes, covered_ranges)
-}
-
-fn snapshot_from_covered_ranges(
+pub(super) fn snapshot_from_covered_ranges(
     total_bytes: u64,
     covered_ranges: impl IntoIterator<Item = (u64, u64)>,
 ) -> HttpChunkMapSnapshot {

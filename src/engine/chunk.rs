@@ -19,9 +19,7 @@
 
 //! Byte-range chunking
 //!
-//! `ChunkList` stores byte-interval boundaries and progress as parallel vecs;
-//! It should fit providers that can fetch byte ranges
-//! (HTTP Range, FTP REST, SFTP offset reads)
+//! `ChunkList` stores starts, ends, downloaded byte counts, and status in parallel vecs
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -90,6 +88,41 @@ pub fn split(total_size: u64, num_chunks: usize) -> ChunkList {
     }
 }
 
+pub fn split_by_size(total_size: u64, chunk_size: u64) -> ChunkList {
+    if total_size == 0 {
+        return ChunkList {
+            starts: vec![],
+            ends: vec![],
+            downloaded: vec![],
+            statuses: vec![],
+        };
+    }
+    assert!(chunk_size > 0, "chunk_size must be > 0");
+
+    let count = total_size.div_ceil(chunk_size) as usize;
+    let mut starts = Vec::with_capacity(count);
+    let mut ends = Vec::with_capacity(count);
+    let mut downloaded = Vec::with_capacity(count);
+    let mut statuses = Vec::with_capacity(count);
+
+    let mut start = 0;
+    while start < total_size {
+        let end = start.saturating_add(chunk_size).min(total_size);
+        starts.push(start);
+        ends.push(end);
+        downloaded.push(0);
+        statuses.push(ChunkStatus::Pending);
+        start = end;
+    }
+
+    ChunkList {
+        starts,
+        ends,
+        downloaded,
+        statuses,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +137,29 @@ mod tests {
     #[should_panic]
     fn zero_chunks_panics() {
         split(100, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn zero_chunk_size_panics() {
+        split_by_size(100, 0);
+    }
+
+    #[test]
+    fn split_by_size_returns_ordered_ranges() {
+        let chunks = split_by_size(10, 4);
+
+        assert_eq!(chunks.starts, vec![0, 4, 8]);
+        assert_eq!(chunks.ends, vec![4, 8, 10]);
+        assert_eq!(chunks.downloaded, vec![0, 0, 0]);
+        assert_eq!(
+            chunks.statuses,
+            vec![
+                ChunkStatus::Pending,
+                ChunkStatus::Pending,
+                ChunkStatus::Pending
+            ]
+        );
     }
 
     use proptest::prelude::*;

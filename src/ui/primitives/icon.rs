@@ -28,7 +28,7 @@ const ICON_FRAME_MD: f32 = 24.0;
 const ICON_GLYPH_MD: f32 = 20.0;
 const ICON_ACTION_FRAME: f32 = 32.0;
 
-/// Icon names mapping to Lucide SVG files in assets/icons/
+/// Icon names map to SVG files in assets/icons/
 #[derive(Debug, Clone, Copy)]
 pub enum IconName {
     Inbox,

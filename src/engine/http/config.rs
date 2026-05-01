@@ -17,43 +17,65 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Per-download configuration for HTTP/HTTPS downloads.
-//! Fields here are intentionally HTTP-specific: connection count, stall detection,
-//! and retry behavior are concepts that don't apply to all protocols.
+//! Per-download settings for HTTP/HTTPS downloads
 
 use std::path::Path;
 
 use crate::settings::{HttpDownloadOrderingMode, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResolvedHttpDownloadOrdering {
+pub(crate) enum RangeOrdering {
     Balanced,
     Sequential,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HttpRangeStrategyConfig {
+    pub stealing: bool,
+    pub hedging: bool,
+    pub health_retry: bool,
+}
+
+impl HttpRangeStrategyConfig {
+    #[allow(dead_code)] // test and future advanced-mode hook
+    pub const fn live_balancer() -> Self {
+        Self {
+            stealing: true,
+            hedging: true,
+            health_retry: true,
+        }
+    }
+
+    pub(crate) const fn can_create_extra_work(self) -> bool {
+        self.stealing || self.hedging
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpDownloadConfig {
-    /// Hard ceiling on parallel connections per download. The actual count is
-    /// derived from the sqrt heuristic and clamped to [min_connections, max_connections].
+    /// Max parallel range requests for balanced downloads
+    /// Sequential downloads force this to one in `task.rs`
     pub max_connections: usize,
-    /// Floor for the sqrt heuristic. Default 1 (heuristic drives everything).
-    /// Set higher in tests to force parallel chunks on small files without needing
-    /// a large file download.
+    /// Min initial work units for balanced downloads
+    /// Tests raise this to force parallel requests on small files
     pub min_connections: usize,
     pub write_buffer_size: usize,
     pub progress_interval_ms: u64,
     pub stall_timeout_secs: u64,
     pub max_retries_per_chunk: u32,
-    /// Minimum bytes required in each half of a potential steal.
-    /// A steal requires >= 2× this value remaining. Lowered in tests to exercise
-    /// the code path on small files.
+    /// Smallest half we allow when stealing work
+    /// Tests lower this to hit the steal path on small files
     pub min_steal_bytes: u64,
-    /// Per-download bandwidth cap in bytes/sec. 0 = unlimited.
+    /// Per-download bandwidth cap in bytes/sec
+    ///         0 = unlimited
     pub speed_limit_bps: u64,
-    /// High-level HTTP scheduling mode selected from settings.
+    /// HTTP range order from settings
     pub ordering_mode: HttpDownloadOrderingMode,
-    /// Extension list used when the scheduling mode is file-specific.
+    /// Extensions that use sequential range downloads in file-specific mode
     pub sequential_extensions: Vec<String>,
+    /// Optional live range strategies
+    /// Off by default
+    pub range_strategies: HttpRangeStrategyConfig,
 }
 
 impl Default for HttpDownloadConfig {
@@ -69,6 +91,7 @@ impl Default for HttpDownloadConfig {
             speed_limit_bps: 0,
             ordering_mode: HttpDownloadOrderingMode::Balanced,
             sequential_extensions: crate::settings::default_sequential_download_extensions(),
+            range_strategies: HttpRangeStrategyConfig::default(),
         }
     }
 }
@@ -83,18 +106,15 @@ impl HttpDownloadConfig {
         }
     }
 
-    pub(crate) fn resolved_ordering_for_destination(
-        &self,
-        destination: &Path,
-    ) -> ResolvedHttpDownloadOrdering {
+    pub(crate) fn resolved_ordering_for_destination(&self, destination: &Path) -> RangeOrdering {
         match self.ordering_mode {
-            HttpDownloadOrderingMode::Balanced => ResolvedHttpDownloadOrdering::Balanced,
-            HttpDownloadOrderingMode::Sequential => ResolvedHttpDownloadOrdering::Sequential,
+            HttpDownloadOrderingMode::Balanced => RangeOrdering::Balanced,
+            HttpDownloadOrderingMode::Sequential => RangeOrdering::Sequential,
             HttpDownloadOrderingMode::FileSpecific => {
                 if matches_sequential_extension(destination, &self.sequential_extensions) {
-                    ResolvedHttpDownloadOrdering::Sequential
+                    RangeOrdering::Sequential
                 } else {
-                    ResolvedHttpDownloadOrdering::Balanced
+                    RangeOrdering::Balanced
                 }
             }
         }
@@ -140,22 +160,22 @@ mod tests {
             (
                 HttpDownloadOrderingMode::Balanced,
                 "/tmp/movie.mkv",
-                ResolvedHttpDownloadOrdering::Balanced,
+                RangeOrdering::Balanced,
             ),
             (
                 HttpDownloadOrderingMode::Sequential,
                 "/tmp/readme.txt",
-                ResolvedHttpDownloadOrdering::Sequential,
+                RangeOrdering::Sequential,
             ),
             (
                 HttpDownloadOrderingMode::FileSpecific,
                 "/tmp/movie.MKV",
-                ResolvedHttpDownloadOrdering::Sequential,
+                RangeOrdering::Sequential,
             ),
             (
                 HttpDownloadOrderingMode::FileSpecific,
                 "/tmp/readme.txt",
-                ResolvedHttpDownloadOrdering::Balanced,
+                RangeOrdering::Balanced,
             ),
         ];
 
@@ -192,7 +212,7 @@ mod tests {
 
         assert_eq!(
             config.resolved_ordering_for_destination(&resolved.destination),
-            ResolvedHttpDownloadOrdering::Balanced
+            RangeOrdering::Balanced
         );
     }
 
@@ -217,7 +237,37 @@ mod tests {
         assert_eq!(resolved.destination, Path::new("/tmp/media/movie.mkv"));
         assert_eq!(
             config.resolved_ordering_for_destination(&resolved.destination),
-            ResolvedHttpDownloadOrdering::Sequential
+            RangeOrdering::Sequential
         );
+    }
+
+    #[test]
+    fn range_strategies_are_off_by_default() {
+        assert_eq!(
+            HttpRangeStrategyConfig::default(),
+            HttpRangeStrategyConfig {
+                stealing: false,
+                hedging: false,
+                health_retry: false,
+            }
+        );
+        assert!(
+            !HttpDownloadConfig::default()
+                .range_strategies
+                .can_create_extra_work()
+        );
+    }
+
+    #[test]
+    fn live_balancer_enables_all_live_strategies() {
+        assert_eq!(
+            HttpRangeStrategyConfig::live_balancer(),
+            HttpRangeStrategyConfig {
+                stealing: true,
+                hedging: true,
+                health_retry: true,
+            }
+        );
+        assert!(HttpRangeStrategyConfig::live_balancer().can_create_extra_work());
     }
 }

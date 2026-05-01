@@ -20,6 +20,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -91,6 +92,89 @@ pub async fn wait_for_runtime_update(
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+pub fn drain_download_write_bytes(rx: &mut mpsc::UnboundedReceiver<TaskRuntimeUpdate>) -> u64 {
+    let mut total = 0_u64;
+    while let Ok(update) = rx.try_recv() {
+        if let TaskRuntimeUpdate::DownloadBytesWritten { bytes, .. } = update {
+            total = total.saturating_add(bytes);
+        }
+    }
+    total
+}
+
+pub async fn spawn_hedge_range_server(
+    data: Vec<u8>,
+    second_half_requests: Arc<AtomicUsize>,
+    fail_second_half_hedge: bool,
+    delay_first_second_half: Duration,
+) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let data = data.clone();
+            let second_half_requests = Arc::clone(&second_half_requests);
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 4096];
+                let Ok(read) = socket.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..read]);
+                let Some((start, end)) = parse_range_header(&request) else {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                };
+
+                let half = data.len() / 2;
+                let second_half_request =
+                    (start >= half).then(|| second_half_requests.fetch_add(1, Ordering::Relaxed));
+                if second_half_request == Some(1) && fail_second_half_hedge {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
+                if second_half_request == Some(0) {
+                    tokio::time::sleep(delay_first_second_half).await;
+                }
+
+                let end = end.min(data.len());
+                let body = &data[start..end];
+                let header = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                    start,
+                    end.saturating_sub(1),
+                    data.len()
+                );
+                let _ = socket.write_all(header.as_bytes()).await;
+                let _ = socket.write_all(body).await;
+            });
+        }
+    });
+    addr
+}
+
+fn parse_range_header(request: &str) -> Option<(usize, usize)> {
+    let line = request
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("range:"))?;
+    let range = line.split_once("bytes=")?.1.trim();
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse::<usize>().ok()?;
+    let end = end.parse::<usize>().ok()?.checked_add(1)?;
+    Some((start, end))
 }
 
 // ---------------------------------------------------------------------------
