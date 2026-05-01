@@ -156,8 +156,6 @@ mod imp {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-mod imp {
-    pub fn preallocate(file: &std::fs::File, size: u64) -> std::io::Result<()> {
-        file.set_len(size)
-    }
-}
+compile_error!(
+    "Ophelia core currently supports download preallocation on Linux, macOS, and Windows only"
+);

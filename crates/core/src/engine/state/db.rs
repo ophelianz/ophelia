@@ -440,28 +440,41 @@ impl HistoryReader {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![search], |row| {
-                let provider_kind: String = row.get(1)?;
-                let locator: String = row.get(2)?;
-                let status_str: String = row.get(4)?;
-                let artifact_state_str: String = row.get(5)?;
-                Ok(HistoryRow {
-                    id: DownloadId(row.get::<_, i64>(0)? as u64),
-                    provider_kind: provider_kind.clone(),
-                    source_label: history_source_label(&provider_kind, locator),
-                    destination: row.get(3)?,
-                    status: status_from_str(&status_str),
-                    artifact_state: artifact_state_from_str(&artifact_state_str),
-                    total_bytes: row.get::<_, Option<i64>>(6)?.map(|b| b as u64),
-                    downloaded_bytes: row.get::<_, i64>(7)? as u64,
-                    added_at: row.get(8)?,
-                    finished_at: row.get(9)?,
-                })
-            })?
+            .query_map(params![search], history_row_from_sql)?
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
     }
+
+    pub fn load_by_id(&self, id: DownloadId) -> rusqlite::Result<Option<HistoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider_kind, url, destination, status, artifact_state, total_bytes, downloaded, added_at, finished_at
+             FROM downloads
+             WHERE id = ?1
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![id.0 as i64], history_row_from_sql)?;
+        rows.next().transpose()
+    }
+}
+
+fn history_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRow> {
+    let provider_kind: String = row.get(1)?;
+    let locator: String = row.get(2)?;
+    let status_str: String = row.get(4)?;
+    let artifact_state_str: String = row.get(5)?;
+    Ok(HistoryRow {
+        id: DownloadId(row.get::<_, i64>(0)? as u64),
+        provider_kind: provider_kind.clone(),
+        source_label: history_source_label(&provider_kind, locator),
+        destination: row.get(3)?,
+        status: status_from_str(&status_str),
+        artifact_state: artifact_state_from_str(&artifact_state_str),
+        total_bytes: row.get::<_, Option<i64>>(6)?.map(|b| b as u64),
+        downloaded_bytes: row.get::<_, i64>(7)? as u64,
+        added_at: row.get(8)?,
+        finished_at: row.get(9)?,
+    })
 }
 
 fn history_source_label(provider_kind: &str, locator: String) -> String {

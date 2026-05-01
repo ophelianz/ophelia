@@ -3,7 +3,11 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -13,14 +17,22 @@ use tokio::task::JoinHandle;
 use crate::config::{CoreConfig, CorePaths};
 use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddDownloadRequest, ArtifactState, DownloadControlAction, DownloadEngine, DownloadId,
-    DownloadSpec, EngineError, EngineEvent, HistoryFilter, HistoryRow, LiveTransferRemovalAction,
-    ProgressUpdate, RestoredDownload, TransferSnapshot,
+    AddDownloadRequest, ArtifactState, DbEvent, DownloadControlAction, DownloadEngine, DownloadId,
+    DownloadSpec, DownloadStatus, EngineError, EngineEvent, HistoryFilter, HistoryRow,
+    LiveTransferRemovalAction, ProgressUpdate, RestoredDownload, TransferSnapshot,
+    delete_artifact_files,
 };
 
 const SESSION_COMMAND_CAPACITY: usize = 64;
 const SESSION_EVENT_CAPACITY: usize = 512;
 const SESSION_PROTOCOL_VERSION: u32 = 1;
+const HOT_SESSION_EVENT_FLUSH_MS: u64 = 100;
+
+#[cfg(unix)]
+type SocketLines = tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>;
+
+#[cfg(unix)]
+type SocketWriter = tokio::net::unix::OwnedWriteHalf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadRequest {
@@ -231,24 +243,93 @@ impl SessionDescriptor {
 
 pub struct SessionSubscription {
     pub snapshot: SessionSnapshot,
-    events: broadcast::Receiver<SessionEvent>,
+    inner: SessionSubscriptionInner,
+}
+
+enum SessionSubscriptionInner {
+    InProcess {
+        events: broadcast::Receiver<SessionEvent>,
+    },
+    #[cfg(unix)]
+    Socket {
+        lines: SocketLines,
+        _writer: SocketWriter,
+    },
 }
 
 impl SessionSubscription {
     pub async fn next_event(&mut self) -> Result<SessionEvent, SessionError> {
-        self.events.recv().await.map_err(|error| match error {
-            broadcast::error::RecvError::Closed => SessionError::Closed,
-            broadcast::error::RecvError::Lagged(skipped) => SessionError::Lagged { skipped },
-        })
+        match &mut self.inner {
+            SessionSubscriptionInner::InProcess { events } => {
+                events.recv().await.map_err(|error| match error {
+                    broadcast::error::RecvError::Closed => SessionError::Closed,
+                    broadcast::error::RecvError::Lagged(skipped) => {
+                        SessionError::Lagged { skipped }
+                    }
+                })
+            }
+            #[cfg(unix)]
+            SessionSubscriptionInner::Socket { lines, .. } => match read_wire_frame(lines).await? {
+                SessionWireFrame::Event { event } => Ok(event),
+                SessionWireFrame::Error { error, .. } => Err(error),
+                frame => Err(unexpected_wire_frame("event", frame)),
+            },
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct SessionClient {
-    tx: mpsc::Sender<SessionRequest>,
+    inner: Arc<SessionClientInner>,
+}
+
+enum SessionClientInner {
+    InProcess {
+        tx: mpsc::Sender<SessionRequest>,
+    },
+    #[cfg(unix)]
+    Socket {
+        path: PathBuf,
+        next_id: AtomicU64,
+    },
 }
 
 impl SessionClient {
+    fn in_process(tx: mpsc::Sender<SessionRequest>) -> Self {
+        Self {
+            inner: Arc::new(SessionClientInner::InProcess { tx }),
+        }
+    }
+
+    pub fn connect_local(descriptor: &SessionDescriptor) -> Result<Self, SessionError> {
+        if descriptor.protocol_version != SESSION_PROTOCOL_VERSION {
+            return Err(SessionError::Transport {
+                message: format!(
+                    "unsupported session protocol version {}",
+                    descriptor.protocol_version
+                ),
+            });
+        }
+        Self::connect_socket(descriptor.socket_path.clone())
+    }
+
+    #[cfg(unix)]
+    pub fn connect_socket(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
+        Ok(Self {
+            inner: Arc::new(SessionClientInner::Socket {
+                path: path.into(),
+                next_id: AtomicU64::new(1),
+            }),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn connect_socket(_path: impl Into<PathBuf>) -> Result<Self, SessionError> {
+        Err(SessionError::Transport {
+            message: "native local transport is not implemented on this platform yet".into(),
+        })
+    }
+
     pub async fn add(&self, request: DownloadRequest) -> Result<DownloadId, SessionError> {
         match self.dispatch(SessionCommand::Add { request }).await? {
             SessionResponse::DownloadAdded { id } => Ok(id),
@@ -302,16 +383,30 @@ impl SessionClient {
     }
 
     pub async fn subscribe(&self) -> Result<SessionSubscription, SessionError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(SessionRequest::Subscribe { reply: reply_tx })
-            .await
-            .map_err(|_| SessionError::Closed)?;
-        reply_rx.await.map_err(|_| SessionError::Closed)?
+        match &*self.inner {
+            SessionClientInner::InProcess { tx } => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tx.send(SessionRequest::Subscribe { reply: reply_tx })
+                    .await
+                    .map_err(|_| SessionError::Closed)?;
+                reply_rx.await.map_err(|_| SessionError::Closed)?
+            }
+            #[cfg(unix)]
+            SessionClientInner::Socket { path, next_id } => {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                subscribe_socket(path, id).await
+            }
+        }
     }
 
     pub async fn shutdown(&self) -> Result<(), SessionError> {
-        self.expect_ack(SessionCommand::Shutdown).await
+        match &*self.inner {
+            SessionClientInner::InProcess { .. } => self.expect_ack(SessionCommand::Shutdown).await,
+            #[cfg(unix)]
+            SessionClientInner::Socket { .. } => Err(SessionError::BadRequest {
+                message: "shutdown is only available to the embedded session owner".into(),
+            }),
+        }
     }
 
     async fn expect_ack(&self, command: SessionCommand) -> Result<(), SessionError> {
@@ -321,16 +416,24 @@ impl SessionClient {
         }
     }
 
-    pub async fn dispatch(&self, command: SessionCommand) -> Result<SessionResponse, SessionError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(SessionRequest::Command {
-                command,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| SessionError::Closed)?;
-        reply_rx.await.map_err(|_| SessionError::Closed)?
+    async fn dispatch(&self, command: SessionCommand) -> Result<SessionResponse, SessionError> {
+        match &*self.inner {
+            SessionClientInner::InProcess { tx } => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tx.send(SessionRequest::Command {
+                    command,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| SessionError::Closed)?;
+                reply_rx.await.map_err(|_| SessionError::Closed)?
+            }
+            #[cfg(unix)]
+            SessionClientInner::Socket { path, next_id } => {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                dispatch_socket(path, id, command).await
+            }
+        }
     }
 }
 
@@ -363,8 +466,9 @@ impl SessionHost {
         })?;
         let (tx, rx) = mpsc::channel(SESSION_COMMAND_CAPACITY);
         let (event_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
-        let client = SessionClient { tx };
+        let client = SessionClient::in_process(tx);
         let transport = LocalSessionServer::start(runtime, descriptor, client.clone())?;
+        let db_tx = bootstrap.db_tx.clone();
 
         let engine = DownloadEngine::spawn_on(
             runtime,
@@ -377,10 +481,12 @@ impl SessionHost {
                 config,
                 engine,
                 history_reader: bootstrap.history_reader,
+                db_tx,
                 saved_downloads: bootstrap.saved_downloads,
                 _db_worker: bootstrap.worker,
                 _lock: lock,
                 read_model: SessionReadModel::default(),
+                coalescer: SessionEventCoalescer::default(),
                 event_tx,
             }
             .run(rx),
@@ -413,10 +519,12 @@ impl SessionHost {
 
 impl Drop for SessionHost {
     fn drop(&mut self) {
-        let _ = self.client.tx.try_send(SessionRequest::Command {
-            command: SessionCommand::Shutdown,
-            reply: oneshot::channel().0,
-        });
+        if let SessionClientInner::InProcess { tx } = &*self.client.inner {
+            let _ = tx.try_send(SessionRequest::Command {
+                command: SessionCommand::Shutdown,
+                reply: oneshot::channel().0,
+            });
+        }
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -440,16 +548,21 @@ struct SessionRuntime {
     config: CoreConfig,
     engine: DownloadEngine,
     history_reader: HistoryReader,
+    db_tx: std::sync::mpsc::Sender<DbEvent>,
     saved_downloads: Vec<crate::engine::SavedDownload>,
     _db_worker: state::DbWorkerHandle,
     _lock: SessionLock,
     read_model: SessionReadModel,
+    coalescer: SessionEventCoalescer,
     event_tx: broadcast::Sender<SessionEvent>,
 }
 
 impl SessionRuntime {
     async fn run(mut self, mut rx: mpsc::Receiver<SessionRequest>) {
         self.restore_saved_downloads().await;
+        let mut hot_event_flush =
+            tokio::time::interval(Duration::from_millis(HOT_SESSION_EVENT_FLUSH_MS));
+        hot_event_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -458,6 +571,7 @@ impl SessionRuntime {
                         break;
                     };
                     self.drain_engine_events();
+                    self.flush_coalesced_events();
                     if self.handle_request(request).await {
                         break;
                     }
@@ -469,9 +583,13 @@ impl SessionRuntime {
                     };
                     self.apply_engine_event(event);
                 }
+                _ = hot_event_flush.tick() => {
+                    self.flush_coalesced_events();
+                }
             }
         }
 
+        self.flush_coalesced_events();
         if let Err(error) = self.engine.shutdown().await {
             tracing::warn!("download engine shutdown failed: {error}");
         }
@@ -482,6 +600,7 @@ impl SessionRuntime {
             let restored = RestoredDownload::from_saved(&saved, &self.config);
             let (result, events) = self.engine.restore_collecting_events(restored).await;
             self.apply_engine_events(events);
+            self.flush_coalesced_events();
             if let Err(error) = result {
                 tracing::warn!(id = saved.id.0, "restore failed: {error}");
             }
@@ -494,6 +613,7 @@ impl SessionRuntime {
             SessionRequest::Command { command, reply } => {
                 let shutdown = matches!(command, SessionCommand::Shutdown);
                 let response = self.handle_command(command).await;
+                self.flush_coalesced_events();
                 let _ = reply.send(response);
                 shutdown
             }
@@ -502,7 +622,7 @@ impl SessionRuntime {
                 let snapshot = self.read_model.snapshot();
                 let _ = reply.send(Ok(SessionSubscription {
                     snapshot,
-                    events: receiver,
+                    inner: SessionSubscriptionInner::InProcess { events: receiver },
                 }));
                 false
             }
@@ -542,7 +662,13 @@ impl SessionRuntime {
             SessionCommand::DeleteArtifact { id } => {
                 let (result, events) = self.engine.delete_artifact_collecting_events(id).await;
                 self.apply_engine_events(events);
-                result?;
+                match result {
+                    Ok(()) => {}
+                    Err(EngineError::NotFound { id }) => {
+                        self.delete_artifact_from_session_state(id)?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 Ok(SessionResponse::Ack)
             }
             SessionCommand::UpdateConfig { config } => {
@@ -587,9 +713,44 @@ impl SessionRuntime {
     }
 
     fn apply_engine_event(&mut self, event: EngineEvent) {
-        if let Some(event) = self.read_model.apply_engine_event(event) {
+        if let Some(event) = self
+            .read_model
+            .apply_engine_event(event, &mut self.coalescer)
+        {
             let _ = self.event_tx.send(event);
         }
+    }
+
+    fn flush_coalesced_events(&mut self) {
+        for event in self.coalescer.drain_events() {
+            let _ = self.event_tx.send(event);
+        }
+    }
+
+    fn delete_artifact_from_session_state(&mut self, id: DownloadId) -> Result<(), SessionError> {
+        let destination = if let Some(destination) = self.read_model.destination(id) {
+            Some(destination.to_path_buf())
+        } else {
+            self.history_reader
+                .load_by_id(id)
+                .map_err(|error| SessionError::Io {
+                    message: error.to_string(),
+                })?
+                .map(|row| PathBuf::from(row.destination))
+        }
+        .ok_or(SessionError::NotFound { id })?;
+
+        let artifact_state = delete_artifact_files(&destination);
+        let _ = self
+            .db_tx
+            .send(DbEvent::ArtifactStateChanged { id, artifact_state });
+        self.read_model.remove(id);
+        let _ = self.event_tx.send(SessionEvent::TransferRemoved {
+            id,
+            action: LiveTransferRemovalAction::DeleteArtifact,
+            artifact_state,
+        });
+        Ok(())
     }
 }
 
@@ -597,6 +758,51 @@ impl SessionRuntime {
 struct SessionReadModel {
     transfers: HashMap<DownloadId, TransferSnapshot>,
     order: Vec<DownloadId>,
+}
+
+#[derive(Default)]
+struct SessionEventCoalescer {
+    transfer_order: Vec<DownloadId>,
+    transfer_updates: HashMap<DownloadId, TransferSnapshot>,
+    byte_order: Vec<DownloadId>,
+    bytes_written: HashMap<DownloadId, u64>,
+}
+
+impl SessionEventCoalescer {
+    fn record_transfer(&mut self, snapshot: TransferSnapshot) {
+        let id = snapshot.id;
+        if !self.transfer_updates.contains_key(&id) {
+            self.transfer_order.push(id);
+        }
+        self.transfer_updates.insert(id, snapshot);
+    }
+
+    fn record_bytes_written(&mut self, id: DownloadId, bytes: u64) {
+        if !self.bytes_written.contains_key(&id) {
+            self.byte_order.push(id);
+        }
+        let total = self.bytes_written.entry(id).or_insert(0);
+        *total = total.saturating_add(bytes);
+    }
+
+    fn remove_transfer(&mut self, id: DownloadId) {
+        self.transfer_updates.remove(&id);
+    }
+
+    fn drain_events(&mut self) -> Vec<SessionEvent> {
+        let mut events = Vec::with_capacity(self.transfer_updates.len() + self.bytes_written.len());
+        for id in self.transfer_order.drain(..) {
+            if let Some(snapshot) = self.transfer_updates.remove(&id) {
+                events.push(SessionEvent::TransferChanged { snapshot });
+            }
+        }
+        for id in self.byte_order.drain(..) {
+            if let Some(bytes) = self.bytes_written.remove(&id) {
+                events.push(SessionEvent::DownloadBytesWritten { id, bytes });
+            }
+        }
+        events
+    }
 }
 
 impl SessionReadModel {
@@ -610,32 +816,47 @@ impl SessionReadModel {
         }
     }
 
-    fn apply_engine_event(&mut self, event: EngineEvent) -> Option<SessionEvent> {
+    fn apply_engine_event(
+        &mut self,
+        event: EngineEvent,
+        coalescer: &mut SessionEventCoalescer,
+    ) -> Option<SessionEvent> {
         match event {
             EngineEvent::TransferAdded { snapshot }
             | EngineEvent::TransferRestored { snapshot } => {
                 let snapshot = self.upsert(snapshot);
+                coalescer.remove_transfer(snapshot.id);
                 Some(SessionEvent::TransferChanged { snapshot })
             }
-            EngineEvent::Progress(update) => self.apply_progress(update),
+            EngineEvent::Progress(update) => self.apply_progress(update, coalescer),
             EngineEvent::DownloadBytesWritten { id, bytes } => {
-                Some(SessionEvent::DownloadBytesWritten { id, bytes })
+                coalescer.record_bytes_written(id, bytes);
+                None
             }
             EngineEvent::DestinationChanged { id, destination } => self
                 .mutate(id, |snapshot| {
                     snapshot.destination = destination;
                 })
-                .map(|snapshot| SessionEvent::TransferChanged { snapshot }),
+                .map(|snapshot| {
+                    coalescer.remove_transfer(id);
+                    SessionEvent::TransferChanged { snapshot }
+                }),
             EngineEvent::ControlSupportChanged { id, support } => self
                 .mutate(id, |snapshot| {
                     snapshot.control_support = support;
                 })
-                .map(|snapshot| SessionEvent::TransferChanged { snapshot }),
-            EngineEvent::ChunkMapChanged { id, state } => self
-                .mutate(id, |snapshot| {
+                .map(|snapshot| {
+                    coalescer.remove_transfer(id);
+                    SessionEvent::TransferChanged { snapshot }
+                }),
+            EngineEvent::ChunkMapChanged { id, state } => {
+                if let Some(snapshot) = self.mutate(id, |snapshot| {
                     snapshot.chunk_map_state = state;
-                })
-                .map(|snapshot| SessionEvent::TransferChanged { snapshot }),
+                }) {
+                    coalescer.record_transfer(snapshot);
+                }
+                None
+            }
             EngineEvent::LiveTransferRemoved {
                 id,
                 action,
@@ -643,6 +864,7 @@ impl SessionReadModel {
             } => {
                 self.transfers.remove(&id);
                 self.order.retain(|current| *current != id);
+                coalescer.remove_transfer(id);
                 Some(SessionEvent::TransferRemoved {
                     id,
                     action,
@@ -655,14 +877,26 @@ impl SessionReadModel {
         }
     }
 
-    fn apply_progress(&mut self, update: ProgressUpdate) -> Option<SessionEvent> {
-        self.mutate(update.id, |snapshot| {
+    fn apply_progress(
+        &mut self,
+        update: ProgressUpdate,
+        coalescer: &mut SessionEventCoalescer,
+    ) -> Option<SessionEvent> {
+        let status = update.status;
+        let snapshot = self.mutate(update.id, |snapshot| {
             snapshot.status = update.status;
             snapshot.downloaded_bytes = update.downloaded_bytes;
             snapshot.total_bytes = update.total_bytes;
             snapshot.speed_bytes_per_sec = update.speed_bytes_per_sec;
-        })
-        .map(|snapshot| SessionEvent::TransferChanged { snapshot })
+        })?;
+
+        if status == DownloadStatus::Downloading {
+            coalescer.record_transfer(snapshot);
+            None
+        } else {
+            coalescer.remove_transfer(update.id);
+            Some(SessionEvent::TransferChanged { snapshot })
+        }
     }
 
     fn upsert(&mut self, snapshot: TransferSnapshot) -> TransferSnapshot {
@@ -681,6 +915,17 @@ impl SessionReadModel {
         let snapshot = self.transfers.get_mut(&id)?;
         mutate(snapshot);
         Some(snapshot.clone())
+    }
+
+    fn destination(&self, id: DownloadId) -> Option<&Path> {
+        self.transfers
+            .get(&id)
+            .map(|snapshot| snapshot.destination.as_path())
+    }
+
+    fn remove(&mut self, id: DownloadId) {
+        self.transfers.remove(&id);
+        self.order.retain(|current| *current != id);
     }
 }
 
@@ -886,6 +1131,105 @@ pub enum SessionWireFrame {
 }
 
 #[cfg(unix)]
+async fn dispatch_socket(
+    path: &Path,
+    id: u64,
+    command: SessionCommand,
+) -> Result<SessionResponse, SessionError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(path).await.map_err(socket_io_error)?;
+    let (reader, mut writer) = stream.into_split();
+    send_wire_command(&mut writer, id, command).await?;
+    let mut lines = BufReader::new(reader).lines();
+
+    match read_wire_frame(&mut lines).await? {
+        SessionWireFrame::Response {
+            id: frame_id,
+            response,
+        } if frame_id == id => Ok(response),
+        SessionWireFrame::Error {
+            id: frame_id,
+            error,
+        } if frame_id == id => Err(error),
+        frame => Err(unexpected_wire_frame("response", frame)),
+    }
+}
+
+#[cfg(unix)]
+async fn subscribe_socket(path: &Path, id: u64) -> Result<SessionSubscription, SessionError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(path).await.map_err(socket_io_error)?;
+    let (reader, mut writer) = stream.into_split();
+    send_wire_command(&mut writer, id, SessionCommand::Subscribe).await?;
+    let mut lines = BufReader::new(reader).lines();
+
+    match read_wire_frame(&mut lines).await? {
+        SessionWireFrame::Response {
+            id: frame_id,
+            response: SessionResponse::Snapshot { snapshot },
+        } if frame_id == id => Ok(SessionSubscription {
+            snapshot,
+            inner: SessionSubscriptionInner::Socket {
+                lines,
+                _writer: writer,
+            },
+        }),
+        SessionWireFrame::Error {
+            id: frame_id,
+            error,
+        } if frame_id == id => Err(error),
+        frame => Err(unexpected_wire_frame("snapshot response", frame)),
+    }
+}
+
+#[cfg(unix)]
+async fn send_wire_command(
+    writer: &mut SocketWriter,
+    id: u64,
+    command: SessionCommand,
+) -> Result<(), SessionError> {
+    let frame = SessionWireCommand { id, command };
+    write_json_line(writer, &frame)
+        .await
+        .map_err(socket_io_error)
+}
+
+#[cfg(unix)]
+async fn read_wire_frame(lines: &mut SocketLines) -> Result<SessionWireFrame, SessionError> {
+    let line = lines.next_line().await.map_err(socket_io_error)?;
+    let Some(line) = line else {
+        return Err(SessionError::Closed);
+    };
+    serde_json::from_str(&line).map_err(|error| SessionError::Transport {
+        message: format!("failed to parse session frame: {error}"),
+    })
+}
+
+#[cfg(unix)]
+fn socket_io_error(error: io::Error) -> SessionError {
+    match error.kind() {
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::NotFound
+        | io::ErrorKind::UnexpectedEof => SessionError::Closed,
+        _ => SessionError::Transport {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn unexpected_wire_frame(expected: &str, frame: SessionWireFrame) -> SessionError {
+    SessionError::Transport {
+        message: format!("expected session {expected}, got {frame:?}"),
+    }
+}
+
+#[cfg(unix)]
 pub struct LocalSessionServer {
     descriptor: SessionDescriptor,
     descriptor_path: PathBuf,
@@ -1004,6 +1348,17 @@ async fn handle_local_connection(stream: tokio::net::UnixStream, client: Session
             }
         };
 
+        if !socket_command_allowed(&command.command) {
+            let frame = SessionWireFrame::Error {
+                id: command.id,
+                error: SessionError::BadRequest {
+                    message: "command is not available over the local socket".into(),
+                },
+            };
+            let _ = write_wire_frame(&mut writer, &frame).await;
+            continue;
+        }
+
         if matches!(command.command, SessionCommand::Subscribe) {
             match client.subscribe().await {
                 Ok(mut subscription) => {
@@ -1057,14 +1412,27 @@ async fn handle_local_connection(stream: tokio::net::UnixStream, client: Session
     }
 }
 
+fn socket_command_allowed(command: &SessionCommand) -> bool {
+    !matches!(command, SessionCommand::Shutdown)
+}
+
 #[cfg(unix)]
 async fn write_wire_frame(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     frame: &SessionWireFrame,
 ) -> io::Result<()> {
+    write_json_line(writer, frame).await
+}
+
+#[cfg(unix)]
+async fn write_json_line<W, T>(writer: &mut W, value: &T) -> io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    T: Serialize,
+{
     use tokio::io::AsyncWriteExt;
 
-    let mut line = serde_json::to_vec(frame)?;
+    let mut line = serde_json::to_vec(value)?;
     line.push(b'\n');
     writer.write_all(&line).await
 }
@@ -1106,8 +1474,10 @@ fn write_descriptor(path: &Path, descriptor: &SessionDescriptor) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{DownloadStatus, TransferChunkMapState, TransferControlSupport};
+    use std::time::Duration;
     use tempfile::TempDir;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     fn test_paths(dir: &TempDir) -> CorePaths {
         CorePaths::new(
@@ -1117,10 +1487,222 @@ mod tests {
         )
     }
 
+    async fn spawn_single_response_server(body: &'static [u8]) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+                else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let read = stream.read(&mut request).await.unwrap_or(0);
+                    let is_head = request[..read].starts_with(b"HEAD ");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    if !is_head {
+                        stream.write_all(body).await.unwrap();
+                    }
+                });
+            }
+        });
+        format!("http://{addr}/file.bin")
+    }
+
     #[cfg(unix)]
     fn file_mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn socket_client(host: &SessionHost) -> SessionClient {
+        SessionClient::connect_local(host.descriptor().unwrap()).unwrap()
+    }
+
+    fn test_snapshot(id: DownloadId, status: DownloadStatus) -> TransferSnapshot {
+        TransferSnapshot {
+            id,
+            provider_kind: "http".into(),
+            source_label: "https://example.com/file.bin".into(),
+            destination: PathBuf::from("file.bin"),
+            status,
+            downloaded_bytes: 0,
+            total_bytes: Some(100),
+            speed_bytes_per_sec: 0,
+            control_support: TransferControlSupport::all(),
+            chunk_map_state: TransferChunkMapState::Unsupported,
+        }
+    }
+
+    #[test]
+    fn session_read_model_coalesces_hot_transfer_updates() {
+        let id = DownloadId(1);
+        let mut read_model = SessionReadModel::default();
+        let mut coalescer = SessionEventCoalescer::default();
+
+        let added = read_model
+            .apply_engine_event(
+                EngineEvent::TransferAdded {
+                    snapshot: test_snapshot(id, DownloadStatus::Pending),
+                },
+                &mut coalescer,
+            )
+            .unwrap();
+        assert!(matches!(added, SessionEvent::TransferChanged { .. }));
+
+        assert!(
+            read_model
+                .apply_engine_event(
+                    EngineEvent::Progress(ProgressUpdate {
+                        id,
+                        status: DownloadStatus::Downloading,
+                        downloaded_bytes: 40,
+                        total_bytes: Some(100),
+                        speed_bytes_per_sec: 10,
+                    }),
+                    &mut coalescer,
+                )
+                .is_none()
+        );
+        assert!(
+            read_model
+                .apply_engine_event(
+                    EngineEvent::ChunkMapChanged {
+                        id,
+                        state: TransferChunkMapState::Loading,
+                    },
+                    &mut coalescer,
+                )
+                .is_none()
+        );
+        assert!(
+            read_model
+                .apply_engine_event(
+                    EngineEvent::DownloadBytesWritten { id, bytes: 10 },
+                    &mut coalescer,
+                )
+                .is_none()
+        );
+        assert!(
+            read_model
+                .apply_engine_event(
+                    EngineEvent::DownloadBytesWritten { id, bytes: 15 },
+                    &mut coalescer,
+                )
+                .is_none()
+        );
+
+        let events = coalescer.drain_events();
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            SessionEvent::TransferChanged { snapshot } => {
+                assert_eq!(snapshot.downloaded_bytes, 40);
+                assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Loading);
+            }
+            event => panic!("expected transfer update, got {event:?}"),
+        }
+        match &events[1] {
+            SessionEvent::DownloadBytesWritten {
+                id: event_id,
+                bytes,
+            } => {
+                assert_eq!(*event_id, id);
+                assert_eq!(*bytes, 25);
+            }
+            event => panic!("expected write update, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_progress_clears_stale_coalesced_updates() {
+        let id = DownloadId(2);
+        let mut read_model = SessionReadModel::default();
+        let mut coalescer = SessionEventCoalescer::default();
+        let _ = read_model.apply_engine_event(
+            EngineEvent::TransferAdded {
+                snapshot: test_snapshot(id, DownloadStatus::Pending),
+            },
+            &mut coalescer,
+        );
+        let _ = read_model.apply_engine_event(
+            EngineEvent::Progress(ProgressUpdate {
+                id,
+                status: DownloadStatus::Downloading,
+                downloaded_bytes: 50,
+                total_bytes: Some(100),
+                speed_bytes_per_sec: 10,
+            }),
+            &mut coalescer,
+        );
+
+        let finished = read_model
+            .apply_engine_event(
+                EngineEvent::Progress(ProgressUpdate {
+                    id,
+                    status: DownloadStatus::Finished,
+                    downloaded_bytes: 100,
+                    total_bytes: Some(100),
+                    speed_bytes_per_sec: 0,
+                }),
+                &mut coalescer,
+            )
+            .unwrap();
+
+        match finished {
+            SessionEvent::TransferChanged { snapshot } => {
+                assert_eq!(snapshot.status, DownloadStatus::Finished);
+                assert_eq!(snapshot.downloaded_bytes, 100);
+            }
+            event => panic!("expected finished transfer update, got {event:?}"),
+        }
+        assert!(coalescer.drain_events().is_empty());
+    }
+
+    #[test]
+    fn terminal_progress_keeps_pending_write_bytes() {
+        let id = DownloadId(3);
+        let mut read_model = SessionReadModel::default();
+        let mut coalescer = SessionEventCoalescer::default();
+        let _ = read_model.apply_engine_event(
+            EngineEvent::TransferAdded {
+                snapshot: test_snapshot(id, DownloadStatus::Pending),
+            },
+            &mut coalescer,
+        );
+        let _ = read_model.apply_engine_event(
+            EngineEvent::DownloadBytesWritten { id, bytes: 32 },
+            &mut coalescer,
+        );
+
+        let finished = read_model.apply_engine_event(
+            EngineEvent::Progress(ProgressUpdate {
+                id,
+                status: DownloadStatus::Finished,
+                downloaded_bytes: 100,
+                total_bytes: Some(100),
+                speed_bytes_per_sec: 0,
+            }),
+            &mut coalescer,
+        );
+
+        assert!(matches!(
+            finished,
+            Some(SessionEvent::TransferChanged { .. })
+        ));
+        assert!(matches!(
+            coalescer.drain_events().as_slice(),
+            [SessionEvent::DownloadBytesWritten { id: event_id, bytes }]
+                if *event_id == id && *bytes == 32
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1181,6 +1763,142 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn delete_artifact_after_finished_transfer_uses_session_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let config = CoreConfig::default_with_download_dir(dir.path().join("downloads"));
+        let host =
+            SessionHost::start(&Handle::current(), config, paths).expect("session should start");
+        let client = host.client();
+        let mut subscription = client.subscribe().await.unwrap();
+        let destination = dir.path().join("finished.bin");
+        let url = spawn_single_response_server(b"hello").await;
+
+        let id = client
+            .add(DownloadRequest {
+                source: DownloadRequestSource::Http { url },
+                destination: DownloadDestination::ExplicitPath(destination.clone()),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let SessionEvent::TransferChanged { snapshot } =
+                    subscription.next_event().await.unwrap()
+                    && snapshot.id == id
+                    && snapshot.status == DownloadStatus::Finished
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"hello");
+        client.delete_artifact(id).await.unwrap();
+
+        let removed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let SessionEvent::TransferRemoved {
+                    id: removed_id,
+                    action,
+                    artifact_state,
+                } = subscription.next_event().await.unwrap()
+                    && removed_id == id
+                {
+                    return (action, artifact_state);
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(removed.0, LiveTransferRemovalAction::DeleteArtifact);
+        assert_eq!(removed.1, ArtifactState::Deleted);
+        assert!(!destination.exists());
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rows = client.load_history(HistoryFilter::All, "").await.unwrap();
+                if rows
+                    .iter()
+                    .any(|row| row.id == id && row.artifact_state == ArtifactState::Deleted)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_delete_artifact_after_finished_transfer_uses_session_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let config = CoreConfig::default_with_download_dir(dir.path().join("downloads"));
+        let host =
+            SessionHost::start(&Handle::current(), config, paths).expect("session should start");
+        let client = socket_client(&host);
+        let mut subscription = client.subscribe().await.unwrap();
+        let destination = dir.path().join("socket-finished.bin");
+        let url = spawn_single_response_server(b"socket").await;
+
+        let id = client
+            .add(DownloadRequest {
+                source: DownloadRequestSource::Http { url },
+                destination: DownloadDestination::ExplicitPath(destination.clone()),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let SessionEvent::TransferChanged { snapshot } =
+                    subscription.next_event().await.unwrap()
+                    && snapshot.id == id
+                    && snapshot.status == DownloadStatus::Finished
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"socket");
+        client.delete_artifact(id).await.unwrap();
+
+        let removed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let SessionEvent::TransferRemoved {
+                    id: removed_id,
+                    action,
+                    artifact_state,
+                } = subscription.next_event().await.unwrap()
+                    && removed_id == id
+                {
+                    return (action, artifact_state);
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(removed.0, LiveTransferRemovalAction::DeleteArtifact);
+        assert_eq!(removed.1, ArtifactState::Deleted);
+        assert!(!destination.exists());
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn download_request_resolves_explicit_destination() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("picked.bin");
@@ -1205,11 +1923,25 @@ mod tests {
         let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths.clone())
             .expect("session should start");
 
+        assert_eq!(file_mode(&session_dir(&paths)), 0o700);
         assert_eq!(file_mode(&session_lock_path(&paths)), 0o600);
         assert_eq!(file_mode(&session_descriptor_path(&paths)), 0o600);
         assert_eq!(file_mode(&session_socket_path(&paths)), 0o600);
 
         host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn descriptor_is_not_written_when_socket_start_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        fs::create_dir_all(session_socket_path(&paths)).unwrap();
+
+        let result = SessionHost::start(&Handle::current(), CoreConfig::default(), paths.clone());
+
+        assert!(matches!(result, Err(SessionError::Transport { .. })));
+        assert!(!session_descriptor_path(&paths).exists());
     }
 
     #[cfg(unix)]
@@ -1243,6 +1975,161 @@ mod tests {
                 response: SessionResponse::Snapshot { .. }
             }
         ));
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_client_reads_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths)
+            .expect("session should start");
+        let client = socket_client(&host);
+
+        let snapshot = client.snapshot().await.unwrap();
+
+        assert!(snapshot.transfers.is_empty());
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_client_subscribe_gets_snapshot_then_live_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let config = CoreConfig::default_with_download_dir(dir.path().join("downloads"));
+        let host =
+            SessionHost::start(&Handle::current(), config, paths).expect("session should start");
+        let client = socket_client(&host);
+        let mut subscription = client.subscribe().await.unwrap();
+
+        assert!(subscription.snapshot.transfers.is_empty());
+
+        let destination = dir.path().join("socket-add.bin");
+        let id = client
+            .add(DownloadRequest {
+                source: DownloadRequestSource::Http {
+                    url: "http://127.0.0.1:9/socket-add.bin".into(),
+                },
+                destination: DownloadDestination::ExplicitPath(destination),
+            })
+            .await
+            .unwrap();
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let SessionEvent::TransferChanged { snapshot } =
+                    subscription.next_event().await.unwrap()
+                    && snapshot.id == id
+                {
+                    return snapshot;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.id, id);
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_client_routes_control_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths)
+            .expect("session should start");
+        let client = socket_client(&host);
+        let missing = DownloadId(999_999);
+
+        assert!(matches!(
+            client.pause(missing).await,
+            Err(SessionError::NotFound { id }) if id == missing
+        ));
+        assert!(matches!(
+            client.resume(missing).await,
+            Err(SessionError::NotFound { id }) if id == missing
+        ));
+        assert!(matches!(
+            client.cancel(missing).await,
+            Err(SessionError::NotFound { id }) if id == missing
+        ));
+        assert!(matches!(
+            client.delete_artifact(missing).await,
+            Err(SessionError::NotFound { id }) if id == missing
+        ));
+        client.update_config(CoreConfig::default()).await.unwrap();
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_client_reports_closed_after_server_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths)
+            .expect("session should start");
+        let client = socket_client(&host);
+
+        host.shutdown().await.unwrap();
+
+        assert!(matches!(client.snapshot().await, Err(SessionError::Closed)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_client_cannot_shutdown_session_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths)
+            .expect("session should start");
+        let client = socket_client(&host);
+
+        assert!(matches!(
+            client.shutdown().await,
+            Err(SessionError::BadRequest { .. })
+        ));
+        assert!(client.snapshot().await.is_ok());
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_socket_shutdown_command_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(&dir);
+        let host = SessionHost::start(&Handle::current(), CoreConfig::default(), paths)
+            .expect("session should start");
+        let socket_path = host.descriptor().unwrap().socket_path.clone();
+
+        let stream = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let command = SessionWireCommand {
+            id: 9,
+            command: SessionCommand::Shutdown,
+        };
+        let mut body = serde_json::to_vec(&command).unwrap();
+        body.push(b'\n');
+        writer.write_all(&body).await.unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let frame: SessionWireFrame = serde_json::from_str(&line).unwrap();
+
+        assert!(matches!(
+            frame,
+            SessionWireFrame::Error {
+                id: 9,
+                error: SessionError::BadRequest { .. }
+            }
+        ));
+        assert!(host.client().snapshot().await.is_ok());
+
         host.shutdown().await.unwrap();
     }
 

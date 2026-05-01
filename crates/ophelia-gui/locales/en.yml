@@ -79,7 +79,7 @@ history:
 stats:
     title: "NETWORK THROUGHPUT"
     download: "Download"
-    disk_io: "File I/O"
+    disk_io: "Disk I/O"
     read: "Read"
     write: "Write"
     window: "last 60s"

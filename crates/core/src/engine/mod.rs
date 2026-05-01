@@ -32,5 +32,6 @@ pub use crate::config::{
     HttpCoreConfig, HttpOrderingMode,
 };
 pub use controller::DownloadEngine;
+pub(crate) use controller::delete_artifact_files;
 pub use spec::{AddDownloadRequest, DownloadSource, DownloadSpec, RestoredDownload};
 pub use types::*;

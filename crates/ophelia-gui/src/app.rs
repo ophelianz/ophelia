@@ -24,7 +24,7 @@
 //!
 //! Startup sequence:
 //!   1. Load saved settings
-//!   2. Start the core session host
+//!   2. App shell starts the core session host
 //!   3. Start the browser-extension adapter
 //!   4. Subscribe to session snapshots and events
 
@@ -39,20 +39,21 @@ use crate::engine::{
     ArtifactState, DownloadControlAction, DownloadId, DownloadStatus, HistoryFilter, HistoryRow,
     TransferChunkMapState, TransferControlSupport, TransferSnapshot,
 };
+#[cfg(test)]
 use crate::ipc::IpcServer;
 use crate::settings::Settings;
 use crate::views::overlays::notification::NotificationKind;
+#[cfg(test)]
+use ophelia::session::SessionHost;
 use ophelia::session::{
     DownloadDestination, DownloadRequest, DownloadRequestSource, SessionClient, SessionError,
-    SessionEvent, SessionHost, SessionSnapshot,
+    SessionEvent, SessionSnapshot,
 };
 
 /// Live downloads stored as parallel vecs
 /// Every vec uses the same row index
 pub struct Downloads {
     session_client: SessionClient,
-    _session_host: SessionHost,
-    ipc: IpcServer,
     pub settings: Settings,
 
     pub ids: Vec<DownloadId>,
@@ -293,14 +294,8 @@ impl DownloadWriteSampler {
 }
 
 impl Downloads {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = Settings::load();
-        let runtime = crate::runtime::Tokio::handle(cx);
-        let session_host =
-            SessionHost::start(&runtime, settings.core_config(), settings.core_paths())
-                .expect("failed to start backend session");
-        let ipc = IpcServer::start(settings.ipc_port, &runtime, session_host.client());
-        Self::from_session(settings, session_host, ipc, cx)
+    pub fn new(session_client: SessionClient, settings: Settings, cx: &mut Context<Self>) -> Self {
+        Self::from_session(settings, session_client, cx)
     }
 
     #[cfg(test)]
@@ -318,23 +313,20 @@ impl Downloads {
         let runtime = crate::runtime::Tokio::handle(cx);
         let session_host = SessionHost::start(&runtime, settings.core_config(), paths)
             .expect("failed to start test backend session");
-        let mut model = Self::from_session(settings, session_host, IpcServer::disabled(), cx);
+        let session_client = session_host.client();
+        crate::session_services::install(session_host, IpcServer::disabled(), cx);
+        let mut model = Self::from_session(settings, session_client, cx);
         model._test_db_dir = Some(db_dir);
         model
     }
 
     fn from_session(
         settings: Settings,
-        session_host: SessionHost,
-        ipc: IpcServer,
+        session_client: SessionClient,
         cx: &mut Context<Self>,
     ) -> Self {
-        let session_client = session_host.client();
-
         let mut model = Self {
             session_client: session_client.clone(),
-            _session_host: session_host,
-            ipc,
             settings,
             ids: Vec::new(),
             row_by_id: HashMap::new(),
@@ -490,7 +482,12 @@ impl Downloads {
     pub fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if settings.ipc_port != self.settings.ipc_port {
             let runtime = crate::runtime::Tokio::handle(cx);
-            self.ipc = IpcServer::start(settings.ipc_port, &runtime, self.session_client.clone());
+            crate::session_services::restart_ipc(
+                settings.ipc_port,
+                &runtime,
+                self.session_client.clone(),
+                cx,
+            );
         }
         let client = self.session_client.clone();
         let config = settings.core_config();
@@ -1193,7 +1190,43 @@ mod tests {
     }
 
     #[test]
-    fn engine_snapshot_events_upsert_transfer_rows() {
+    fn session_snapshot_replaces_transfer_rows() {
+        let mut app = TestApp::new();
+        let downloads = test_downloads(&mut app);
+
+        app.update(|cx| {
+            downloads.update(cx, |downloads, cx| {
+                downloads.apply_session_snapshot(
+                    SessionSnapshot {
+                        transfers: vec![
+                            test_snapshot(1, "/tmp/first.bin", DownloadStatus::Downloading),
+                            test_snapshot(2, "/tmp/second.bin", DownloadStatus::Paused),
+                        ],
+                    },
+                    cx,
+                );
+                downloads.apply_session_snapshot(
+                    SessionSnapshot {
+                        transfers: vec![test_snapshot(
+                            2,
+                            "/tmp/second-renamed.bin",
+                            DownloadStatus::Downloading,
+                        )],
+                    },
+                    cx,
+                );
+            });
+
+            let rows = downloads.read(cx).transfer_rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, DownloadId(2));
+            assert_eq!(rows[0].filename.as_ref(), "second-renamed.bin");
+            assert_eq!(rows[0].status, DownloadStatus::Downloading);
+        });
+    }
+
+    #[test]
+    fn session_transfer_changed_events_upsert_transfer_rows() {
         let mut app = TestApp::new();
         let downloads = test_downloads(&mut app);
 
@@ -1245,6 +1278,36 @@ mod tests {
             });
 
             assert!(downloads.read(cx).transfer_rows().is_empty());
+        });
+    }
+
+    #[test]
+    fn control_unsupported_event_keeps_transfer_row() {
+        let mut app = TestApp::new();
+        let downloads = test_downloads(&mut app);
+
+        app.update(|cx| {
+            downloads.update(cx, |downloads, cx| {
+                downloads.settings.notifications_enabled = false;
+                downloads.apply_session_event(
+                    SessionEvent::TransferChanged {
+                        snapshot: test_snapshot(8, "/tmp/file.bin", DownloadStatus::Downloading),
+                    },
+                    cx,
+                );
+                downloads.apply_session_event(
+                    SessionEvent::ControlUnsupported {
+                        id: DownloadId(8),
+                        action: DownloadControlAction::Pause,
+                    },
+                    cx,
+                );
+            });
+
+            let rows = downloads.read(cx).transfer_rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, DownloadId(8));
+            assert_eq!(rows[0].status, DownloadStatus::Downloading);
         });
     }
 

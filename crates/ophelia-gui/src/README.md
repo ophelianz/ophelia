@@ -7,6 +7,7 @@
 - `app_menu.rs` / `app_actions.rs` / `tray.rs`: app-level actions, shortcuts, tray integration, and shell wiring
 - `platform/`: shared OS integration such as window chrome and app path policy
 - `runtime.rs`: GPUI-owned Tokio runtime for app services
+- `session_services.rs`: app-shell owner for `SessionHost` and the browser-extension adapter
 - `engine.rs`: thin facade over the backend crate named `ophelia`
 - `ipc.rs`: browser-extension HTTP adapter that sends adds through the core session
 - `settings/`: persistent application settings, including backend runtime knobs such as the IPC port
@@ -61,6 +62,7 @@
     - consumes `SessionEvent` from the core session and upserts/removes live rows by `DownloadId`
     - caches provider kind, source label, control support, HTTP chunk-map state, and an `id -> index` side map for each live row
 - `runtime.rs`: Zed-shaped GPUI global that owns a Tokio runtime/handle for app services
+- `session_services.rs`: app-shell owner for the embedded `SessionHost` and restartable browser-extension adapter
 - `app_actions.rs`: app-shell owner for the global `Downloads` entity handle, main/settings window reuse, overlay visibility state, and macOS dock/tray mode transitions
 - `tray.rs`: macOS tray/menu-bar bridge that refreshes aggregate speed and routes queued tray intents into `app_actions`
 - `ipc.rs`: local Axum server for browser-extension `/download`, spawned on the shared app runtime and routed through `SessionClient`

@@ -1200,7 +1200,7 @@ fn current_artifact_state(destination: &Path) -> ArtifactState {
     }
 }
 
-fn delete_artifact_files(destination: &Path) -> ArtifactState {
+pub(crate) fn delete_artifact_files(destination: &Path) -> ArtifactState {
     let mut removed_any = false;
     for path in artifact_paths(destination) {
         match std::fs::remove_file(&path) {

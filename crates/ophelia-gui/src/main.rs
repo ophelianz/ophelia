@@ -30,6 +30,7 @@ mod ipc;
 mod logging;
 mod platform;
 mod runtime;
+mod session_services;
 mod settings;
 mod theme;
 mod tray;
@@ -56,7 +57,10 @@ fn run() {
         let initial_settings = settings::Settings::load();
         rust_i18n::set_locale(initial_settings.resolved_language());
 
-        let downloads = cx.new(app::Downloads::new);
+        let session_client = session_services::start(&initial_settings, cx)
+            .expect("failed to start backend session");
+        let downloads =
+            cx.new(|cx| app::Downloads::new(session_client.clone(), initial_settings.clone(), cx));
 
         app_menu::init(cx);
         app_actions::init(downloads, cx);
