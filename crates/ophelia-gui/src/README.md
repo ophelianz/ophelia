@@ -58,7 +58,7 @@
 ### Backend-adjacent root
 
 - `app.rs`: GPUI download model type, live row arrays, and stats sampler
-    - does not own `DownloadEngine`, the DB worker, or the history reader
+    - does not own backend engine, database, or history-reader objects
     - consumes `SessionEvent` from the core session and upserts/removes live rows by `DownloadId`
     - caches provider kind, source label, control support, HTTP chunk-map state, and an `id -> index` side map for each live row
 - `runtime.rs`: Zed-shaped GPUI global that owns a Tokio runtime/handle for app services

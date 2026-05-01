@@ -372,33 +372,34 @@ impl Downloads {
                                     .ok();
                                 });
                             }
-                            Err(SessionError::Lagged { skipped }) => {
-                                tracing::warn!(
-                                    skipped,
-                                    "backend session event stream lagged, refreshing snapshot"
-                                );
-                                match session_client.subscribe().await {
-                                    Ok(next_subscription) => {
-                                        let snapshot = next_subscription.snapshot.clone();
-                                        subscription = next_subscription;
-                                        cx.update(|app| {
-                                            this.update(app, |model, cx| {
-                                                model.apply_session_snapshot(snapshot, cx);
-                                            })
-                                            .ok();
-                                        });
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            "backend session resubscribe failed: {error}"
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
                             Err(error) => {
-                                tracing::warn!("backend session event stream closed: {error}");
-                                break;
+                                if let Some(skipped) = session_lagged_skip_count(&error) {
+                                    tracing::warn!(
+                                        skipped,
+                                        "backend session event stream lagged, refreshing snapshot"
+                                    );
+                                    match session_client.subscribe().await {
+                                        Ok(next_subscription) => {
+                                            let snapshot = next_subscription.snapshot.clone();
+                                            subscription = next_subscription;
+                                            cx.update(|app| {
+                                                this.update(app, |model, cx| {
+                                                    model.apply_session_snapshot(snapshot, cx);
+                                                })
+                                                .ok();
+                                            });
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                "backend session resubscribe failed: {error}"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!("backend session event stream closed: {error}");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -852,6 +853,13 @@ impl Downloads {
     }
 }
 
+fn session_lagged_skip_count(error: &SessionError) -> Option<u64> {
+    match error {
+        SessionError::Lagged { skipped } => Some(*skipped),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionCommandKind {
     Add,
@@ -1187,6 +1195,15 @@ mod tests {
         assert_eq!(map.get(&DownloadId(7)), Some(&0));
         assert_eq!(map.get(&DownloadId(11)), Some(&1));
         assert_eq!(map.get(&DownloadId(3)), Some(&2));
+    }
+
+    #[test]
+    fn lagged_subscription_errors_are_resubscribed() {
+        assert_eq!(
+            session_lagged_skip_count(&SessionError::Lagged { skipped: 12 }),
+            Some(12)
+        );
+        assert_eq!(session_lagged_skip_count(&SessionError::Closed), None);
     }
 
     #[test]
