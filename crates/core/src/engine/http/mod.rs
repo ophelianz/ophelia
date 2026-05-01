@@ -25,6 +25,7 @@ pub mod task;
 pub mod throttle;
 
 mod chunk_map;
+mod disk_writer;
 mod events;
 mod probe;
 mod range_runner;

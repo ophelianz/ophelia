@@ -18,7 +18,7 @@ The GUI files are parked under `crates/ophelia-gui`, but there is no GUI package
 
 The core no longer imports GUI `Settings` or app platform path helpers. Engine code receives `CoreConfig`, `DestinationPolicyConfig`, `HttpCoreConfig`, and `CorePaths`.
 
-The current engine uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle, starts the actor, and exposes one async event stream.
+The current engine uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle, starts the controller, and exposes one async event stream.
 
 ## Ground Rules
 
@@ -59,7 +59,7 @@ Files added:
 
 These docs are under ignored `docs/`, so they must be added with `git add -f`.
 
-The current branch is `refactor/http-core`. The audit target starts at commit `84db2ae perf: add range hot-path benchmarks`.
+The current branch is `refcontroller/http-core`. The audit target starts at commit `84db2ae perf: add range hot-path benchmarks`.
 
 ## Slice 2: Core-First Workspace Shape
 
@@ -113,7 +113,7 @@ The target is a work-unit progress table for the hot path, with exact duplicate 
 
 ## Slice 7: Disk Writer
 
-Range workers should not own file writes forever. The target is one disk writer owner per download. Workers send write jobs, the writer owns the file handle, and bytes count as written only after write confirmation.
+Range downloads now have one disk writer owner per download. Workers send write jobs, the writer owns the file handle, and bytes count as written only after write confirmation.
 
 This should also give us better write metrics than OS process counters.
 

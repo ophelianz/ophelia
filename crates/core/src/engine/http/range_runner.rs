@@ -45,6 +45,7 @@ use crate::engine::types::{
 };
 
 use super::chunk_map::snapshot_from_covered_ranges;
+use super::disk_writer::{RangeDiskWriter, RangeWriteResult};
 use super::events::{SchedulerAction, WorkerEvent};
 use super::range_worker::{RangeWorkerConfig, run_range_worker};
 use super::ranges::{ByteRange, RangeSet};
@@ -104,7 +105,7 @@ struct RangeDownload {
     id: DownloadId,
     url: String,
     client: Arc<reqwest::Client>,
-    file: Option<Arc<std::fs::File>>,
+    writer: Option<RangeDiskWriter>,
     scheduler: RangeScheduler,
     total_bytes: u64,
     part_path: PathBuf,
@@ -189,12 +190,13 @@ impl RangeDownload {
         let (events_tx, events_rx) = mpsc::channel(WORKER_EVENT_CAPACITY);
         let scheduler = scheduler_from_chunks(config.total_bytes, &config.chunks);
         let initial_downloaded = scheduler.downloaded_bytes();
+        let writer = RangeDiskWriter::spawn(config.file);
 
         Self {
             id: config.id,
             url: config.url,
             client: config.client,
-            file: Some(Arc::new(config.file)),
+            writer: Some(writer),
             scheduler,
             total_bytes: config.total_bytes,
             part_path: config.part_path,
@@ -325,7 +327,7 @@ impl RangeDownload {
     }
 
     fn spawn_attempt(&mut self, attempt: ActiveAttempt) {
-        let Some(file) = self.file.as_ref().map(Arc::clone) else {
+        let Some(write_jobs) = self.writer.as_ref().map(RangeDiskWriter::sender) else {
             self.failed = true;
             return;
         };
@@ -338,7 +340,7 @@ impl RangeDownload {
             url: self.url.clone(),
             attempt,
             live_stop_at: Arc::clone(&live_stop_at),
-            file,
+            write_jobs,
             write_buffer_size: self.write_buffer_size,
             stall_timeout: self.stall_timeout,
             pause_token: self.pause_token.clone(),
@@ -563,12 +565,66 @@ impl RangeDownload {
     }
 
     async fn stop_workers(&mut self) {
+        if self.paused && !self.failed {
+            self.wait_for_workers_to_stop().await;
+        } else {
+            self.abort_workers().await;
+        }
+
+        if let Some(writer) = self.writer.take() {
+            for result in writer.shutdown().await {
+                self.apply_write_result(result);
+            }
+        }
+        self.drain_worker_events();
+    }
+
+    async fn abort_workers(&mut self) {
         self.workers.abort_all();
         while self.workers.join_next().await.is_some() {}
-        self.file.take();
+    }
+
+    async fn wait_for_workers_to_stop(&mut self) {
+        // On pause, do not abort first
+        // A worker may have a confirmed write but not yet have sent `BytesWritten`
+        while !self.workers.is_empty() {
+            tokio::select! {
+                event = self.events_rx.recv() => {
+                    match event {
+                        Some(event) => self.apply_event(event),
+                        None => {
+                            self.failed = true;
+                            break;
+                        }
+                    }
+                }
+                result = self.workers.join_next() => {
+                    match result {
+                        Some(Ok(())) | None => {}
+                        Some(Err(_error)) => self.failed = true,
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_write_result(&mut self, result: RangeWriteResult) {
+        self.apply_event(result.into_worker_event());
+    }
+
+    fn drain_worker_events(&mut self) {
+        while let Ok(event) = self.events_rx.try_recv() {
+            self.apply_event(event);
+        }
     }
 
     async fn finish(mut self) -> super::task::TaskFinalState {
+        if self.failed {
+            self.flush_runtime_updates().await;
+            self.send_progress(DownloadStatus::Error).await;
+            return self.task_state(DownloadStatus::Error);
+        }
+
         if self.paused {
             self.save_pause_snapshot();
             self.flush_runtime_updates().await;
@@ -576,7 +632,7 @@ impl RangeDownload {
             return self.task_state(DownloadStatus::Paused);
         }
 
-        if self.failed || !self.scheduler.is_complete() {
+        if !self.scheduler.is_complete() {
             self.flush_runtime_updates().await;
             self.send_progress(DownloadStatus::Error).await;
             return self.task_state(DownloadStatus::Error);

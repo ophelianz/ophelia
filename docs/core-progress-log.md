@@ -4,7 +4,7 @@ This file keeps the rewrite honest. Add to it after each slice.
 
 ## Baseline
 
-Branch: `refactor/http-core`
+Branch: `refcontroller/http-core`
 
 Audit target commit: `84db2ae perf: add range hot-path benchmarks`
 
@@ -33,11 +33,11 @@ The engine imported `Settings` and app platform paths. Slice 2 fixed this by add
 
 Async runtime lane at audit time:
 
-The engine created its own Tokio runtime. Slice 3 fixed that. The audit also found that active pause waited inside the actor loop. Slice 5 fixed that by letting task final state flow through `TaskRuntimeUpdate::Done`.
+The engine created its own Tokio runtime. Slice 3 fixed that. The audit also found that active pause waited inside the controller loop. Slice 5 fixed that by letting task final state flow through `TaskRuntimeUpdate::Done`.
 
-Disk I/O lane:
+Disk I/O lane at audit time:
 
-Range workers do synchronous positioned writes inside Tokio tasks. This can block runtime worker threads on slow filesystems.
+Range workers did synchronous positioned writes inside Tokio tasks. The disk writer slice fixed this for range downloads by moving positioned writes into one `spawn_blocking` writer per download.
 
 Data layout lane:
 
@@ -88,8 +88,8 @@ No matches remain.
 
 ## Risks Listed After Slice 2
 
-- Active pause could block the actor loop. Slice 5 closed this
-- Range workers can block Tokio worker threads with sync file writes
+- Active pause could block the controller loop. Slice 5 closed this
+- Range workers could block Tokio worker threads with sync file writes. The disk writer slice closed this for range downloads
 - Hot progress tracking uses `RangeSet` insert, sort, and merge
 - GUI adapter is not wired as a package yet
 - Restored downloads still rebuild provider config from current core config
@@ -111,7 +111,7 @@ Removed:
 
 Runtime issue found next:
 
-Active pause waited for the download task inside the actor loop. Slice 5 later moved task final state into the task update channel so the actor can keep polling.
+Active pause waited for the download task inside the controller loop. Slice 5 later moved task final state into the task update channel so the controller can keep polling.
 
 ## Next Slice
 
@@ -139,7 +139,7 @@ Added:
 - `DownloadEngine::next_event`
 - `EngineError::Closed`
 - bounded async channels for engine commands, public events, task runtime updates, and worker events
-- `TaskRuntimeUpdate::Progress`, so download tasks report progress through the actor
+- `TaskRuntimeUpdate::Progress`, so download tasks report progress through the controller
 
 Removed:
 
@@ -157,7 +157,7 @@ Current capacities:
 
 Follow-up found after review:
 
-The first version still had two bugs in the new shape. Active pause awaited the task from inside the actor, and task final state used a separate channel that could race ahead of late task updates.
+The first version still had two bugs in the new shape. Active pause awaited the task from inside the controller, and task final state used a separate channel that could race ahead of late task updates.
 
 ## Slice 5 Result
 
@@ -165,17 +165,17 @@ The event-stream slice now has the missing backpressure fixes.
 
 Changed:
 
-- command methods wait for actor replies through oneshot replies
+- command methods wait for controller replies through oneshot replies
 - unknown ids now return `EngineError::NotFound`
 - unsupported controls now return `EngineError::Unsupported`
 - artifact deletion takes only a download id
 - task final state now uses `TaskRuntimeUpdate::Done`
-- active pause only cancels the pause token, then the actor keeps draining updates
+- active pause only cancels the pause token, then the controller keeps draining updates
 - add and restore emit `TransferSnapshot` events
 
 Why this matters:
 
-Commands now tell the caller whether the actor accepted or rejected the request. Pause acceptance is not the same as paused-on-disk; the paused state still arrives later as an event. Delete-by-id cannot fall back to a frontend path. Task updates and final task state stay ordered on one channel.
+Commands now tell the caller whether the controller accepted or rejected the request. Pause acceptance is not the same as paused-on-disk; the paused state still arrives later as an event. Delete-by-id cannot fall back to a frontend path. Task updates and final task state stay ordered on one channel.
 
 ## Check Log
 
@@ -216,12 +216,40 @@ Slice 4 event stream and backpressure check:
 - `cargo test -p ophelia --tests` passed
 - `cargo bench -p ophelia --bench http_range_data --no-run` passed
 
-Slice 5 actor correctness check:
+Slice 5 controller correctness check:
 
 - `cargo fmt --check -p ophelia` passed
 - `git diff --check` passed
 - stale task-final and old event API scan returned no matches
 - core GUI-import scan returned no matches
+- `cargo clippy -p ophelia --all-targets` passed
+- `cargo test -p ophelia --tests` passed
+- `cargo bench -p ophelia --bench http_range_data --no-run` passed
+
+## Slice 6 Result
+
+Range downloads now have one disk writer owner per download.
+
+Changed:
+
+- the engine owner file became `controller.rs`
+- the internal owner type became `EngineController`
+- range workers send `RangeWriteJob` values instead of writing to `std::fs::File`
+- `RangeDiskWriter` owns the file and runs on `spawn_blocking`
+- `WorkerEvent::BytesWritten` is emitted only after write confirmation
+- writer shutdown returns completed writes from workers that were already aborted on failure paths
+- range pause drains accepted writes before saving the pause snapshot
+
+Why this matters:
+
+Network workers no longer block Tokio worker threads on range file writes. Disk write metrics now line up with confirmed writes in the range path.
+
+Checks:
+
+- `cargo fmt --check -p ophelia` passed
+- `git diff --check` passed
+- stale controller rename scan returned no matches
+- stale direct range-worker file-write scan returned no matches
 - `cargo clippy -p ophelia --all-targets` passed
 - `cargo test -p ophelia --tests` passed
 - `cargo bench -p ophelia --bench http_range_data --no-run` passed

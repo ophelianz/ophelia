@@ -17,16 +17,16 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Download engine actor
+//! Download engine controller
 //!
 //! Sits between frontends and download tasks
 //! Commands come in through a bounded channel
-//! Frontends read one ordered event stream from the actor
+//! Frontends read one ordered event stream from the controller
 //!
 //! Queue flow:
 //!   Add    → if tasks < max_concurrent, spawn immediately; else push to queue
 //!   Done   → the task sends `TaskRuntimeUpdate::Done` after its last update
-//!   Pause  → cancel the task's CancellationToken and let the actor keep draining task updates
+//!   Pause  → cancel the task's CancellationToken and let the controller keep draining task updates
 //!            If the task reports paused with resume data, store it in `paused`
 //!            If it is still queued, move it directly to `paused`
 //!   Resume → if at capacity, push to front of queue; else spawn immediately
@@ -111,7 +111,7 @@ struct TaskEntry {
     destination_sink: TaskDestinationSink,
     /// May narrow after the task starts
     control_support: TransferControlSupport,
-    /// Pause finishes through TaskRuntimeUpdate::Done so the actor can keep draining channels
+    /// Pause finishes through TaskRuntimeUpdate::Done so the controller can keep draining channels
     pause_requested: bool,
     /// Kept for resume
     spec: DownloadSpec,
@@ -134,7 +134,7 @@ struct QueuedTask {
 // --- public engine handle ------------------------------------------------
 
 pub struct DownloadEngine {
-    actor: Option<JoinHandle<()>>,
+    controller: Option<JoinHandle<()>>,
     cmd_tx: mpsc::Sender<EngineCommand>,
     event_rx: mpsc::Receiver<EngineEvent>,
     next_id: u64,
@@ -152,13 +152,13 @@ impl DownloadEngine {
         let (runtime_update_tx, runtime_update_rx) =
             mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
 
-        let actor = runtime.spawn(
-            EngineActor::new(event_tx, config, db_tx, runtime_update_tx)
+        let controller = runtime.spawn(
+            EngineController::new(event_tx, config, db_tx, runtime_update_tx)
                 .run(cmd_rx, runtime_update_rx),
         );
 
         Self {
-            actor: Some(actor),
+            controller: Some(controller),
             cmd_tx,
             event_rx,
             next_id: initial_next_id,
@@ -184,7 +184,7 @@ impl DownloadEngine {
         result
     }
 
-    /// Returns when the actor accepts the pause request
+    /// Returns when the controller accepts the pause request
     /// The paused state arrives later through EngineEvent::Progress
     pub async fn pause(&self, id: DownloadId) -> Result<(), EngineError> {
         self.command_reply(|reply| EngineCommand::Pause { id, reply })
@@ -220,8 +220,8 @@ impl DownloadEngine {
         let send_result = self
             .command_reply(|reply| EngineCommand::Shutdown { reply: Some(reply) })
             .await;
-        if let Some(actor) = self.actor.take() {
-            let _ = actor.await;
+        if let Some(controller) = self.controller.take() {
+            let _ = controller.await;
         }
         send_result
     }
@@ -247,12 +247,12 @@ impl Drop for DownloadEngine {
     }
 }
 
-// --- actor ---------------------------------------------------------------
+// --- controller ---------------------------------------------------------------
 
 /// Owns engine state and handles commands on the tokio runtime
 /// New engine-wide state goes here as fields
 /// New source kinds add new spec variants and spawn paths
-struct EngineActor {
+struct EngineController {
     tasks: HashMap<DownloadId, TaskEntry>,
     paused: HashMap<DownloadId, PausedTask>,
     queue: VecDeque<QueuedTask>,
@@ -268,7 +268,7 @@ struct EngineActor {
     runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
-impl EngineActor {
+impl EngineController {
     fn new(
         event_tx: mpsc::Sender<EngineEvent>,
         config: CoreConfig,
@@ -885,7 +885,10 @@ impl EngineActor {
 
     async fn finish_active_pause(&mut self, id: DownloadId, entry: TaskEntry) {
         if !entry.pause_requested {
-            tracing::warn!(id = id.0, "download paused without an actor pause request");
+            tracing::warn!(
+                id = id.0,
+                "download paused without a controller pause request"
+            );
         }
         let resume_data = provider::take_resume_data(entry.pause_sink);
         if let Some(resume_data) = resume_data {

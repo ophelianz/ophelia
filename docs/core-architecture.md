@@ -31,7 +31,7 @@ Today the workspace builds the core package by default. The core lives in `crate
 
 The old GUI source is parked in `crates/ophelia-gui`, but it is not a package yet. That means the GUI is intentionally behind the core rewrite right now.
 
-`DownloadEngine` in `crates/core/src/engine/actor.rs` is the current engine handle. The caller gives it a Tokio `Handle`, and it spawns one engine actor on that runtime. Commands go through a bounded async channel. Frontends read one ordered stream with `next_event`.
+`DownloadEngine` in `crates/core/src/engine/controller.rs` is the current engine handle. The caller gives it a Tokio `Handle`, and it spawns one engine controller on that runtime. Commands go through a bounded async channel. Frontends read one ordered stream with `next_event`.
 
 The range runner is already much cleaner than the old slot model. Workers report events. The scheduler owns pending ranges, completed ranges, active attempts, optional stealing state, and optional hedge state.
 
@@ -43,7 +43,7 @@ The old `Settings` and platform path leaks are gone from core. The scan to keep 
 rg -n "crate::settings|crate::platform|gpui|views|ipc|updater|tray" crates/core/src crates/core/benches
 ```
 
-The remaining large leak is hot-path ownership. Range workers still write to disk directly.
+The largest old hot-path ownership leak is closed for range downloads. Range workers no longer own the file handle.
 
 ## Target Core Inputs
 
@@ -75,7 +75,7 @@ The GUI can still save a larger `Settings` struct later. The adapter should turn
 
 ## Target Core Outputs
 
-`EngineEvent` is the single stream that frontends read. The actor is the only public sender, so progress, write stats, destination changes, control support, chunk maps, and removal events keep actor order.
+`EngineEvent` is the single stream that frontends read. The controller is the only public sender, so progress, write stats, destination changes, control support, chunk maps, and removal events keep controller order.
 
 Current event groups:
 
@@ -93,7 +93,7 @@ The GUI can convert those into `TransferListRow` and `HistoryListRow`. The CLI c
 
 ## Runtime Ownership
 
-The core now uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle and starts the engine actor there.
+The core now uses a caller-owned Tokio runtime. `DownloadEngine::spawn_on` takes a runtime handle and starts the engine controller there.
 
 The target remains:
 
@@ -102,7 +102,7 @@ The target remains:
 - core tasks run on the runtime given by the frontend
 - shutdown uses cancel tokens and waits for tasks where cleanup matters
 
-Active pause no longer waits inside the actor loop. The actor cancels the task token, keeps polling commands and task updates, then handles the pause when the task sends `TaskRuntimeUpdate::Done`.
+Active pause no longer waits inside the controller loop. The controller cancels the task token, keeps polling commands and task updates, then handles the pause when the task sends `TaskRuntimeUpdate::Done`.
 
 ## Persistence Ownership
 
@@ -121,18 +121,18 @@ The GUI should not reconstruct restored live rows independently from core state 
 
 ## Disk Ownership
 
-Range downloads currently share an `Arc<std::fs::File>` across range workers. Each worker performs positioned writes inside an async Tokio task.
+Range downloads now create one disk writer per download. The writer owns the part-file handle and runs on `spawn_blocking`, so positioned writes do not block Tokio worker threads.
 
-That is a real risk. A slow filesystem call can block a Tokio worker thread. It is bounded by connection count and buffer size, but it is still the wrong long-term shape.
+Range workers still trim buffers to the current live stop point. Then they send `RangeWriteJob` values through a bounded queue and wait for `RangeWriteResult`.
 
-The target is one disk writer owner per download:
+Current shape:
 
 - workers download bytes
 - workers send write jobs through a bounded queue
 - the disk writer owns the file
 - the disk writer confirms writes
 - progress counts written bytes only after confirmation
-- pause drains or stops the writer safely
+- pause drains accepted writes before saving reusable ranges
 - write errors fail the transfer
 
 This also gives us better logical disk write metrics for the UI.
@@ -175,7 +175,7 @@ Neither frontend should own HTTP range scheduling, DB schema, resume logic, or d
 - Core does not import GPUI, views, IPC, updater, tray, or GUI row types
 - Core does not accept the full GUI `Settings`
 - Frontends pass paths into core
-- Commands return real results from the actor, not only channel-send success
+- Commands return real results from the controller, not only channel-send success
 - Artifact deletion is id-owned. Unknown ids return `EngineError::NotFound`
 - Task final state travels through `TaskRuntimeUpdate::Done` after earlier task updates
 - Add and restore emit a `TransferSnapshot` so frontends can seed rows from core events

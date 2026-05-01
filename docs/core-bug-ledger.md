@@ -1,6 +1,6 @@
 # Core Rewrite Bug Ledger
 
-This ledger includes bugs, likely unintended behavior, and growth risks found during the first audit. It is not a refactor wish list. Each item needs a test or measurement before a large fix.
+This ledger includes bugs, likely unintended behavior, and growth risks found during the first audit. It is not a refcontroller wish list. Each item needs a test or measurement before a large fix.
 
 ## Closed In Slice 2
 
@@ -12,7 +12,7 @@ Fixed. The engine now accepts core-owned config types instead of GUI `Settings`.
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/destination.rs`
 - `crates/core/src/engine/spec.rs`
 - `crates/core/src/engine/provider.rs`
@@ -41,7 +41,7 @@ Fixed. `DownloadEngine` used to call `Runtime::new` internally. Core now takes a
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/tests/engine_notifications.rs`
 
 Why it matters:
@@ -54,21 +54,21 @@ Keep engine tests on `#[tokio::test]` and avoid adding `Runtime::new` back to co
 
 Priority: closed
 
-### Active Pause Could Deadlock The Engine Actor
+### Active Pause Could Deadlock The Engine Controller
 
 Exact behavior:
 
-Fixed. Active pause used to cancel the download token and then await the task from inside `EngineActor::run`. The task could be waiting to send runtime updates or final state through bounded channels that only the actor drained.
+Fixed. Active pause used to cancel the download token and then await the task from inside `EngineController::run`. The task could be waiting to send runtime updates or final state through bounded channels that only the controller drained.
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/provider.rs`
 - `crates/core/src/engine/types.rs`
 
 Why it matters:
 
-The actor must stay responsive while a task drains network buffers or disk writes. It now cancels the token, keeps polling the task update channel, and handles pause when `TaskRuntimeUpdate::Done` arrives.
+The controller must stay responsive while a task drains network buffers or disk writes. It now cancels the token, keeps polling the task update channel, and handles pause when `TaskRuntimeUpdate::Done` arrives.
 
 Likely test:
 
@@ -80,11 +80,11 @@ Priority: closed
 
 Exact behavior:
 
-Fixed. `DownloadEngine::delete_artifact` now takes only a download id. If the actor does not know that id, it returns `EngineError::NotFound` and does not touch the filesystem.
+Fixed. `DownloadEngine::delete_artifact` now takes only a download id. If the controller does not know that id, it returns `EngineError::NotFound` and does not touch the filesystem.
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/tests/engine_notifications.rs`
 
 Why it matters:
@@ -105,13 +105,13 @@ Fixed. Task final state now travels as `TaskRuntimeUpdate::Done` on the same cha
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/provider.rs`
 - `crates/core/src/engine/types.rs`
 
 Why it matters:
 
-The actor should not remove an active task before it has seen the task's own final write stats or destination update.
+The controller should not remove an active task before it has seen the task's own final write stats or destination update.
 
 Likely test:
 
@@ -128,7 +128,7 @@ Partly fixed. Add and restore now emit `TransferSnapshot` events. Frontends can 
 Files involved:
 
 - `crates/core/src/engine/types.rs`
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/tests/engine_notifications.rs`
 
 Why it matters:
@@ -141,30 +141,31 @@ Likely test:
 
 Priority: partly closed
 
-## High
-
-### Range Workers Do Sync Disk Writes Inside Tokio Tasks
+### Range Workers Did Sync Disk Writes Inside Tokio Tasks
 
 Exact behavior:
 
-Range workers receive `Arc<std::fs::File>` and call positioned `write_all_at` or `seek_write` from inside async worker tasks.
+Fixed for range downloads. Range workers now send `RangeWriteJob` values to one per-download `RangeDiskWriter`. The writer owns the file and runs on `spawn_blocking`.
 
 Files involved:
 
 - `crates/core/src/engine/http/task.rs`
+- `crates/core/src/engine/http/disk_writer.rs`
 - `crates/core/src/engine/http/range_runner.rs`
 - `crates/core/src/engine/http/range_worker.rs`
 - `crates/core/src/engine/alloc.rs`
 
 Why it matters:
 
-A slow disk write can block a Tokio worker thread. With multiple downloads, this can delay network reads, timers, cancellation, health checks, and progress events.
+A slow range write no longer blocks the async worker that reads the network response. Write stats are counted after confirmed writes.
 
 Likely test:
 
-Add a slow disk writer test or instrumentation around the write path. Measure pause latency and runtime responsiveness during heavy range writes.
+Keep disk writer and range worker tests. Add slow disk instrumentation later if pause latency becomes suspicious under real disks.
 
-Priority: high
+Priority: closed for range downloads
+
+## High
 
 ### Bounded Channels Added In Core
 
@@ -174,7 +175,7 @@ The core now uses bounded Tokio channels for engine commands, public events, tas
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/provider.rs`
 - `crates/core/src/engine/http/range_runner.rs`
 - `crates/core/src/engine/http/range_worker.rs`
@@ -268,7 +269,7 @@ On startup the GUI restores saved downloads into engine paused state and also pu
 Files involved:
 
 - `crates/ophelia-gui/src/app.rs`
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/state/db.rs`
 
 Why it matters:
@@ -311,7 +312,7 @@ The task can accept pause before probing discovers that the server requires sing
 
 Files involved:
 
-- `crates/core/src/engine/actor.rs`
+- `crates/core/src/engine/controller.rs`
 - `crates/core/src/engine/http/task.rs`
 - `crates/core/src/engine/http/single.rs`
 - `tests/engine_notifications.rs`

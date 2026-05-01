@@ -39,9 +39,9 @@ graph TD
 flowchart TD
   Url["URL request"] --> Spec["DownloadSpec from CoreConfig"]
   Spec --> EngineAdd["DownloadEngine::add"]
-  EngineAdd --> Actor["EngineActor"]
-  Actor --> Seed["EngineEvent::TransferAdded"]
-  Actor --> Provider["provider::spawn_task"]
+  EngineAdd --> Controller["EngineController"]
+  Controller --> Seed["EngineEvent::TransferAdded"]
+  Controller --> Provider["provider::spawn_task"]
   Provider --> Task["http::download_task"]
   Task --> Probe["probe server"]
   Probe --> RangeQuestion{"range support and known size?"}
@@ -54,8 +54,8 @@ flowchart TD
   Worker --> Event["WorkerEvent"]
   Event --> Scheduler
   Scheduler --> Progress["ProgressUpdate and runtime update"]
-  Progress --> Actor
-  Actor --> Events["EngineEvent stream"]
+  Progress --> Controller
+  Controller --> Events["EngineEvent stream"]
   Seed --> Events
   Events --> Frontend["GUI or CLI adapter"]
   Frontend --> Rows["rows, progress, history, stats graph"]
@@ -83,7 +83,7 @@ flowchart LR
 
   subgraph Core["ophelia crate"]
     CoreApi["async engine API"]
-    Actor["engine task"]
+    Controller["engine task"]
     Providers["providers"]
     Store["state store"]
     DiskWriter["disk writer"]
@@ -91,11 +91,11 @@ flowchart LR
 
   Gui --> SettingsToCore --> CoreApi
   Cli --> ArgsToRequest --> CoreApi
-  CoreApi --> Actor
-  Actor --> Providers
-  Actor --> Store
+  CoreApi --> Controller
+  Controller --> Providers
+  Controller --> Store
   Providers --> DiskWriter
-  Actor --> EngineEvents["EngineEvent stream"]
+  Controller --> EngineEvents["EngineEvent stream"]
   EngineEvents --> EventsToRows
   EventsToRows --> Gui
   EventsToRows --> Cli
@@ -107,7 +107,7 @@ flowchart LR
 flowchart TD
   CurrentCaller["caller-owned Tokio runtime"] --> Handle["tokio runtime Handle"]
   Handle --> CurrentEngine["DownloadEngine::spawn_on"]
-  CurrentEngine --> CurrentActor["spawns EngineActor"]
+  CurrentEngine --> CurrentController["spawns EngineController"]
 
   TargetGui["target GUI"] --> GuiRuntime["GUI-owned runtime bridge"]
   TargetCli["target CLI"] --> CliRuntime["tokio::main"]
@@ -136,7 +136,8 @@ flowchart LR
 
   subgraph Workers["workers"]
     Worker["range worker"]
-    Write["std file write_at"]
+    Job["RangeWriteJob"]
+    Writer["RangeDiskWriter on spawn_blocking"]
     Event["WorkerEvent"]
   end
 
@@ -144,25 +145,30 @@ flowchart LR
   Sequential --> Pending
   Pending --> Active
   Active --> Worker
-  Worker --> Write
-  Write --> Event
+  Worker --> Job
+  Job --> Writer
+  Writer --> Worker
+  Worker --> Event
   Event --> Completed
   Event --> Hedges
 ```
 
-## Target Range Disk Path
+## Range Disk Path
 
 ```mermaid
 flowchart TD
   Worker["range worker downloads bytes"] --> Job["write job with offset and bytes"]
   Job --> Queue{"bounded write queue"}
-  Queue --> Writer["one disk writer owns file"]
+  Queue --> Writer["RangeDiskWriter owns file"]
   Writer --> Result{"write result"}
-  Result -->|"ok"| Count["count bytes as written"]
-  Result -->|"error"| Fail["fail download"]
+  Result -->|"ok"| WorkerConfirm["worker receives confirmation"]
+  Result -->|"worker gone"| Orphan["writer returns orphaned result on shutdown"]
+  Result -->|"error"| Fail["WorkerFailure"]
+  WorkerConfirm --> Count["WorkerEvent::BytesWritten"]
+  Orphan --> Count
   Count --> Progress["progress and write stats"]
   Progress --> Events["EngineEvent"]
-  Queue -->|"pause requested"| Drain["drain or safely stop writer"]
+  Queue -->|"pause requested"| Drain["stop workers and drain accepted jobs"]
   Drain --> Snapshot["save reusable ranges"]
 ```
 
@@ -176,8 +182,8 @@ graph TD
   Store --> Writer["DB writer"]
   Store --> Restore["restore loader"]
   Store --> History["history reader"]
-  Actor["engine actor"] --> Writer
-  Restore --> Actor
+  Controller["engine controller"] --> Writer
+  Restore --> Controller
   History --> GuiHistory["GUI history rows"]
   History --> CliHistory["future CLI history output"]
 ```
@@ -186,8 +192,8 @@ graph TD
 
 ```mermaid
 flowchart TD
-  Command["EngineCommand"] --> Actor["engine task"]
-  Actor --> Task["provider task"]
+  Command["EngineCommand"] --> Controller["engine task"]
+  Controller --> Task["provider task"]
   Task --> Runtime["TaskRuntimeUpdate"]
   Runtime -->|"progress tick"| Progress["EngineEvent::Progress"]
   Runtime -->|"bytes written"| WriteStats["EngineEvent::DownloadBytesWritten"]
@@ -195,8 +201,8 @@ flowchart TD
   Runtime -->|"control support changed"| Support["EngineEvent::ControlSupportChanged"]
   Runtime -->|"chunk map changed"| ChunkMap["EngineEvent::ChunkMapChanged"]
   Runtime -->|"done"| Done["finish DB state and start next queued task"]
-  Actor --> Seed["EngineEvent::TransferAdded or TransferRestored"]
-  Actor --> Removal["EngineEvent::LiveTransferRemoved"]
+  Controller --> Seed["EngineEvent::TransferAdded or TransferRestored"]
+  Controller --> Removal["EngineEvent::LiveTransferRemoved"]
   WriteStats --> Frontend["frontend adapter"]
   Progress --> Frontend
   Destination --> Frontend
@@ -204,6 +210,6 @@ flowchart TD
   ChunkMap --> Frontend
   Seed --> Frontend
   Removal --> Frontend
-  Done --> Actor
-  Actor --> Reply
+  Done --> Controller
+  Controller --> Reply
 ```
