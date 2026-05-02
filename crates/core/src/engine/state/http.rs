@@ -21,7 +21,7 @@ use std::io::{Error, ErrorKind};
 
 use rusqlite::{Connection, params, types::Type};
 
-use crate::engine::types::{ChunkSnapshot, HttpResumeData, ProviderResumeData, TransferId};
+use crate::engine::types::{ChunkSnapshot, HttpResumeData, RunnerResumeData, TransferId};
 
 pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -41,7 +41,7 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 pub(super) fn load_resume_data(
     conn: &Connection,
     download_id: TransferId,
-) -> rusqlite::Result<Option<ProviderResumeData>> {
+) -> rusqlite::Result<Option<RunnerResumeData>> {
     let mut stmt = conn.prepare(
         "SELECT start, end_byte, downloaded FROM chunks
          WHERE download_id = ?1 ORDER BY slot",
@@ -62,20 +62,20 @@ pub(super) fn load_resume_data(
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    Ok((!chunks.is_empty()).then(|| ProviderResumeData::Http(HttpResumeData::new(chunks))))
+    Ok((!chunks.is_empty()).then(|| RunnerResumeData::Http(HttpResumeData::new(chunks))))
 }
 
 pub(super) fn save_resume_data(
     conn: &Connection,
     download_id: TransferId,
-    resume_data: Option<&ProviderResumeData>,
+    resume_data: Option<&RunnerResumeData>,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM chunks WHERE download_id = ?1",
         params![download_id.0 as i64],
     )?;
 
-    if let Some(ProviderResumeData::Http(data)) = resume_data {
+    if let Some(RunnerResumeData::Http(data)) = resume_data {
         let mut stmt = conn.prepare(
             "INSERT INTO chunks (download_id, slot, start, end_byte, downloaded)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -124,7 +124,7 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{load_resume_data, migrate, save_resume_data};
-    use crate::engine::types::{ChunkSnapshot, HttpResumeData, ProviderResumeData, TransferId};
+    use crate::engine::types::{ChunkSnapshot, HttpResumeData, RunnerResumeData, TransferId};
 
     #[test]
     fn load_resume_data_rejects_negative_chunk_values() {
@@ -158,7 +158,7 @@ mod tests {
     fn save_resume_data_clamps_downloaded_to_chunk_length() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
-        let resume = ProviderResumeData::Http(HttpResumeData::new(vec![ChunkSnapshot {
+        let resume = RunnerResumeData::Http(HttpResumeData::new(vec![ChunkSnapshot {
             start: 10,
             end: 20,
             downloaded: 50,
@@ -167,7 +167,7 @@ mod tests {
         save_resume_data(&conn, TransferId(1), Some(&resume)).unwrap();
         let loaded = load_resume_data(&conn, TransferId(1)).unwrap().unwrap();
 
-        let ProviderResumeData::Http(data) = loaded;
+        let RunnerResumeData::Http(data) = loaded;
         assert_eq!(data.chunks[0].downloaded, 10);
     }
 }

@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use gpui::{Context, SharedString};
 
 use crate::engine::{
-    ArtifactState, HistoryFilter, HistoryRow, TransferChunkMapState, TransferControlAction,
+    ArtifactState, DirectChunkMapState, HistoryFilter, HistoryRow, TransferControlAction,
     TransferControlSupport, TransferId, TransferStatus, TransferSummary,
 };
 #[cfg(test)]
@@ -46,7 +46,7 @@ use crate::views::overlays::notification::NotificationKind;
 #[cfg(test)]
 use ophelia::service::OpheliaService;
 use ophelia::service::{
-    OpheliaClient, OpheliaError, OpheliaEvent, OpheliaSnapshot, TransferDestination,
+    OpheliaClient, OpheliaError, OpheliaSnapshot, OpheliaUpdateBatch, TransferDestination,
     TransferRequest, TransferRequestSource,
 };
 
@@ -68,7 +68,7 @@ pub struct Downloads {
     pub statuses: Vec<TransferStatus>,
     /// Controls this transfer supports
     pub control_supports: Vec<TransferControlSupport>,
-    pub transfer_chunk_maps: Vec<TransferChunkMapState>,
+    pub transfer_chunk_maps: Vec<DirectChunkMapState>,
     pub downloaded_bytes: Vec<u64>,
     pub total_bytes: Vec<Option<u64>>,
     pub speeds: Vec<u64>,
@@ -140,7 +140,7 @@ impl TransferAvailableActions {
 pub struct TransferListRow {
     pub id: TransferId,
     #[allow(dead_code)]
-    // kept app-facing so future provider filters/badges do not need engine access
+    // kept app-facing so future runner filters/badges do not need engine access
     pub provider_kind: SharedString,
     #[allow(dead_code)]
     // kept app-facing so future views can render source labels directly
@@ -368,11 +368,11 @@ impl Downloads {
                     });
 
                     loop {
-                        match subscription.next_event().await {
-                            Ok(event) => {
+                        match subscription.next_update().await {
+                            Ok(update) => {
                                 cx.update(|app| {
                                     this.update(app, |model, cx| {
-                                        model.apply_service_event(event, cx);
+                                        model.apply_service_update(update, cx);
                                     })
                                     .ok();
                                 });
@@ -642,7 +642,7 @@ impl Downloads {
     }
 
     #[allow(dead_code)] // reserved for the Transfers chunk bitmap card once the frontend consumes it.
-    pub fn transfer_chunk_map_state(&self, id: TransferId) -> TransferChunkMapState {
+    pub fn transfer_chunk_map_state(&self, id: TransferId) -> DirectChunkMapState {
         transfer_chunk_map_state_or_unsupported(&self.transfer_chunk_maps, self.index_of(id))
     }
 
@@ -683,6 +683,7 @@ impl Downloads {
     fn apply_service_snapshot(&mut self, snapshot: OpheliaSnapshot, cx: &mut Context<Self>) {
         let OpheliaSnapshot {
             transfers,
+            direct_details,
             settings,
         } = snapshot;
         self.settings.apply_service_settings(settings);
@@ -699,9 +700,10 @@ impl Downloads {
         self.total_bytes.clear();
         self.speeds.clear();
 
-        for transfer in transfers {
+        for transfer in transfers.summaries() {
             self.upsert_snapshot(transfer, cx);
         }
+        self.apply_direct_details(direct_details, cx);
         cx.notify();
     }
 
@@ -709,17 +711,83 @@ impl Downloads {
         self.settings.clone()
     }
 
-    fn apply_service_event(&mut self, event: OpheliaEvent, cx: &mut Context<Self>) {
-        match event {
-            OpheliaEvent::TransferChanged { snapshot } => self.upsert_snapshot(snapshot, cx),
-            OpheliaEvent::TransferBytesWritten { bytes, .. } => {
-                self.write_sampler.record(bytes);
+    fn apply_service_update(&mut self, update: OpheliaUpdateBatch, cx: &mut Context<Self>) {
+        if let Some(settings) = update.settings_changed {
+            self.settings.apply_service_settings(settings);
+            cx.notify();
+        }
+
+        for snapshot in update.lifecycle.transfers.summaries() {
+            self.upsert_snapshot(snapshot, cx);
+        }
+
+        for (id, ((downloaded, total), speed)) in
+            update.progress_known_total.ids.iter().copied().zip(
+                update
+                    .progress_known_total
+                    .downloaded_bytes
+                    .iter()
+                    .copied()
+                    .zip(update.progress_known_total.total_bytes.iter().copied())
+                    .zip(
+                        update
+                            .progress_known_total
+                            .speed_bytes_per_sec
+                            .iter()
+                            .copied(),
+                    ),
+            )
+        {
+            self.apply_progress(id, downloaded, Some(total), speed, cx);
+        }
+
+        for (id, (downloaded, speed)) in update.progress_unknown_total.ids.iter().copied().zip(
+            update
+                .progress_unknown_total
+                .downloaded_bytes
+                .iter()
+                .copied()
+                .zip(
+                    update
+                        .progress_unknown_total
+                        .speed_bytes_per_sec
+                        .iter()
+                        .copied(),
+                ),
+        ) {
+            self.apply_progress(id, downloaded, None, speed, cx);
+        }
+
+        for bytes in update.physical_write.bytes {
+            self.write_sampler.record(bytes);
+        }
+
+        for (id, destination) in update
+            .destination
+            .ids
+            .iter()
+            .copied()
+            .zip(update.destination.destinations)
+        {
+            self.apply_destination(id, destination, cx);
+        }
+
+        for (row, id) in update.control_support.ids.iter().copied().enumerate() {
+            if let Some(support) = update.control_support.support(row)
+                && let Some(idx) = self.index_of(id)
+            {
+                self.control_supports[idx] = support;
+                cx.notify();
             }
-            OpheliaEvent::TransferRemoved {
-                id,
-                action,
-                artifact_state,
-            } => {
+        }
+
+        self.apply_direct_details(update.direct_details, cx);
+
+        for (row, id) in update.removal.ids.iter().copied().enumerate() {
+            if let (Some(action), Some(artifact_state)) = (
+                update.removal.action(row),
+                update.removal.artifact_state(row),
+            ) {
                 tracing::debug!(
                     id = id.0,
                     action = live_transfer_removal_action_name(action),
@@ -729,22 +797,66 @@ impl Downloads {
                 self.remove_row(id, cx);
                 self.refresh_history(cx);
             }
-            OpheliaEvent::ControlUnsupported { id, action } => {
+        }
+
+        for (row, id) in update.unsupported_control.ids.iter().copied().enumerate() {
+            if let Some(action) = update.unsupported_control.action(row) {
                 tracing::warn!(
                     id = id.0,
                     action = control_action_name(action),
-                    "provider does not support requested control action"
+                    "runner does not support requested control action"
                 );
                 if let Some(idx) = self.index_of(id) {
                     let filename = self.filenames[idx].clone();
                     self.show_notification(cx, filename, NotificationKind::Error);
                 }
             }
-            OpheliaEvent::SettingsChanged { settings } => {
-                self.settings.apply_service_settings(settings);
-                cx.notify();
+        }
+    }
+
+    fn apply_progress(
+        &mut self,
+        id: TransferId,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed_bytes_per_sec: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(idx) = self.index_of(id) else {
+            return;
+        };
+        self.downloaded_bytes[idx] = downloaded_bytes;
+        self.total_bytes[idx] = total_bytes;
+        self.speeds[idx] = speed_bytes_per_sec;
+        cx.notify();
+    }
+
+    fn apply_destination(&mut self, id: TransferId, destination: PathBuf, cx: &mut Context<Self>) {
+        let Some(idx) = self.index_of(id) else {
+            return;
+        };
+        self.filenames[idx] = notification_filename(&destination);
+        self.destinations[idx] = destination.to_string_lossy().to_string().into();
+        cx.notify();
+    }
+
+    fn apply_direct_details(
+        &mut self,
+        details: ophelia::service::DirectDetailsTable,
+        cx: &mut Context<Self>,
+    ) {
+        for id in details
+            .unsupported_ids
+            .iter()
+            .chain(details.loading_ids.iter())
+            .chain(details.segment_ids.iter())
+            .copied()
+        {
+            if let Some(idx) = self.index_of(id) {
+                self.transfer_chunk_maps[idx] = details.state_for(id);
             }
         }
+        cx.notify();
     }
 
     fn upsert_snapshot(&mut self, snapshot: TransferSummary, cx: &mut Context<Self>) {
@@ -763,7 +875,6 @@ impl Downloads {
             self.destinations[idx] = destination;
             self.statuses[idx] = snapshot.status;
             self.control_supports[idx] = snapshot.control_support;
-            self.transfer_chunk_maps[idx] = snapshot.chunk_map_state;
             self.downloaded_bytes[idx] = snapshot.downloaded_bytes;
             self.total_bytes[idx] = snapshot.total_bytes;
             self.speeds[idx] = snapshot.speed_bytes_per_sec;
@@ -775,7 +886,8 @@ impl Downloads {
             self.destinations.push(destination);
             self.statuses.push(snapshot.status);
             self.control_supports.push(snapshot.control_support);
-            self.transfer_chunk_maps.push(snapshot.chunk_map_state);
+            self.transfer_chunk_maps
+                .push(DirectChunkMapState::Unsupported);
             self.downloaded_bytes.push(snapshot.downloaded_bytes);
             self.total_bytes.push(snapshot.total_bytes);
             self.speeds.push(snapshot.speed_bytes_per_sec);
@@ -999,12 +1111,12 @@ fn build_row_index(ids: &[TransferId]) -> HashMap<TransferId, usize> {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn transfer_chunk_map_state_or_unsupported(
-    states: &[TransferChunkMapState],
+    states: &[DirectChunkMapState],
     index: Option<usize>,
-) -> TransferChunkMapState {
+) -> DirectChunkMapState {
     index
         .and_then(|idx| states.get(idx).cloned())
-        .unwrap_or(TransferChunkMapState::Unsupported)
+        .unwrap_or(DirectChunkMapState::Unsupported)
 }
 
 fn query_disk(path: &Path) -> (u64, u64) {
@@ -1038,6 +1150,7 @@ mod tests {
     fn test_snapshot(id: u64, destination: &str, status: TransferStatus) -> TransferSummary {
         TransferSummary {
             id: TransferId(id),
+            kind: crate::engine::TransferKind::Direct,
             provider_kind: "http".into(),
             source_label: "https://example.com/file.bin".into(),
             destination: PathBuf::from(destination),
@@ -1046,8 +1159,69 @@ mod tests {
             total_bytes: Some(256),
             speed_bytes_per_sec: 64,
             control_support: TransferControlSupport::all(),
-            chunk_map_state: TransferChunkMapState::Loading,
         }
+    }
+
+    fn summary_table(
+        summaries: impl IntoIterator<Item = TransferSummary>,
+    ) -> ophelia::service::TransferSummaryTable {
+        let mut table = ophelia::service::TransferSummaryTable::default();
+        for summary in summaries {
+            table.push_summary(summary);
+        }
+        table
+    }
+
+    fn snapshot(summaries: Vec<TransferSummary>) -> OpheliaSnapshot {
+        OpheliaSnapshot {
+            transfers: summary_table(summaries),
+            direct_details: Default::default(),
+            settings: Default::default(),
+        }
+    }
+
+    fn transfer_update(summaries: Vec<TransferSummary>) -> OpheliaUpdateBatch {
+        let mut update = OpheliaUpdateBatch::default();
+        for _ in &summaries {
+            update
+                .lifecycle
+                .lifecycle_codes
+                .push(ophelia::service::TransferLifecycleCode::Added as u8);
+        }
+        update.lifecycle.transfers = summary_table(summaries);
+        update
+    }
+
+    fn removal_update(
+        id: TransferId,
+        action: crate::engine::LiveTransferRemovalAction,
+        artifact_state: ArtifactState,
+    ) -> OpheliaUpdateBatch {
+        let mut update = OpheliaUpdateBatch::default();
+        update.removal.ids.push(id);
+        update.removal.action_codes.push(action as u8);
+        update
+            .removal
+            .artifact_state_codes
+            .push(artifact_state as u8);
+        update
+    }
+
+    fn unsupported_control_update(
+        id: TransferId,
+        action: TransferControlAction,
+    ) -> OpheliaUpdateBatch {
+        let mut update = OpheliaUpdateBatch::default();
+        update.unsupported_control.ids.push(id);
+        update.unsupported_control.action_codes.push(action as u8);
+        update
+    }
+
+    fn physical_write_update(id: TransferId, bytes: u64) -> OpheliaUpdateBatch {
+        let mut update = OpheliaUpdateBatch::default();
+        update.physical_write.ids.push(id);
+        update.physical_write.bytes.push(bytes);
+        update
     }
 
     #[test]
@@ -1232,24 +1406,18 @@ mod tests {
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
                 downloads.apply_service_snapshot(
-                    OpheliaSnapshot {
-                        settings: Default::default(),
-                        transfers: vec![
-                            test_snapshot(1, "/tmp/first.bin", TransferStatus::Downloading),
-                            test_snapshot(2, "/tmp/second.bin", TransferStatus::Paused),
-                        ],
-                    },
+                    snapshot(vec![
+                        test_snapshot(1, "/tmp/first.bin", TransferStatus::Downloading),
+                        test_snapshot(2, "/tmp/second.bin", TransferStatus::Paused),
+                    ]),
                     cx,
                 );
                 downloads.apply_service_snapshot(
-                    OpheliaSnapshot {
-                        settings: Default::default(),
-                        transfers: vec![test_snapshot(
-                            2,
-                            "/tmp/second-renamed.bin",
-                            TransferStatus::Downloading,
-                        )],
-                    },
+                    snapshot(vec![test_snapshot(
+                        2,
+                        "/tmp/second-renamed.bin",
+                        TransferStatus::Downloading,
+                    )]),
                     cx,
                 );
             });
@@ -1269,16 +1437,20 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferChanged {
-                        snapshot: test_snapshot(7, "/tmp/first.bin", TransferStatus::Downloading),
-                    },
+                downloads.apply_service_update(
+                    transfer_update(vec![test_snapshot(
+                        7,
+                        "/tmp/first.bin",
+                        TransferStatus::Downloading,
+                    )]),
                     cx,
                 );
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferChanged {
-                        snapshot: test_snapshot(7, "/tmp/renamed.bin", TransferStatus::Paused),
-                    },
+                downloads.apply_service_update(
+                    transfer_update(vec![test_snapshot(
+                        7,
+                        "/tmp/renamed.bin",
+                        TransferStatus::Paused,
+                    )]),
                     cx,
                 );
             });
@@ -1298,18 +1470,20 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferChanged {
-                        snapshot: test_snapshot(3, "/tmp/restored.bin", TransferStatus::Paused),
-                    },
+                downloads.apply_service_update(
+                    transfer_update(vec![test_snapshot(
+                        3,
+                        "/tmp/restored.bin",
+                        TransferStatus::Paused,
+                    )]),
                     cx,
                 );
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferRemoved {
-                        id: TransferId(3),
-                        action: crate::engine::LiveTransferRemovalAction::Cancelled,
-                        artifact_state: ArtifactState::Present,
-                    },
+                downloads.apply_service_update(
+                    removal_update(
+                        TransferId(3),
+                        crate::engine::LiveTransferRemovalAction::Cancelled,
+                        ArtifactState::Present,
+                    ),
                     cx,
                 );
             });
@@ -1326,17 +1500,16 @@ mod tests {
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
                 downloads.settings.notifications_enabled = false;
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferChanged {
-                        snapshot: test_snapshot(8, "/tmp/file.bin", TransferStatus::Downloading),
-                    },
+                downloads.apply_service_update(
+                    transfer_update(vec![test_snapshot(
+                        8,
+                        "/tmp/file.bin",
+                        TransferStatus::Downloading,
+                    )]),
                     cx,
                 );
-                downloads.apply_service_event(
-                    OpheliaEvent::ControlUnsupported {
-                        id: TransferId(8),
-                        action: TransferControlAction::Pause,
-                    },
+                downloads.apply_service_update(
+                    unsupported_control_update(TransferId(8), TransferControlAction::Pause),
                     cx,
                 );
             });
@@ -1356,21 +1529,9 @@ mod tests {
 
         app.update(|cx| {
             downloads.update(cx, |downloads, cx| {
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferBytesWritten {
-                        id: TransferId(99),
-                        bytes: 2_000,
-                    },
-                    cx,
-                );
+                downloads.apply_service_update(physical_write_update(TransferId(99), 2_000), cx);
                 downloads.write_sampler.sample_now(start);
-                downloads.apply_service_event(
-                    OpheliaEvent::TransferBytesWritten {
-                        id: TransferId(99),
-                        bytes: 6_000,
-                    },
-                    cx,
-                );
+                downloads.apply_service_update(physical_write_update(TransferId(99), 6_000), cx);
                 downloads
                     .write_sampler
                     .sample_now(start + Duration::from_secs(2));
@@ -1383,24 +1544,24 @@ mod tests {
 
     #[test]
     fn transfer_chunk_map_state_defaults_to_unsupported_for_missing_rows() {
-        let states = vec![TransferChunkMapState::Loading];
+        let states = vec![DirectChunkMapState::Loading];
 
         assert_eq!(
             transfer_chunk_map_state_or_unsupported(&states, None),
-            TransferChunkMapState::Unsupported
+            DirectChunkMapState::Unsupported
         );
     }
 
     #[test]
     fn transfer_chunk_map_state_returns_stored_state_for_present_rows() {
         let states = vec![
-            TransferChunkMapState::Unsupported,
-            TransferChunkMapState::Loading,
+            DirectChunkMapState::Unsupported,
+            DirectChunkMapState::Loading,
         ];
 
         assert_eq!(
             transfer_chunk_map_state_or_unsupported(&states, Some(1)),
-            TransferChunkMapState::Loading
+            DirectChunkMapState::Loading
         );
     }
 

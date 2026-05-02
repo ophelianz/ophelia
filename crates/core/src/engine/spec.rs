@@ -31,8 +31,8 @@ use crate::engine::destination::{
 };
 use crate::engine::http::HttpDownloadConfig;
 use crate::engine::types::{
-    PersistedDownloadSource, ProviderResumeData, SavedDownload, TransferChunkMapState,
-    TransferControlSupport, TransferId,
+    DirectChunkMapState, PersistedDownloadSource, RunnerResumeData, SavedDownload,
+    TransferControlSupport, TransferDetails, TransferId,
 };
 
 /// Add request before the final path is chosen
@@ -181,8 +181,8 @@ impl DownloadSpec {
         self.source.control_support()
     }
 
-    pub fn active_chunk_map_state(&self) -> TransferChunkMapState {
-        self.source.active_chunk_map_state()
+    pub fn active_details(&self) -> TransferDetails {
+        self.source.active_details()
     }
 }
 
@@ -219,9 +219,9 @@ impl DownloadSource {
         }
     }
 
-    pub fn active_chunk_map_state(&self) -> TransferChunkMapState {
+    pub fn active_details(&self) -> TransferDetails {
         match self {
-            Self::Http { .. } => TransferChunkMapState::Loading,
+            Self::Http { .. } => TransferDetails::direct(DirectChunkMapState::Loading),
         }
     }
 }
@@ -231,7 +231,7 @@ impl DownloadSource {
 pub struct RestoredDownload {
     pub id: TransferId,
     pub spec: DownloadSpec,
-    pub resume_data: Option<ProviderResumeData>,
+    pub resume_data: Option<RunnerResumeData>,
 }
 
 impl RestoredDownload {
@@ -241,7 +241,7 @@ impl RestoredDownload {
         destination: PathBuf,
         destination_config: &DestinationPolicyConfig,
         config: HttpDownloadConfig,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) -> Self {
         Self {
             id,

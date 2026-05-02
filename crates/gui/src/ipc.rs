@@ -129,7 +129,7 @@ async fn add_download(
 mod tests {
     use super::*;
     use crate::engine::{TransferStatus, TransferSummary};
-    use ophelia::service::{OpheliaEvent, OpheliaService};
+    use ophelia::service::OpheliaService;
     use serde_json::json;
     use std::time::Duration;
 
@@ -167,11 +167,11 @@ mod tests {
         mut subscription: ophelia::service::OpheliaSubscription,
     ) -> TransferSummary {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(2), subscription.next_event())
+            let update = tokio::time::timeout(Duration::from_secs(2), subscription.next_update())
                 .await
                 .unwrap()
                 .unwrap();
-            if let OpheliaEvent::TransferChanged { snapshot } = event {
+            if let Some(snapshot) = update.lifecycle.transfers.summaries().into_iter().next() {
                 return snapshot;
             }
         }

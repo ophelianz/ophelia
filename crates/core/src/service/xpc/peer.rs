@@ -3,7 +3,7 @@ use super::ffi::{
     peer_is_same_user, send_message, send_reply, xpc_connection_activate,
     xpc_connection_set_event_handler, xpc_dictionary_create_reply, xpc_object_is_error,
 };
-use crate::service::wire::{OpheliaWireCommand, OpheliaWireFrame};
+use crate::service::codec::{OpheliaCommandEnvelope, OpheliaFrameEnvelope};
 use crate::service::{OpheliaClient, OpheliaCommand, OpheliaError, OpheliaResponse};
 use block2::RcBlock;
 use tokio::runtime::Handle;
@@ -64,7 +64,7 @@ fn accept_peer_connection(peer: XpcConnection, runtime: Handle, client: OpheliaC
                 send_reply(
                     &peer_for_handler,
                     reply,
-                    OpheliaWireFrame::Error { id: 0, error },
+                    OpheliaFrameEnvelope::Error { id: 0, error },
                 );
                 return;
             }
@@ -76,7 +76,7 @@ fn accept_peer_connection(peer: XpcConnection, runtime: Handle, client: OpheliaC
                 send_reply(
                     &peer_for_handler,
                     reply,
-                    OpheliaWireFrame::Error { id, error },
+                    OpheliaFrameEnvelope::Error { id, error },
                 );
                 return;
             }
@@ -99,7 +99,7 @@ async fn handle_peer_command(
     client: OpheliaClient,
     peer: XpcConnection,
     reply: XpcObject,
-    command: OpheliaWireCommand,
+    command: OpheliaCommandEnvelope,
     disconnected: watch::Receiver<bool>,
 ) {
     if matches!(command.command, OpheliaCommand::Subscribe) {
@@ -108,11 +108,11 @@ async fn handle_peer_command(
     }
 
     let frame = match client.dispatch(command.command).await {
-        Ok(response) => OpheliaWireFrame::Response {
+        Ok(response) => OpheliaFrameEnvelope::Response {
             id: command.id,
-            response,
+            response: Box::new(response),
         },
-        Err(error) => OpheliaWireFrame::Error {
+        Err(error) => OpheliaFrameEnvelope::Error {
             id: command.id,
             error,
         },
@@ -130,7 +130,7 @@ async fn handle_subscribe_command(
     let mut subscription = match client.subscribe().await {
         Ok(subscription) => subscription,
         Err(error) => {
-            send_reply(&peer, reply, OpheliaWireFrame::Error { id, error });
+            send_reply(&peer, reply, OpheliaFrameEnvelope::Error { id, error });
             return;
         }
     };
@@ -138,11 +138,11 @@ async fn handle_subscribe_command(
     send_reply(
         &peer,
         reply,
-        OpheliaWireFrame::Response {
+        OpheliaFrameEnvelope::Response {
             id,
-            response: OpheliaResponse::Snapshot {
-                snapshot: subscription.snapshot.clone(),
-            },
+            response: Box::new(OpheliaResponse::Snapshot {
+                snapshot: Box::new(subscription.snapshot.clone()),
+            }),
         },
     );
 
@@ -153,12 +153,14 @@ async fn handle_subscribe_command(
                     break;
                 }
             }
-            event = subscription.next_event() => {
-                match event {
-                    Ok(event) => send_message(&peer, OpheliaWireFrame::Event { event }),
+            update = subscription.next_update() => {
+                match update {
+                    Ok(update) => send_message(&peer, OpheliaFrameEnvelope::Update {
+                        update: Box::new(update),
+                    }),
                     Err(OpheliaError::Closed) => break,
                     Err(error) => {
-                        send_message(&peer, OpheliaWireFrame::Error { id, error });
+                        send_message(&peer, OpheliaFrameEnvelope::Error { id, error });
                         break;
                     }
                 }

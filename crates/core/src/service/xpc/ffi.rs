@@ -1,6 +1,5 @@
-use crate::service::wire::{
-    OpheliaWireCommand, OpheliaWireFrame, command_from_payload, frame_from_payload,
-    frame_to_payload,
+use crate::service::codec::{
+    OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_from_body, frame_from_body, frame_to_body,
 };
 use crate::service::{OPHELIA_MACH_SERVICE_NAME, OpheliaError};
 use block2::Block;
@@ -61,15 +60,15 @@ unsafe extern "C" {
     static _xpc_type_error: u8;
 }
 
-pub(super) fn send_reply(peer: &XpcConnection, reply: XpcObject, frame: OpheliaWireFrame) {
-    if set_frame_payload(reply.raw(), &frame).is_ok() {
+pub(super) fn send_reply(peer: &XpcConnection, reply: XpcObject, frame: OpheliaFrameEnvelope) {
+    if set_frame_body(reply.raw(), &frame).is_ok() {
         unsafe { xpc_connection_send_message(peer.raw(), reply.raw()) };
     }
 }
 
-pub(super) fn send_message(peer: &XpcConnection, frame: OpheliaWireFrame) {
-    if let Ok(payload) = frame_to_payload(&frame)
-        && let Ok(message) = message_from_payload(&payload)
+pub(super) fn send_message(peer: &XpcConnection, frame: OpheliaFrameEnvelope) {
+    if let Ok(body) = frame_to_body(&frame)
+        && let Ok(message) = message_from_body(&body)
     {
         unsafe { xpc_connection_send_message(peer.raw(), message.raw()) };
     }
@@ -77,56 +76,58 @@ pub(super) fn send_message(peer: &XpcConnection, frame: OpheliaWireFrame) {
 
 pub(super) fn command_from_xpc_event(
     event: XpcObjectRaw,
-) -> Result<OpheliaWireCommand, (u64, OpheliaError)> {
-    let payload = payload_from_xpc_object(event).map_err(|error| (0, error))?;
-    command_from_payload(&payload).map_err(|error| (id_from_bad_command_payload(&payload), error))
+) -> Result<OpheliaCommandEnvelope, (u64, OpheliaError)> {
+    let body = body_from_xpc_object(event).map_err(|error| (0, error))?;
+    command_from_body(&body).map_err(|error| (id_from_bad_command_body(&body), error))
 }
 
-pub(super) fn frame_from_xpc_event(event: XpcObjectRaw) -> Result<OpheliaWireFrame, OpheliaError> {
+pub(super) fn frame_from_xpc_event(
+    event: XpcObjectRaw,
+) -> Result<OpheliaFrameEnvelope, OpheliaError> {
     if event.is_null() || xpc_object_is_error(event) {
         return Err(OpheliaError::Closed);
     }
-    let payload = payload_from_xpc_object(event)?;
-    frame_from_payload(&payload)
+    let body = body_from_xpc_object(event)?;
+    frame_from_body(&body)
 }
 
-pub(super) fn message_from_payload(payload: &[u8]) -> Result<XpcObject, OpheliaError> {
+pub(super) fn message_from_body(body: &[u8]) -> Result<XpcObject, OpheliaError> {
     let object = unsafe { xpc_dictionary_create(ptr::null(), ptr::null(), 0) };
     let object = XpcObject::from_owned(object)?;
-    set_payload(object.raw(), payload);
+    set_body(object.raw(), body);
     Ok(object)
 }
 
-fn set_frame_payload(object: XpcObjectRaw, frame: &OpheliaWireFrame) -> Result<(), OpheliaError> {
-    let payload = frame_to_payload(frame)?;
-    set_payload(object, &payload);
+fn set_frame_body(object: XpcObjectRaw, frame: &OpheliaFrameEnvelope) -> Result<(), OpheliaError> {
+    let body = frame_to_body(frame)?;
+    set_body(object, &body);
     Ok(())
 }
 
-fn set_payload(object: XpcObjectRaw, payload: &[u8]) {
+fn set_body(object: XpcObjectRaw, body: &[u8]) {
     unsafe {
         xpc_dictionary_set_data(
             object,
-            payload_key(),
-            payload.as_ptr().cast::<c_void>(),
-            payload.len(),
+            body_key(),
+            body.as_ptr().cast::<c_void>(),
+            body.len(),
         );
     }
 }
 
-fn payload_from_xpc_object(object: XpcObjectRaw) -> Result<Vec<u8>, OpheliaError> {
+fn body_from_xpc_object(object: XpcObjectRaw) -> Result<Vec<u8>, OpheliaError> {
     let mut len = 0usize;
-    let bytes = unsafe { xpc_dictionary_get_data(object, payload_key(), &mut len) };
+    let bytes = unsafe { xpc_dictionary_get_data(object, body_key(), &mut len) };
     if bytes.is_null() {
         return Err(OpheliaError::Transport {
-            message: "service XPC message did not include a payload".into(),
+            message: "service XPC message did not include a body".into(),
         });
     }
     Ok(unsafe { slice::from_raw_parts(bytes.cast::<u8>(), len).to_vec() })
 }
 
-fn payload_key() -> *const c_char {
-    c"payload".as_ptr()
+fn body_key() -> *const c_char {
+    c"body".as_ptr()
 }
 
 pub(super) fn peer_is_same_user(peer: XpcConnectionRaw) -> bool {
@@ -141,10 +142,10 @@ pub(super) fn xpc_object_is_error(object: XpcObjectRaw) -> bool {
     unsafe { xpc_get_type(object) == (&_xpc_type_error as *const u8).cast::<c_void>() }
 }
 
-fn id_from_bad_command_payload(payload: &[u8]) -> u64 {
-    serde_json::from_slice::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| value.get("id").and_then(serde_json::Value::as_u64))
+fn id_from_bad_command_body(body: &[u8]) -> u64 {
+    body.get(2..10)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
         .unwrap_or(0)
 }
 
@@ -267,23 +268,23 @@ impl Drop for XpcConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::wire::{OpheliaWireFrame, frame_to_payload};
+    use crate::service::codec::{OpheliaFrameEnvelope, frame_to_body};
 
     #[test]
-    fn xpc_payload_roundtrip_keeps_wire_frame() {
-        let frame = OpheliaWireFrame::Error {
+    fn xpc_body_roundtrip_keeps_frame() {
+        let frame = OpheliaFrameEnvelope::Error {
             id: 42,
             error: OpheliaError::BadRequest {
                 message: "bad command".into(),
             },
         };
-        let payload = frame_to_payload(&frame).unwrap();
-        let object = message_from_payload(&payload).unwrap();
+        let body = frame_to_body(&frame).unwrap();
+        let object = message_from_body(&body).unwrap();
         let decoded = frame_from_xpc_event(object.raw()).unwrap();
 
         assert!(matches!(
             decoded,
-            OpheliaWireFrame::Error {
+            OpheliaFrameEnvelope::Error {
                 id: 42,
                 error: OpheliaError::BadRequest { .. }
             }

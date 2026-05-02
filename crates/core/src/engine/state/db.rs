@@ -25,7 +25,7 @@ use crate::config::ProfilePaths;
 use crate::engine::destination::part_path_for;
 use crate::engine::state::http;
 use crate::engine::types::{
-    ArtifactState, DbEvent, HistoryFilter, HistoryRow, PersistedDownloadSource, ProviderResumeData,
+    ArtifactState, DbEvent, HistoryFilter, HistoryRow, PersistedDownloadSource, RunnerResumeData,
     SavedDownload, TransferId, TransferStatus,
 };
 
@@ -166,7 +166,7 @@ impl Db {
     }
 
     /// Load paused/pending downloads for startup
-    /// Also returns the max id so DownloadEngine can keep counting from there
+    /// Also returns the max id so OpheliaService can keep counting from there
     pub fn load_for_restore(&self) -> rusqlite::Result<(Vec<SavedDownload>, u64)> {
         let max_id = self
             .conn
@@ -208,7 +208,7 @@ impl Db {
                 tracing::warn!(
                     id = row.id.0,
                     provider_kind = row.provider_kind,
-                    "skipping restore for unsupported persisted provider kind"
+                    "skipping restore for unsupported persisted runner kind"
                 );
                 continue;
             };
@@ -319,7 +319,7 @@ impl Db {
     fn save_resume_data(
         &self,
         id: TransferId,
-        resume_data: Option<&ProviderResumeData>,
+        resume_data: Option<&RunnerResumeData>,
     ) -> rusqlite::Result<()> {
         http::save_resume_data(&self.conn, id, resume_data)
     }
@@ -328,7 +328,7 @@ impl Db {
         &self,
         download_id: TransferId,
         source: &PersistedDownloadSource,
-    ) -> rusqlite::Result<Option<ProviderResumeData>> {
+    ) -> rusqlite::Result<Option<RunnerResumeData>> {
         match source {
             PersistedDownloadSource::Http { .. } => http::load_resume_data(&self.conn, download_id),
         }
@@ -608,7 +608,7 @@ mod tests {
         db.handle(DbEvent::Paused {
             id: TransferId(11),
             downloaded_bytes: 10,
-            resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
+            resume_data: Some(RunnerResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
                     start: 0,
                     end: 100,
@@ -671,7 +671,7 @@ mod tests {
         db.handle(DbEvent::Paused {
             id: TransferId(3),
             downloaded_bytes: 12,
-            resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
+            resume_data: Some(RunnerResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
                     start: 0,
                     end: 100,

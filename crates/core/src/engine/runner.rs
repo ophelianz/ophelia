@@ -17,9 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Starts downloads for the engine controller
+//! Starts protocol tasks for the service runtime
 //!
-//! Keeps HTTP task setup and HTTP pause data out of `controller.rs`
+//! Keeps HTTP task setup and HTTP pause data out of the service owner loop
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -29,50 +29,51 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::EngineConfig;
+use crate::disk::DiskHandle;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadSource, DownloadSpec, HttpResumeData, PersistedDownloadSource,
-    ProviderResumeData, TaskRuntimeUpdate, TransferControlAction, TransferControlSupport,
-    TransferId,
+    RunnerEvent, RunnerResumeData, TransferControlAction, TransferControlSupport, TransferId,
 };
 
-pub(super) struct SpawnedTask {
-    pub(super) handle: JoinHandle<TaskFinalState>,
-    pub(super) pause_sink: TaskPauseSink,
-    pub(super) destination_sink: TaskDestinationSink,
+pub(crate) struct SpawnedRunnerTask {
+    pub(crate) handle: JoinHandle<TaskFinalState>,
+    pub(crate) pause_sink: TaskPauseSink,
+    pub(crate) destination_sink: TaskDestinationSink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum SchedulerKey {
+pub(crate) enum SchedulerKey {
     Hostname(String),
 }
 
-pub(super) struct SharedSchedulerRequirement {
-    pub(super) key: SchedulerKey,
-    pub(super) limit: usize,
+pub(crate) struct SharedSchedulerRequirement {
+    pub(crate) key: SchedulerKey,
+    pub(crate) limit: usize,
 }
 
-pub(super) struct ProviderCapabilities {
-    pub(super) shared_scheduler: Option<SharedSchedulerRequirement>,
+pub(crate) struct RunnerCapabilities {
+    pub(crate) shared_scheduler: Option<SharedSchedulerRequirement>,
 }
 
-pub(super) struct ProviderRuntimeContext {
-    pub(super) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
-    pub(super) global_throttle: Arc<TokenBucket>,
-    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+pub(crate) struct RunnerRuntimeContext {
+    pub(crate) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
+    pub(crate) global_throttle: Arc<TokenBucket>,
+    pub(crate) disk: DiskHandle,
+    pub(crate) runtime_update_tx: mpsc::Sender<RunnerEvent>,
 }
 
-pub(super) enum TaskPauseSink {
+pub(crate) enum TaskPauseSink {
     Http(Arc<Mutex<Option<Vec<ChunkSnapshot>>>>),
 }
 
-pub(super) enum TaskDestinationSink {
+pub(crate) enum TaskDestinationSink {
     Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
-pub(super) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> ProviderCapabilities {
+pub(crate) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> RunnerCapabilities {
     match &spec.source {
-        DownloadSource::Http { url, .. } => ProviderCapabilities {
+        DownloadSource::Http { url, .. } => RunnerCapabilities {
             shared_scheduler: Some(SharedSchedulerRequirement {
                 key: SchedulerKey::Hostname(host_from_url(url)),
                 limit: config.http.max_connections_per_server,
@@ -81,32 +82,33 @@ pub(super) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> Provid
     }
 }
 
-pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupport {
+pub(crate) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupport {
     match &spec.source {
         DownloadSource::Http { .. } => TransferControlSupport::all(),
     }
 }
 
-pub(super) fn supports_control_action(spec: &DownloadSpec, action: TransferControlAction) -> bool {
+pub(crate) fn supports_control_action(spec: &DownloadSpec, action: TransferControlAction) -> bool {
     lifecycle_capabilities(spec).supports(action)
 }
 
-pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &EngineConfig) -> Option<usize> {
+pub(crate) fn shared_scheduler_limit(key: &SchedulerKey, config: &EngineConfig) -> Option<usize> {
     match key {
         SchedulerKey::Hostname(_) => Some(config.http.max_connections_per_server),
     }
 }
 
-pub(super) fn spawn_task(
+pub(crate) fn spawn_task(
     id: TransferId,
     spec: &DownloadSpec,
     pause_token: CancellationToken,
-    resume_data: Option<ProviderResumeData>,
-    runtime: ProviderRuntimeContext,
-) -> SpawnedTask {
-    let ProviderRuntimeContext {
+    resume_data: Option<RunnerResumeData>,
+    runtime: RunnerRuntimeContext,
+) -> SpawnedRunnerTask {
+    let RunnerRuntimeContext {
         shared_scheduler_semaphore,
         global_throttle,
+        disk,
         runtime_update_tx,
     } = runtime;
     match &spec.source {
@@ -115,7 +117,7 @@ pub(super) fn spawn_task(
             let destination_sink: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
             let resume_from = resume_data
                 .as_ref()
-                .and_then(ProviderResumeData::as_http)
+                .and_then(RunnerResumeData::as_http)
                 .map(|data| data.chunks.clone());
             let shared_scheduler_semaphore = shared_scheduler_semaphore
                 .expect("http downloads require a shared scheduler semaphore");
@@ -142,12 +144,13 @@ pub(super) fn spawn_task(
                         resume_from,
                         server_semaphore: shared_scheduler_semaphore,
                         global_throttle: gt_,
+                        disk,
                         runtime_update_tx: ru_.clone(),
                     })
                     .await;
                     // Keep final state behind the task's own runtime updates
                     let _ = ru_
-                        .send(TaskRuntimeUpdate::Done {
+                        .send(RunnerEvent::Done {
                             id,
                             status: final_state.status,
                             downloaded_bytes: final_state.downloaded_bytes,
@@ -157,7 +160,7 @@ pub(super) fn spawn_task(
                     final_state
                 }
             });
-            SpawnedTask {
+            SpawnedRunnerTask {
                 handle,
                 pause_sink: TaskPauseSink::Http(pause_sink),
                 destination_sink: TaskDestinationSink::Http(destination_sink),
@@ -166,24 +169,24 @@ pub(super) fn spawn_task(
     }
 }
 
-pub(super) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResumeData> {
+pub(crate) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<RunnerResumeData> {
     match pause_sink {
         TaskPauseSink::Http(sink) => sink
             .lock()
             .unwrap()
             .take()
             .map(HttpResumeData::new)
-            .map(ProviderResumeData::Http),
+            .map(RunnerResumeData::Http),
     }
 }
 
-pub(super) fn current_destination(destination_sink: &TaskDestinationSink) -> Option<PathBuf> {
+pub(crate) fn current_destination(destination_sink: &TaskDestinationSink) -> Option<PathBuf> {
     match destination_sink {
         TaskDestinationSink::Http(sink) => sink.lock().unwrap().clone(),
     }
 }
 
-pub(super) fn persisted_source(spec: &DownloadSpec) -> PersistedDownloadSource {
+pub(crate) fn persisted_source(spec: &DownloadSpec) -> PersistedDownloadSource {
     match &spec.source {
         DownloadSource::Http { url, .. } => PersistedDownloadSource::Http { url: url.clone() },
     }

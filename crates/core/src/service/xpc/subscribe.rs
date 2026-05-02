@@ -1,13 +1,12 @@
 use super::ffi::{
-    XpcConnection, XpcObjectRaw, frame_from_xpc_event, message_from_payload,
-    xpc_connection_activate, xpc_connection_send_message_with_reply,
-    xpc_connection_set_event_handler,
+    XpcConnection, XpcObjectRaw, frame_from_xpc_event, message_from_body, xpc_connection_activate,
+    xpc_connection_send_message_with_reply, xpc_connection_set_event_handler,
 };
-use crate::service::wire::{
-    OpheliaWireCommand, OpheliaWireFrame, command_to_payload, unexpected_wire_frame,
+use crate::service::codec::{
+    OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_to_body, unexpected_xpc_frame,
 };
 use crate::service::{
-    OpheliaCommand, OpheliaError, OpheliaEvent, OpheliaResponse, OpheliaSnapshot,
+    OpheliaCommand, OpheliaError, OpheliaResponse, OpheliaSnapshot, OpheliaUpdateBatch,
     SERVICE_EVENT_CAPACITY,
 };
 use block2::RcBlock;
@@ -19,13 +18,15 @@ use std::sync::{
 use tokio::sync::mpsc;
 
 pub(in crate::service) struct MachEventStream {
-    rx: mpsc::Receiver<Result<OpheliaWireFrame, OpheliaError>>,
+    rx: mpsc::Receiver<Result<OpheliaFrameEnvelope, OpheliaError>>,
     state: Arc<MachStreamState>,
     _connection: XpcConnection,
 }
 
 impl MachEventStream {
-    pub(in crate::service) async fn next_event(&mut self) -> Result<OpheliaEvent, OpheliaError> {
+    pub(in crate::service) async fn next_update(
+        &mut self,
+    ) -> Result<OpheliaUpdateBatch, OpheliaError> {
         if let Some(error) = self.state.take_pending_error() {
             return Err(error);
         }
@@ -36,9 +37,9 @@ impl MachEventStream {
         }
 
         match frame {
-            OpheliaWireFrame::Event { event } => Ok(event),
-            OpheliaWireFrame::Error { error, .. } => Err(error),
-            frame => Err(unexpected_wire_frame("event", frame)),
+            OpheliaFrameEnvelope::Update { update } => Ok(*update),
+            OpheliaFrameEnvelope::Error { error, .. } => Err(error),
+            frame => Err(unexpected_xpc_frame("update", frame)),
         }
     }
 }
@@ -63,11 +64,11 @@ pub(in crate::service) async fn subscribe_mach(
         }
     }
 
-    let command = OpheliaWireCommand {
+    let command = OpheliaCommandEnvelope {
         id,
         command: OpheliaCommand::Subscribe,
     };
-    let message = message_from_payload(&command_to_payload(&command)?)?;
+    let message = message_from_body(&command_to_body(&command)?)?;
     {
         let reply_handler = RcBlock::new(move |reply: XpcObjectRaw| {
             let message = frame_from_xpc_event(reply);
@@ -85,22 +86,31 @@ pub(in crate::service) async fn subscribe_mach(
 
     let first = reply_rx.recv().await.ok_or(OpheliaError::Closed)??;
     match first {
-        OpheliaWireFrame::Response {
+        OpheliaFrameEnvelope::Response {
             id: frame_id,
-            response: OpheliaResponse::Snapshot { snapshot },
-        } if frame_id == id => Ok((
-            snapshot,
-            MachEventStream {
-                rx: event_rx,
-                state: stream_state,
-                _connection: connection,
-            },
-        )),
-        OpheliaWireFrame::Error {
+            response,
+        } if frame_id == id => match *response {
+            OpheliaResponse::Snapshot { snapshot } => Ok((
+                *snapshot,
+                MachEventStream {
+                    rx: event_rx,
+                    state: stream_state,
+                    _connection: connection,
+                },
+            )),
+            response => Err(unexpected_xpc_frame(
+                "snapshot response",
+                OpheliaFrameEnvelope::Response {
+                    id: frame_id,
+                    response: Box::new(response),
+                },
+            )),
+        },
+        OpheliaFrameEnvelope::Error {
             id: frame_id,
             error,
         } if frame_id == id => Err(error),
-        frame => Err(unexpected_wire_frame("snapshot response", frame)),
+        frame => Err(unexpected_xpc_frame("snapshot response", frame)),
     }
 }
 
@@ -132,9 +142,9 @@ impl MachStreamState {
 }
 
 fn record_stream_frame(
-    tx: &mpsc::Sender<Result<OpheliaWireFrame, OpheliaError>>,
+    tx: &mpsc::Sender<Result<OpheliaFrameEnvelope, OpheliaError>>,
     state: &MachStreamState,
-    frame: Result<OpheliaWireFrame, OpheliaError>,
+    frame: Result<OpheliaFrameEnvelope, OpheliaError>,
 ) {
     if matches!(&frame, Err(OpheliaError::Closed)) {
         state.record_closed();
@@ -157,10 +167,10 @@ mod tests {
         let state = MachStreamState::default();
         let (tx, _rx) = mpsc::channel(1);
         let event = || {
-            Ok(OpheliaWireFrame::Event {
-                event: OpheliaEvent::SettingsChanged {
-                    settings: ServiceSettings::default(),
-                },
+            Ok(OpheliaFrameEnvelope::Update {
+                update: Box::new(OpheliaUpdateBatch::settings_changed(
+                    ServiceSettings::default(),
+                )),
             })
         };
 

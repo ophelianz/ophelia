@@ -62,15 +62,17 @@ impl MacosServiceManager {
             }));
         }
 
-        let can_repair_idle_service = self.startup.can_repair()
+        let can_replace_development_mismatch = self.startup.can_replace_development_mismatch(&info);
+        let can_repair_service = self.startup.can_repair()
             && repair_policy == LocalServiceRepairPolicy::RepairIfSafe
-            && !service_has_running_transfers(&client);
-        if can_repair_idle_service {
+            && (can_replace_development_mismatch || !service_has_running_transfers(&client));
+        if can_repair_service {
             tracing::info!(
                 identity = ?identity,
                 expected_helper = ?self.startup.service_binary(),
                 running_helper = ?info.helper.executable,
-                "refreshing idle OpheliaService registration"
+                force_development_refresh = can_replace_development_mismatch,
+                "refreshing OpheliaService registration"
             );
             self.start_service(true)?;
             return Ok(Some(self.wait_until_reachable(startup_timeout)?));
@@ -103,7 +105,7 @@ impl MacosServiceManager {
             }
             StartupContext::NonBundled { .. } => Err(OpheliaError::Transport {
                 message: format!(
-                    "OpheliaService auto-start requires Ophelia.app on macOS 13+. For local development, set {SERVICE_START_MODE_ENV}={DEV_LAUNCHCTL_START_MODE} and {SERVICE_BINARY_ENV}"
+                    "OpheliaService auto-start requires Ophelia.app on macOS 13+ or a Cargo target binary. For custom local builds, set {SERVICE_START_MODE_ENV}={DEV_LAUNCHCTL_START_MODE} and {SERVICE_BINARY_ENV}"
                 ),
             }),
         }
@@ -201,11 +203,11 @@ impl StartupContext {
         let current_exe = current_exe.ok_or_else(|| OpheliaError::Transport {
             message: "could not resolve current executable path".into(),
         })?;
-        let service_binary = explicit_service_binary
-            .or(env_service_binary)
-            .unwrap_or_else(|| default_service_binary_for_exe(&current_exe));
+        let configured_service_binary = explicit_service_binary.or(env_service_binary);
 
         if matches!(start_mode.as_deref(), Some(DEV_LAUNCHCTL_START_MODE)) {
+            let service_binary = configured_service_binary
+                .unwrap_or_else(|| default_service_binary_for_exe(&current_exe));
             return Ok(Self::DevLaunchctl { service_binary });
         }
         if let Some(mode) = start_mode {
@@ -221,6 +223,14 @@ impl StartupContext {
                 app_bundle,
             });
         }
+
+        if infer_install_kind(Some(&current_exe)) == OpheliaInstallKind::Development {
+            let service_binary = configured_service_binary.unwrap_or(current_exe);
+            return Ok(Self::DevLaunchctl { service_binary });
+        }
+
+        let service_binary = configured_service_binary
+            .unwrap_or_else(|| default_service_binary_for_exe(&current_exe));
         Ok(Self::NonBundled { service_binary })
     }
 
@@ -238,6 +248,11 @@ impl StartupContext {
 
     fn refreshes_registration_on_cold_start(&self) -> bool {
         matches!(self, Self::AppBundle { .. })
+    }
+
+    fn can_replace_development_mismatch(&self, info: &OpheliaServiceInfo) -> bool {
+        matches!(self, Self::DevLaunchctl { .. })
+            && info.helper.install_kind == OpheliaInstallKind::Development
     }
 }
 
@@ -408,7 +423,7 @@ fn service_has_running_transfers(client: &OpheliaClient) -> bool {
     let Ok(snapshot) = futures::executor::block_on(client.snapshot()) else {
         return true;
     };
-    snapshot.transfers.iter().any(|transfer| {
+    snapshot.transfers.summaries().iter().any(|transfer| {
         matches!(
             transfer.status,
             TransferStatus::Pending | TransferStatus::Downloading
@@ -518,6 +533,11 @@ fn render_dev_launch_agent_plist(service_binary: &Path, logs_dir: &Path) -> Stri
     <array>
         <string>{binary}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>{OPHELIA_RUN_SERVICE_ENV}</key>
+        <string>1</string>
+    </dict>
     <key>MachServices</key>
     <dict>
         <key>{OPHELIA_MACH_SERVICE_NAME}</key>
@@ -628,10 +648,10 @@ mod tests {
     }
 
     #[test]
-    fn startup_context_requires_explicit_dev_mode_for_non_bundle_autostart() {
+    fn startup_context_uses_dev_launchctl_for_cargo_run_binary() {
         let context = StartupContext::resolve_from(
             None,
-            Some(PathBuf::from("/repo/target/debug/ophelia-service")),
+            None,
             Some(PathBuf::from("/repo/target/debug/ophelia")),
             None,
         )
@@ -639,8 +659,8 @@ mod tests {
 
         assert_eq!(
             context,
-            StartupContext::NonBundled {
-                service_binary: PathBuf::from("/repo/target/debug/ophelia-service"),
+            StartupContext::DevLaunchctl {
+                service_binary: PathBuf::from("/repo/target/debug/ophelia"),
             }
         );
     }
@@ -661,6 +681,37 @@ mod tests {
                 service_binary: PathBuf::from("/repo/target/debug/ophelia-service"),
             }
         );
+    }
+
+    #[test]
+    fn startup_context_keeps_other_non_bundled_binaries_unsupported_without_mode() {
+        let context = StartupContext::resolve_from(
+            None,
+            Some(PathBuf::from("/usr/local/bin/ophelia-service")),
+            Some(PathBuf::from("/usr/local/bin/ophelia")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context,
+            StartupContext::NonBundled {
+                service_binary: PathBuf::from("/usr/local/bin/ophelia-service"),
+            }
+        );
+    }
+
+    #[test]
+    fn dev_launchctl_can_replace_development_service_mismatch() {
+        let startup = StartupContext::DevLaunchctl {
+            service_binary: PathBuf::from("/repo/target/debug/ophelia"),
+        };
+        let info = service_info_for_binary(
+            Path::new("/repo/target/debug/ophelia-service"),
+            Some("hash".into()),
+        );
+
+        assert!(startup.can_replace_development_mismatch(&info));
     }
 
     #[test]
@@ -843,6 +894,7 @@ mod tests {
         assert!(plist.contains("<string>nz.ophelia.service</string>"));
         assert!(plist.contains("<key>nz.ophelia.service</key>"));
         assert!(plist.contains("/tmp/Ophelia &amp; Co/ophelia-service"));
+        assert!(plist.contains("<key>OPHELIA_RUN_SERVICE</key>"));
         assert!(plist.contains("/tmp/Logs/ophelia-service.err.log"));
     }
 

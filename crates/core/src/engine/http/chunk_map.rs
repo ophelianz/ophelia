@@ -21,14 +21,14 @@
 //!
 //! Turns completed byte ranges into fixed-width cells
 
-use crate::engine::{ChunkMapCellState, HttpChunkMapSnapshot};
+use crate::engine::{ChunkMapCellState, DirectChunkMapSnapshot};
 
 pub(crate) const HTTP_CHUNK_MAP_CELLS: usize = 128;
 
 pub(super) fn snapshot_from_covered_ranges(
     total_bytes: u64,
     covered_ranges: impl IntoIterator<Item = (u64, u64)>,
-) -> HttpChunkMapSnapshot {
+) -> DirectChunkMapSnapshot {
     let merged = merge_ranges(covered_ranges);
     let mut cells = Vec::with_capacity(HTTP_CHUNK_MAP_CELLS);
 
@@ -53,7 +53,7 @@ pub(super) fn snapshot_from_covered_ranges(
         cells.push(state);
     }
 
-    HttpChunkMapSnapshot { total_bytes, cells }
+    DirectChunkMapSnapshot { total_bytes, cells }
 }
 
 fn scaled_boundary(total_bytes: u64, step: usize) -> u64 {
@@ -103,7 +103,7 @@ fn covered_len_in_range(merged: &[(u64, u64)], start: u64, end: u64) -> u64 {
 mod tests {
     use super::*;
 
-    fn complete_cells(snapshot: &HttpChunkMapSnapshot) -> usize {
+    fn complete_cells(snapshot: &DirectChunkMapSnapshot) -> usize {
         snapshot
             .cells
             .iter()
