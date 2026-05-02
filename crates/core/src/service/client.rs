@@ -1,6 +1,47 @@
 use super::host::OpheliaRequest;
 use super::*;
 
+const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+pub struct LocalServiceOptions {
+    pub service_binary: Option<PathBuf>,
+    pub repair_policy: LocalServiceRepairPolicy,
+    pub startup_timeout: Duration,
+}
+
+impl Default for LocalServiceOptions {
+    fn default() -> Self {
+        Self {
+            service_binary: None,
+            repair_policy: LocalServiceRepairPolicy::RepairIfSafe,
+            startup_timeout: DEFAULT_STARTUP_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalServiceRepairPolicy {
+    RepairIfSafe,
+    WarnOnly,
+}
+
+#[derive(Clone)]
+pub struct LocalServiceConnection {
+    pub client: OpheliaClient,
+    pub warning: Option<LocalServiceWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalServiceWarning {
+    ActiveServiceMismatch {
+        expected_binary: PathBuf,
+        actual_binary: Option<PathBuf>,
+        expected_version: String,
+        actual_version: String,
+    },
+}
+
 pub struct OpheliaSubscription {
     pub snapshot: OpheliaSnapshot,
     inner: OpheliaSubscriptionInner,
@@ -77,6 +118,22 @@ impl OpheliaClient {
             inner: Arc::new(OpheliaClientInner::Mach {
                 next_id: AtomicU64::new(1),
             }),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn connect_or_start_local(
+        options: LocalServiceOptions,
+    ) -> Result<LocalServiceConnection, OpheliaError> {
+        super::macos_startup::connect_or_start_local(options)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn connect_or_start_local(
+        _: LocalServiceOptions,
+    ) -> Result<LocalServiceConnection, OpheliaError> {
+        Err(OpheliaError::Transport {
+            message: "OpheliaService startup is only implemented on macOS".into(),
         })
     }
 

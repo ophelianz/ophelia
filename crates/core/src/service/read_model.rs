@@ -205,4 +205,13 @@ impl OpheliaReadModel {
         self.transfers.remove(&id);
         self.order.retain(|current| *current != id);
     }
+
+    pub(super) fn has_running_transfers(&self) -> bool {
+        self.transfers.values().any(|snapshot| {
+            matches!(
+                snapshot.status,
+                TransferStatus::Pending | TransferStatus::Downloading
+            )
+        })
+    }
 }

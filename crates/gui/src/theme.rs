@@ -70,6 +70,9 @@ impl Colors {
     pub fn queued() -> Rgba {
         rgb(0xA78BFA)
     }
+    pub fn warning() -> Rgba {
+        rgb(0xE6B450)
+    }
     pub fn error() -> Rgba {
         rgb(0xE5634D)
     }

@@ -17,19 +17,12 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Persistent user settings.
+//! Persistent GUI settings
 //!
-//! Stored as JSON at the platform's standard application-config location:
+//! GUI-only settings live beside the service settings file
 //!
-//! - macOS: `~/Library/Application Support/Ophelia/settings.json`
-//! - Linux: `$XDG_CONFIG_HOME/Ophelia/settings.json` or `~/.config/Ophelia/settings.json`
-//! - Windows: `%APPDATA%\\Ophelia\\settings.json`
-//!
-//! Missing file or parse errors silently fall back to defaults so a fresh
-//! install or a corrupted file never blocks startup.
-//!
-//! Writes are atomic: content goes to `settings.json.tmp` first, then
-//! renamed over the real file so a crash mid-write can't corrupt it.
+//! - Shared backend settings: `settings.json`
+//! - GUI preferences: `gui-settings.json`
 
 mod destination_presets;
 
@@ -155,10 +148,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load() -> Self {
-        let mut settings: Self = std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut settings = Self::default();
         if let Some(gui_settings) = Self::load_gui_settings() {
             settings.language = gui_settings.language;
             settings.ipc_port = gui_settings.ipc_port;
@@ -256,10 +246,6 @@ impl Settings {
                 .map(DestinationRuleConfig::from)
                 .collect(),
         }
-    }
-
-    fn path() -> PathBuf {
-        app_config_dir().join("Ophelia").join("settings.json")
     }
 
     fn gui_path() -> PathBuf {

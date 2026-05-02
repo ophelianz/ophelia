@@ -681,6 +681,11 @@ impl Downloads {
     }
 
     fn apply_service_snapshot(&mut self, snapshot: OpheliaSnapshot, cx: &mut Context<Self>) {
+        let OpheliaSnapshot {
+            transfers,
+            settings,
+        } = snapshot;
+        self.settings.apply_service_settings(settings);
         self.ids.clear();
         self.row_by_id.clear();
         self.provider_kinds.clear();
@@ -694,10 +699,14 @@ impl Downloads {
         self.total_bytes.clear();
         self.speeds.clear();
 
-        for transfer in snapshot.transfers {
+        for transfer in transfers {
             self.upsert_snapshot(transfer, cx);
         }
         cx.notify();
+    }
+
+    pub fn settings_snapshot(&self) -> Settings {
+        self.settings.clone()
     }
 
     fn apply_service_event(&mut self, event: OpheliaEvent, cx: &mut Context<Self>) {

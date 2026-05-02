@@ -19,13 +19,23 @@
 
 //! App-shell ownership for backend-side helpers.
 
+#[cfg(test)]
+use std::path::Path;
+
 use gpui::{App, BorrowAppContext, Global};
-use ophelia::service::{OpheliaClient, OpheliaError};
+use ophelia::service::{LocalServiceOptions, LocalServiceWarning, OpheliaClient, OpheliaError};
+#[cfg(test)]
+use ophelia::service::{OpheliaInstallKind, OpheliaServiceInfo};
 use tokio::runtime::Handle;
 
+use crate::app_actions;
 use crate::ipc::IpcServer;
 use crate::runtime::Tokio;
 use crate::settings::Settings;
+use crate::views::overlays::toast::Toast;
+
+#[cfg(test)]
+const SERVICE_OWNER_WARNING_TITLE: &str = "Ophelia is using another service";
 
 pub struct BackendServices {
     ipc: IpcServer,
@@ -35,7 +45,11 @@ impl Global for BackendServices {}
 
 pub fn start(settings: &Settings, cx: &mut App) -> Result<OpheliaClient, OpheliaError> {
     let runtime = Tokio::handle(cx);
-    let client = OpheliaClient::connect_local()?;
+    let connection = OpheliaClient::connect_or_start_local(LocalServiceOptions::default())?;
+    if let Some(warning) = connection.warning.as_ref() {
+        show_local_service_warning(warning, cx);
+    }
+    let client = connection.client;
     let ipc = IpcServer::start(settings.ipc_port, &runtime, client.clone());
     install(ipc, cx);
     Ok(client)
@@ -54,4 +68,189 @@ pub fn restart_ipc<C: BorrowAppContext>(
     cx.update_global::<BackendServices, _>(|services, _| {
         services.ipc = IpcServer::start(port, runtime, client);
     });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+struct ServiceOwnerWarningText {
+    title: &'static str,
+    detail: String,
+}
+
+#[cfg(test)]
+fn service_owner_warning_text(
+    info: &OpheliaServiceInfo,
+    expected: OpheliaInstallKind,
+) -> Option<ServiceOwnerWarningText> {
+    if expected == OpheliaInstallKind::Unknown || info.helper.install_kind == expected {
+        return None;
+    }
+
+    let owner = install_kind_label(info.helper.install_kind);
+    let binary = info
+        .helper
+        .executable
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+
+    Some(ServiceOwnerWarningText {
+        title: SERVICE_OWNER_WARNING_TITLE,
+        detail: format!("Service owner: {owner}. Binary: {binary}"),
+    })
+}
+
+fn show_local_service_warning(warning: &LocalServiceWarning, cx: &mut App) {
+    let LocalServiceWarning::ActiveServiceMismatch {
+        expected_binary,
+        actual_binary,
+        actual_version,
+        ..
+    } = warning;
+    let actual = actual_binary
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    app_actions::show_toast(
+        Toast::warning("Ophelia kept the running service").detail(format!(
+            "Active transfers are using {actual} ({actual_version}). Expected {}",
+            expected_binary.display()
+        )),
+        cx,
+    );
+}
+
+#[cfg(test)]
+fn install_kind_for_executable(executable: Option<&Path>) -> OpheliaInstallKind {
+    let Some(executable) = executable else {
+        return OpheliaInstallKind::Unknown;
+    };
+    let text = executable.to_string_lossy();
+    if text.contains(".app/Contents/") {
+        OpheliaInstallKind::AppBundle
+    } else if text.starts_with("/opt/homebrew/")
+        || text.starts_with("/usr/local/Homebrew/")
+        || text.starts_with("/usr/local/Cellar/")
+    {
+        OpheliaInstallKind::HomebrewFormula
+    } else if text.contains("/target/debug/") || text.contains("/target/release/") {
+        OpheliaInstallKind::Development
+    } else {
+        OpheliaInstallKind::Other
+    }
+}
+
+#[cfg(test)]
+fn install_kind_label(kind: OpheliaInstallKind) -> &'static str {
+    match kind {
+        OpheliaInstallKind::AppBundle => "app bundle",
+        OpheliaInstallKind::HomebrewFormula => "homebrew formula",
+        OpheliaInstallKind::Development => "development build",
+        OpheliaInstallKind::Other => "other",
+        OpheliaInstallKind::Unknown => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ophelia::service::{
+        OPHELIA_MACH_SERVICE_NAME, OpheliaEndpointKind, OpheliaHelperInfo, OpheliaProfileInfo,
+        OpheliaServiceEndpoint, OpheliaServiceOwner,
+    };
+
+    use super::*;
+
+    #[test]
+    fn service_owner_mismatch_produces_warning_text() {
+        let info = service_info(
+            OpheliaInstallKind::HomebrewFormula,
+            Some("/opt/homebrew/bin/ophelia-service"),
+        );
+
+        let warning = service_owner_warning_text(&info, OpheliaInstallKind::AppBundle).unwrap();
+
+        assert_eq!(warning.title, "Ophelia is using another service");
+        assert_eq!(
+            warning.detail,
+            "Service owner: homebrew formula. Binary: /opt/homebrew/bin/ophelia-service"
+        );
+    }
+
+    #[test]
+    fn matching_service_owner_does_not_warn() {
+        let info = service_info(
+            OpheliaInstallKind::Development,
+            Some("/repo/target/debug/ophelia-service"),
+        );
+
+        assert_eq!(
+            service_owner_warning_text(&info, OpheliaInstallKind::Development),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_gui_owner_does_not_guess_at_service_mismatch() {
+        let info = service_info(
+            OpheliaInstallKind::AppBundle,
+            Some("/Applications/Ophelia.app/Contents/MacOS/ophelia-service"),
+        );
+
+        assert_eq!(
+            service_owner_warning_text(&info, OpheliaInstallKind::Unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn gui_install_kind_uses_the_same_install_families_as_service_info() {
+        assert_eq!(
+            install_kind_for_executable(Some(Path::new(
+                "/Applications/Ophelia.app/Contents/MacOS/ophelia"
+            ))),
+            OpheliaInstallKind::AppBundle
+        );
+        assert_eq!(
+            install_kind_for_executable(Some(Path::new("/opt/homebrew/bin/ophelia"))),
+            OpheliaInstallKind::HomebrewFormula
+        );
+        assert_eq!(
+            install_kind_for_executable(Some(Path::new("/repo/target/debug/ophelia"))),
+            OpheliaInstallKind::Development
+        );
+    }
+
+    fn service_info(kind: OpheliaInstallKind, executable: Option<&str>) -> OpheliaServiceInfo {
+        let root = PathBuf::from("/tmp/ophelia-test");
+        OpheliaServiceInfo {
+            service_name: OPHELIA_MACH_SERVICE_NAME.to_string(),
+            version: "0.1.0".into(),
+            owner: OpheliaServiceOwner {
+                install_kind: kind,
+                executable: executable.map(PathBuf::from),
+                pid: 42,
+            },
+            helper: OpheliaHelperInfo {
+                install_kind: kind,
+                executable: executable.map(PathBuf::from),
+                pid: 42,
+                executable_sha256: None,
+            },
+            profile: OpheliaProfileInfo {
+                config_dir: root.join("config"),
+                data_dir: root.join("data"),
+                logs_dir: root.join("logs"),
+                database_path: root.join("data/downloads.db"),
+                settings_path: root.join("config/settings.json"),
+                service_lock_path: root.join("data/service.lock"),
+                default_download_dir: root.join("downloads"),
+            },
+            endpoint: OpheliaServiceEndpoint {
+                kind: OpheliaEndpointKind::MachService,
+                name: OPHELIA_MACH_SERVICE_NAME.to_string(),
+            },
+        }
+    }
 }

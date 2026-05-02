@@ -89,7 +89,6 @@ fn run() {
             .unwrap();
 
         let _ = app_actions::ensure_main_window(cx);
-
         app_menu::refresh(cx);
         tray::refresh(cx, true);
 

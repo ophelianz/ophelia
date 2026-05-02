@@ -53,10 +53,16 @@ base64_decode_to_file() {
     fi
 }
 
+normalize_keychain_path() {
+    printf '%s\n' "$1" | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//'
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-gui_dir="${repo_root}/crates/ophelia-gui"
+gui_dir="${repo_root}/crates/gui"
 gui_manifest="${gui_dir}/Cargo.toml"
 entitlements="${gui_dir}/macos/entitlements.plist"
+service_plist="${repo_root}/crates/service/macos/nz.ophelia.service.plist"
+service_binary_name="ophelia-service"
 cargo_bundle_version="${CARGO_BUNDLE_VERSION:-0.10.0}"
 
 channel=""
@@ -112,6 +118,7 @@ done
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS bundling must run on macOS."
 [[ "${channel}" == "stable" || "${channel}" == "nightly" ]] || die "--channel must be stable or nightly."
 [[ -f "${entitlements}" ]] || die "missing entitlements file: ${entitlements}"
+[[ -f "${service_plist}" ]] || die "missing service LaunchAgent plist: ${service_plist}"
 
 host_arch="$(uname -m)"
 case "${host_arch}" in
@@ -156,14 +163,31 @@ minisign_private_key_path=""
 minisign_public_key_path=""
 notary_profile=""
 previous_keychain=""
+previous_keychain_list=""
+signing_identity_ref=""
 
 cleanup() {
     local status=$?
     if [[ -n "${manifest_backup}" && -f "${manifest_backup}" ]]; then
         cp "${manifest_backup}" "${gui_manifest}"
     fi
+    if [[ -n "${previous_keychain_list}" && -s "${previous_keychain_list}" ]]; then
+        local keychains=()
+        local keychain
+        while IFS= read -r keychain; do
+            keychain="$(normalize_keychain_path "${keychain}")"
+            if [[ -e "${keychain}" ]]; then
+                keychains+=("${keychain}")
+            fi
+        done < "${previous_keychain_list}"
+        if ((${#keychains[@]} > 0)); then
+            security list-keychains -d user -s "${keychains[@]}" >/dev/null 2>&1 || true
+        fi
+    fi
     if [[ -n "${previous_keychain}" ]]; then
         security default-keychain -s "${previous_keychain}" >/dev/null 2>&1 || true
+    elif [[ -e "${HOME}/Library/Keychains/login.keychain-db" ]]; then
+        security default-keychain -s "${HOME}/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
     fi
     if [[ -n "${keychain_path}" ]]; then
         security delete-keychain "${keychain_path}" >/dev/null 2>&1 || true
@@ -257,6 +281,7 @@ plist_value() {
 validate_app_bundle() {
     local app_bundle="$1"
     local info_plist="${app_bundle}/Contents/Info.plist"
+    local agent_plist="${app_bundle}/Contents/Library/LaunchAgents/nz.ophelia.service.plist"
     [[ -f "${info_plist}" ]] || die "missing Info.plist in ${app_bundle}"
 
     local actual_identifier
@@ -268,6 +293,8 @@ validate_app_bundle() {
     [[ -z "${actual_name}" || "${actual_name}" == "${app_name}" ]] || die "expected app name ${app_name}, found ${actual_name}"
 
     local required_resources=(
+        "Contents/MacOS/ophelia-service"
+        "Contents/Library/LaunchAgents/nz.ophelia.service.plist"
         "Contents/Resources/AppIcon.icns"
         "Contents/Resources/assets/logo.svg"
         "Contents/Resources/assets/fonts/Inter-VariableFont_opsz,wght.ttf"
@@ -277,11 +304,31 @@ validate_app_bundle() {
     for resource in "${required_resources[@]}"; do
         [[ -e "${app_bundle}/${resource}" ]] || die "missing bundled resource: ${resource}"
     done
+
+    [[ -x "${app_bundle}/Contents/MacOS/ophelia-service" ]] || die "service helper is not executable"
+    [[ "$(plist_value "${agent_plist}" "Label")" == "nz.ophelia.service" ]] || die "service plist has wrong Label"
+    [[ "$(plist_value "${agent_plist}" "BundleProgram")" == "Contents/MacOS/ophelia-service" ]] || die "service plist has wrong BundleProgram"
+    [[ "$(plist_value "${agent_plist}" "MachServices:nz.ophelia.service")" == "true" ]] || die "service plist is missing MachServices entry"
+}
+
+bundle_service_helper() {
+    local app_bundle="$1"
+    local service_binary="${repo_root}/target/release/${service_binary_name}"
+    [[ -x "${service_binary}" ]] || die "missing built service helper: ${service_binary}"
+
+    mkdir -p \
+        "${app_bundle}/Contents/MacOS" \
+        "${app_bundle}/Contents/Library/LaunchAgents"
+    cp "${service_binary}" "${app_bundle}/Contents/MacOS/${service_binary_name}"
+    cp "${service_plist}" "${app_bundle}/Contents/Library/LaunchAgents/nz.ophelia.service.plist"
+    chmod 755 "${app_bundle}/Contents/MacOS/${service_binary_name}"
+    chmod 644 "${app_bundle}/Contents/Library/LaunchAgents/nz.ophelia.service.plist"
 }
 
 prepare_signing_keychain() {
     need_cmd security
     need_cmd codesign
+    need_cmd curl
     [[ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ]] || die "APPLE_CERTIFICATE_PASSWORD is required with --sign."
     [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || die "APPLE_SIGNING_IDENTITY is required with --sign."
 
@@ -294,16 +341,20 @@ prepare_signing_keychain() {
         die "APPLE_CERTIFICATE_P12 or APPLE_CERTIFICATE_P12_PATH is required with --sign."
     fi
 
-    previous_keychain="$(security default-keychain | tr -d '\"' || true)"
+    previous_keychain="$(normalize_keychain_path "$(security default-keychain 2>/dev/null || true)")"
+    previous_keychain_list="${work_dir}/keychains.list"
+    security list-keychains -d user > "${previous_keychain_list}" || true
     keychain_path="${work_dir}/ophelia-build.keychain-db"
     local keychain_password
     keychain_password="$(uuidgen)"
 
     security create-keychain -p "${keychain_password}" "${keychain_path}"
     security default-keychain -s "${keychain_path}"
+    set_signing_keychain_search_list
     security unlock-keychain -p "${keychain_password}" "${keychain_path}"
     security set-keychain-settings "${keychain_path}"
     security import "${certificate_path}" -k "${keychain_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+    import_developer_id_intermediates
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
 
     local matching_identities
@@ -317,6 +368,47 @@ prepare_signing_keychain() {
     local match_count
     match_count="$(printf '%s\n' "${matching_identities}" | sed '/^$/d' | wc -l | tr -d ' ')"
     [[ "${match_count}" == "1" ]] || die "expected one matching signing identity, found ${match_count}: ${matching_identities}"
+    signing_identity_ref="$(printf '%s\n' "${matching_identities}" | awk 'NF { print $2; exit }')"
+    [[ -n "${signing_identity_ref}" ]] || die "could not extract signing identity hash"
+}
+
+set_signing_keychain_search_list() {
+    local keychains=("${keychain_path}")
+    local keychain
+    if [[ -s "${previous_keychain_list}" ]]; then
+        while IFS= read -r keychain; do
+            keychain="$(normalize_keychain_path "${keychain}")"
+            if [[ -e "${keychain}" ]]; then
+                keychains+=("${keychain}")
+            fi
+        done < "${previous_keychain_list}"
+    fi
+    keychains+=(
+        "/Library/Keychains/System.keychain"
+        "/System/Library/Keychains/SystemRootCertificates.keychain"
+    )
+    security list-keychains -d user -s "${keychains[@]}"
+}
+
+import_developer_id_intermediates() {
+    local intermediate_dir="${work_dir}/apple-intermediates"
+    mkdir -p "${intermediate_dir}"
+
+    local url
+    for url in \
+        "https://www.apple.com/certificateauthority/DeveloperIDCA.cer" \
+        "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer"
+    do
+        local certificate="${intermediate_dir}/${url##*/}"
+        curl -fsSL --retry 3 --retry-delay 2 "${url}" -o "${certificate}"
+        security import "${certificate}" -k "${keychain_path}" >/dev/null
+    done
+
+    local root_certificate="${intermediate_dir}/AppleRootCA.pem"
+    security find-certificate \
+        -c "Apple Root CA" \
+        -p "/System/Library/Keychains/SystemRootCertificates.keychain" > "${root_certificate}"
+    security import "${root_certificate}" -k "${keychain_path}" >/dev/null
 }
 
 prepare_notary_profile() {
@@ -345,7 +437,7 @@ prepare_notary_profile() {
 sign_code_path() {
     local code_path="$1"
     for attempt in 1 2 3; do
-        if codesign --force --options runtime --timestamp --entitlements "${entitlements}" --verbose=4 --sign "${APPLE_SIGNING_IDENTITY}" "${code_path}"; then
+        if codesign --force --options runtime --timestamp --entitlements "${entitlements}" --verbose=4 --keychain "${keychain_path}" --sign "${signing_identity_ref}" "${code_path}"; then
             return 0
         fi
         [[ "${attempt}" -lt 3 ]] || return 1
@@ -433,7 +525,7 @@ create_dmg() {
 
 sign_dmg() {
     local dmg_path="$1"
-    codesign --force --timestamp --verbose=4 --sign "${APPLE_SIGNING_IDENTITY}" "${dmg_path}"
+    codesign --force --timestamp --verbose=4 --keychain "${keychain_path}" --sign "${signing_identity_ref}" "${dmg_path}"
     codesign --verify --strict --verbose=4 "${dmg_path}"
 }
 
@@ -523,6 +615,7 @@ rm -rf \
 
 (
     cd "${gui_dir}"
+    OPHELIA_RELEASE_CHANNEL="${channel}" cargo build -p ophelia-service --release
     OPHELIA_RELEASE_CHANNEL="${channel}" cargo build -p ophelia-gui --release
     OPHELIA_RELEASE_CHANNEL="${channel}" cargo bundle --release --package ophelia-gui
 )
@@ -534,6 +627,7 @@ built_app="$(find_app_bundle)"
 
 staged_app="${work_dir}/${app_name}.app"
 ditto "${built_app}" "${staged_app}"
+bundle_service_helper "${staged_app}"
 validate_app_bundle "${staged_app}"
 
 if [[ "${sign}" == true ]]; then

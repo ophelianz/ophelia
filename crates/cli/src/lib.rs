@@ -6,8 +6,9 @@ use std::process::ExitCode;
 use anstyle::{AnsiColor, Style};
 use clap::{Parser, Subcommand, ValueEnum};
 use ophelia::service::{
-    OPHELIA_MACH_SERVICE_NAME, OpheliaClient, OpheliaError, OpheliaInstallKind, OpheliaServiceInfo,
-    TransferDestination, TransferRequest, TransferRequestSource,
+    LocalServiceOptions, OPHELIA_MACH_SERVICE_NAME, OpheliaClient, OpheliaError,
+    OpheliaInstallKind, OpheliaServiceInfo, TransferDestination, TransferRequest,
+    TransferRequestSource,
 };
 
 #[derive(Debug, Parser)]
@@ -121,7 +122,9 @@ async fn run(command: Command, theme: &Theme) -> Result<(), CliError> {
 }
 
 async fn add(url: String, output: Option<PathBuf>, theme: &Theme) -> Result<(), CliError> {
-    let client = OpheliaClient::connect_local().map_err(CliError::from_service)?;
+    let client = OpheliaClient::connect_or_start_local(LocalServiceOptions::default())
+        .map_err(CliError::from_service)?
+        .client;
     let output = output.map(expand_tilde);
     let destination = match output {
         Some(ref path) => TransferDestination::ExplicitPath(path.clone()),
@@ -147,7 +150,9 @@ async fn add(url: String, output: Option<PathBuf>, theme: &Theme) -> Result<(), 
 }
 
 async fn doctor(theme: &Theme) -> Result<(), CliError> {
-    let client = OpheliaClient::connect_local().map_err(CliError::from_service)?;
+    let client = OpheliaClient::connect_or_start_local(LocalServiceOptions::default())
+        .map_err(CliError::from_service)?
+        .client;
     let info = client
         .service_info()
         .await
@@ -164,12 +169,20 @@ async fn doctor(theme: &Theme) -> Result<(), CliError> {
 fn print_service_info(theme: &Theme, info: &OpheliaServiceInfo) {
     print_field(theme, "service", &info.service_name);
     print_field(theme, "version", &info.version);
-    print_field(theme, "owner", install_kind_label(info.owner.install_kind));
-    print_field(theme, "pid", info.owner.pid);
+    print_field(theme, "owner", install_kind_label(info.helper.install_kind));
+    print_field(theme, "pid", info.helper.pid);
     print_field(
         theme,
         "binary",
-        optional_path_display(info.owner.executable.as_deref()),
+        optional_path_display(info.helper.executable.as_deref()),
+    );
+    print_field(
+        theme,
+        "helper hash",
+        info.helper
+            .executable_sha256
+            .as_deref()
+            .unwrap_or("unavailable"),
     );
     print_field(theme, "endpoint", &info.endpoint.name);
     print_field(theme, "profile", info.profile.data_dir.display());

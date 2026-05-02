@@ -2,6 +2,8 @@ use super::lock::{ServiceLock, service_lock_path};
 use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
 use super::*;
 
+const SERVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct OpheliaService {
     client: OpheliaClient,
     task: Option<JoinHandle<()>>,
@@ -32,11 +34,32 @@ impl OpheliaService {
         Self::start_inner(runtime, paths, settings, config)
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_with_engine_config_and_idle_timeout(
+        runtime: &Handle,
+        config: EngineConfig,
+        paths: ProfilePaths,
+        idle_timeout: Duration,
+    ) -> Result<Self, OpheliaError> {
+        let settings = ServiceSettings::default_for_paths(&paths);
+        Self::start_inner_with_idle_timeout(runtime, paths, settings, config, idle_timeout)
+    }
+
     fn start_inner(
         runtime: &Handle,
         paths: ProfilePaths,
         settings: ServiceSettings,
         config: EngineConfig,
+    ) -> Result<Self, OpheliaError> {
+        Self::start_inner_with_idle_timeout(runtime, paths, settings, config, SERVICE_IDLE_TIMEOUT)
+    }
+
+    fn start_inner_with_idle_timeout(
+        runtime: &Handle,
+        paths: ProfilePaths,
+        settings: ServiceSettings,
+        config: EngineConfig,
+        idle_timeout: Duration,
     ) -> Result<Self, OpheliaError> {
         let lock = ServiceLock::acquire(service_lock_path(&paths))?;
         let bootstrap = state::bootstrap(&paths).map_err(|error| OpheliaError::Io {
@@ -61,7 +84,6 @@ impl OpheliaService {
                 paths,
                 service_info,
                 engine,
-                history_reader: bootstrap.history_reader,
                 db_tx,
                 saved_downloads: bootstrap.saved_downloads,
                 _db_worker: bootstrap.worker,
@@ -69,6 +91,7 @@ impl OpheliaService {
                 read_model: OpheliaReadModel::default(),
                 coalescer: OpheliaEventCoalescer::default(),
                 event_tx,
+                idle_timeout,
             }
             .run(rx),
         );
@@ -89,6 +112,12 @@ impl OpheliaService {
             let _ = task.await;
         }
         result
+    }
+
+    pub async fn wait(mut self) {
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 
@@ -123,7 +152,6 @@ struct OpheliaServiceRuntime {
     paths: ProfilePaths,
     service_info: OpheliaServiceInfo,
     engine: DownloadEngine,
-    history_reader: HistoryReader,
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     saved_downloads: Vec<crate::engine::SavedDownload>,
     _db_worker: state::DbWorkerHandle,
@@ -131,6 +159,7 @@ struct OpheliaServiceRuntime {
     read_model: OpheliaReadModel,
     coalescer: OpheliaEventCoalescer,
     event_tx: broadcast::Sender<OpheliaEvent>,
+    idle_timeout: Duration,
 }
 
 impl OpheliaServiceRuntime {
@@ -141,27 +170,21 @@ impl OpheliaServiceRuntime {
         hot_event_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
-                request = rx.recv() => {
-                    let Some(request) = request else {
-                        break;
-                    };
-                    self.drain_engine_events();
-                    self.flush_coalesced_events();
-                    if self.handle_request(request).await {
-                        break;
+            if self.should_idle_exit() {
+                tokio::select! {
+                    _ = tokio::time::sleep(self.idle_timeout) => {
+                        if self.should_idle_exit() {
+                            break;
+                        }
                     }
-                    self.drain_engine_events();
+                    should_stop = self.next_runtime_step(&mut rx, &mut hot_event_flush) => {
+                        if should_stop {
+                            break;
+                        }
+                    }
                 }
-                event = self.engine.next_event() => {
-                    let Some(event) = event else {
-                        break;
-                    };
-                    self.apply_engine_event(event);
-                }
-                _ = hot_event_flush.tick() => {
-                    self.flush_coalesced_events();
-                }
+            } else if self.next_runtime_step(&mut rx, &mut hot_event_flush).await {
+                break;
             }
         }
 
@@ -183,6 +206,36 @@ impl OpheliaServiceRuntime {
             }
             self.drain_engine_events();
         }
+    }
+
+    async fn next_runtime_step(
+        &mut self,
+        rx: &mut mpsc::Receiver<OpheliaRequest>,
+        hot_event_flush: &mut tokio::time::Interval,
+    ) -> bool {
+        tokio::select! {
+            request = rx.recv() => {
+                let Some(request) = request else {
+                    return true;
+                };
+                self.drain_engine_events();
+                self.flush_coalesced_events();
+                if self.handle_request(request).await {
+                    return true;
+                }
+                self.drain_engine_events();
+            }
+            event = self.engine.next_event() => {
+                let Some(event) = event else {
+                    return true;
+                };
+                self.apply_engine_event(event);
+            }
+            _ = hot_event_flush.tick() => {
+                self.flush_coalesced_events();
+            }
+        }
+        false
     }
 
     async fn handle_request(&mut self, request: OpheliaRequest) -> bool {
@@ -243,7 +296,7 @@ impl OpheliaServiceRuntime {
                 match result {
                     Ok(()) => {}
                     Err(EngineError::NotFound { id }) => {
-                        self.delete_artifact_from_service_state(id)?;
+                        self.delete_artifact_from_service_state(id).await?;
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -266,12 +319,7 @@ impl OpheliaServiceRuntime {
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::LoadHistory { filter, query } => {
-                let rows =
-                    self.history_reader
-                        .load(filter, &query)
-                        .map_err(|error| OpheliaError::Io {
-                            message: error.to_string(),
-                        })?;
+                let rows = load_history_rows(self.paths.clone(), filter, query).await?;
                 Ok(OpheliaResponse::History { rows })
             }
             OpheliaCommand::ServiceInfo => Ok(OpheliaResponse::ServiceInfo {
@@ -332,15 +380,19 @@ impl OpheliaServiceRuntime {
         );
     }
 
-    fn delete_artifact_from_service_state(&mut self, id: TransferId) -> Result<(), OpheliaError> {
+    fn should_idle_exit(&self) -> bool {
+        self.event_tx.receiver_count() == 0 && !self.read_model.has_running_transfers()
+    }
+
+    async fn delete_artifact_from_service_state(
+        &mut self,
+        id: TransferId,
+    ) -> Result<(), OpheliaError> {
         let destination = if let Some(destination) = self.read_model.destination(id) {
             Some(destination.to_path_buf())
         } else {
-            self.history_reader
-                .load_by_id(id)
-                .map_err(|error| OpheliaError::Io {
-                    message: error.to_string(),
-                })?
+            load_history_row_by_id(self.paths.clone(), id)
+                .await?
                 .map(|row| PathBuf::from(row.destination))
         }
         .ok_or(OpheliaError::NotFound { id })?;
@@ -356,6 +408,43 @@ impl OpheliaServiceRuntime {
             artifact_state,
         });
         Ok(())
+    }
+}
+
+async fn load_history_rows(
+    paths: ProfilePaths,
+    filter: HistoryFilter,
+    query: String,
+) -> Result<Vec<HistoryRow>, OpheliaError> {
+    tokio::task::spawn_blocking(move || {
+        let reader = HistoryReader::open(&paths).map_err(history_error)?;
+        reader.load(filter, &query).map_err(history_error)
+    })
+    .await
+    .map_err(history_join_error)?
+}
+
+async fn load_history_row_by_id(
+    paths: ProfilePaths,
+    id: TransferId,
+) -> Result<Option<HistoryRow>, OpheliaError> {
+    tokio::task::spawn_blocking(move || {
+        let reader = HistoryReader::open(&paths).map_err(history_error)?;
+        reader.load_by_id(id).map_err(history_error)
+    })
+    .await
+    .map_err(history_join_error)?
+}
+
+fn history_error(error: rusqlite::Error) -> OpheliaError {
+    OpheliaError::Io {
+        message: error.to_string(),
+    }
+}
+
+fn history_join_error(error: tokio::task::JoinError) -> OpheliaError {
+    OpheliaError::Io {
+        message: format!("history query worker failed: {error}"),
     }
 }
 

@@ -4,10 +4,8 @@
 <dict>
     <key>Label</key>
     <string>nz.ophelia.service</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>__OPHELIA_SERVICE_BINARY__</string>
-    </array>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/ophelia-service</string>
     <key>MachServices</key>
     <dict>
         <key>nz.ophelia.service</key>
@@ -17,9 +15,5 @@
     <false/>
     <key>ProcessType</key>
     <string>Interactive</string>
-    <key>StandardOutPath</key>
-    <string>__OPHELIA_LOG_DIR__/ophelia-service.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>__OPHELIA_LOG_DIR__/ophelia-service.err.log</string>
 </dict>
 </plist>

@@ -106,11 +106,7 @@ pub struct SettingsWindow {
 impl EventEmitter<SettingsClosed> for SettingsWindow {}
 
 impl SettingsWindow {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        Self::from_settings(Settings::load(), cx)
-    }
-
-    fn from_settings(settings: Settings, cx: &mut Context<Self>) -> Self {
+    pub fn from_settings(settings: Settings, cx: &mut Context<Self>) -> Self {
         let initial_settings = settings.clone();
         let selected_language = settings.resolved_language().to_string();
         let fallback_download_dir = settings.download_dir().to_string_lossy().to_string();

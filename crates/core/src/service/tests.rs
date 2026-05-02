@@ -450,6 +450,48 @@ async fn history_loads_through_session_client() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn service_idle_exit_closes_backend_when_no_clients_or_running_transfers() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = test_paths(&dir);
+    let host = OpheliaService::start_with_engine_config_and_idle_timeout(
+        &Handle::current(),
+        EngineConfig::default(),
+        paths,
+        Duration::from_millis(20),
+    )
+    .expect("session should start");
+    let client = host.client();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(matches!(client.snapshot().await, Err(OpheliaError::Closed)));
+    host.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_subscription_keeps_idle_backend_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = test_paths(&dir);
+    let host = OpheliaService::start_with_engine_config_and_idle_timeout(
+        &Handle::current(),
+        EngineConfig::default(),
+        paths,
+        Duration::from_millis(20),
+    )
+    .expect("session should start");
+    let client = host.client();
+    let subscription = client.subscribe().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(client.snapshot().await.is_ok());
+    drop(subscription);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(matches!(client.snapshot().await, Err(OpheliaError::Closed)));
+    host.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn service_info_reports_owner_and_profile_paths() {
     let dir = tempfile::tempdir().unwrap();
     let paths = test_paths(&dir);
@@ -468,6 +510,9 @@ async fn service_info_reports_owner_and_profile_paths() {
     assert_eq!(info.profile.service_lock_path, paths.service_lock_path);
     assert_eq!(info.owner.pid, std::process::id());
     assert!(info.owner.executable.is_some());
+    assert_eq!(info.helper.pid, std::process::id());
+    assert_eq!(info.helper.executable, info.owner.executable);
+    assert!(info.helper.executable_sha256.is_some());
     host.shutdown().await.unwrap();
 }
 
@@ -636,6 +681,27 @@ fn wire_frame_payload_roundtrips_service_info() {
             id: 9,
             response: OpheliaResponse::ServiceInfo { .. }
         }
+    ));
+}
+
+#[test]
+fn wire_frame_payload_roundtrips_approval_required_error() {
+    let frame = OpheliaWireFrame::Error {
+        id: 10,
+        error: OpheliaError::ServiceApprovalRequired {
+            service_name: OPHELIA_MACH_SERVICE_NAME.to_string(),
+        },
+    };
+
+    let payload = frame_to_payload(&frame).unwrap();
+    let decoded = frame_from_payload(&payload).unwrap();
+
+    assert!(matches!(
+        decoded,
+        OpheliaWireFrame::Error {
+            id: 10,
+            error: OpheliaError::ServiceApprovalRequired { service_name },
+        } if service_name == OPHELIA_MACH_SERVICE_NAME
     ));
 }
 
