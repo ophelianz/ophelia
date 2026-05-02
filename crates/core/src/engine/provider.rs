@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::EngineConfig;
+use crate::disk::DiskHandle;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadSource, DownloadSpec, HttpResumeData, PersistedDownloadSource,
@@ -59,6 +60,7 @@ pub(crate) struct ProviderCapabilities {
 pub(crate) struct ProviderRuntimeContext {
     pub(crate) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
     pub(crate) global_throttle: Arc<TokenBucket>,
+    pub(crate) disk: DiskHandle,
     pub(crate) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
@@ -107,6 +109,7 @@ pub(crate) fn spawn_task(
     let ProviderRuntimeContext {
         shared_scheduler_semaphore,
         global_throttle,
+        disk,
         runtime_update_tx,
     } = runtime;
     match &spec.source {
@@ -142,6 +145,7 @@ pub(crate) fn spawn_task(
                         resume_from,
                         server_semaphore: shared_scheduler_semaphore,
                         global_throttle: gt_,
+                        disk,
                         runtime_update_tx: ru_.clone(),
                     })
                     .await;

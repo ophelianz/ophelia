@@ -4,16 +4,16 @@
 //! HTTP still does the protocol work; this module owns when transfers start and stop
 
 use std::collections::{HashMap, VecDeque};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use bitvec::prelude::{BitVec, Lsb0};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::EngineConfig;
-use crate::engine::destination::part_path_for;
+use crate::disk::DiskHandle;
 use crate::engine::http::TokenBucket;
 use crate::engine::provider::{
     self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskPauseSink,
@@ -25,37 +25,53 @@ use crate::engine::{
 };
 
 const TASK_RUNTIME_UPDATE_CAPACITY: usize = 256;
+const NO_INDEX: usize = usize::MAX;
 
-/// Everything needed to pause or cancel an active task
 struct TaskEntry {
     handle: JoinHandle<crate::engine::http::TaskFinalState>,
-    /// Fired on soft pause
-    /// Hard cancel uses handle.abort()
     pause_token: CancellationToken,
-    /// Written by the task on pause, read when TaskRuntimeUpdate::Done arrives
     pause_sink: TaskPauseSink,
-    /// Updated if the server suggests a better filename
     destination_sink: TaskDestinationSink,
-    /// May narrow after the task starts
     control_support: TransferControlSupport,
-    /// Pause finishes through TaskRuntimeUpdate::Done so the service keeps draining task updates
-    pause_requested: bool,
-    /// Kept for resume
-    spec: DownloadSpec,
 }
 
-/// Paused download state
-struct PausedTask {
-    spec: DownloadSpec,
-    resume_data: Option<ProviderResumeData>,
-}
-
-/// A download waiting in the queue
-/// `resume_data` is set when a resumed download cannot start yet
-struct QueuedTask {
+struct TransferStart {
     id: TransferId,
     spec: DownloadSpec,
     resume_data: Option<ProviderResumeData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TransferRow(usize);
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferRuntimeState {
+    Active,
+    Paused,
+    Queued,
+    Removed,
+}
+
+#[derive(Default)]
+struct TransferTable {
+    row_by_id: HashMap<TransferId, TransferRow>,
+    ids: Vec<TransferId>,
+    states: Vec<TransferRuntimeState>,
+    specs: Vec<Option<DownloadSpec>>,
+    active_entries: Vec<Option<TaskEntry>>,
+    resume_data: Vec<Option<ProviderResumeData>>,
+    flags: TransferFlags,
+    active_rows: Vec<TransferRow>,
+    paused_rows: Vec<TransferRow>,
+    queued_rows: VecDeque<TransferRow>,
+    active_positions: Vec<usize>,
+    paused_positions: Vec<usize>,
+}
+
+#[derive(Default)]
+struct TransferFlags {
+    pause_requested: BitVec<usize, Lsb0>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,10 +110,301 @@ pub(super) enum TransferRuntimeEvent {
     },
 }
 
+impl TransferTable {
+    fn active_len(&self) -> usize {
+        self.active_rows.len()
+    }
+
+    fn paused_len(&self) -> usize {
+        self.paused_rows.len()
+    }
+
+    fn queued_len(&self) -> usize {
+        self.queued_rows.len()
+    }
+
+    fn contains_active(&self, id: TransferId) -> bool {
+        self.row_for(id)
+            .is_some_and(|row| self.states[row.0] == TransferRuntimeState::Active)
+    }
+
+    fn contains_paused(&self, id: TransferId) -> bool {
+        self.row_for(id)
+            .is_some_and(|row| self.states[row.0] == TransferRuntimeState::Paused)
+    }
+
+    fn active_entry_mut(&mut self, id: TransferId) -> Option<&mut TaskEntry> {
+        let row = self.row_for(id)?;
+        (self.states[row.0] == TransferRuntimeState::Active).then_some(())?;
+        self.active_entries[row.0].as_mut()
+    }
+
+    fn active_entry(&self, id: TransferId) -> Option<&TaskEntry> {
+        let row = self.row_for(id)?;
+        (self.states[row.0] == TransferRuntimeState::Active).then_some(())?;
+        self.active_entries[row.0].as_ref()
+    }
+
+    fn spec(&self, id: TransferId) -> Option<&DownloadSpec> {
+        let row = self.row_for(id)?;
+        self.specs[row.0].as_ref()
+    }
+
+    fn spec_mut(&mut self, id: TransferId) -> Option<&mut DownloadSpec> {
+        let row = self.row_for(id)?;
+        self.specs[row.0].as_mut()
+    }
+
+    fn set_active(&mut self, id: TransferId, spec: DownloadSpec, entry: TaskEntry) {
+        let row = self.ensure_row(id);
+        self.leave_current_list(row);
+        self.states[row.0] = TransferRuntimeState::Active;
+        self.specs[row.0] = Some(spec);
+        self.active_entries[row.0] = Some(entry);
+        self.resume_data[row.0] = None;
+        self.flags.pause_requested.set(row.0, false);
+        self.active_positions[row.0] = self.active_rows.len();
+        self.active_rows.push(row);
+    }
+
+    fn set_queued_back(
+        &mut self,
+        id: TransferId,
+        spec: DownloadSpec,
+        resume_data: Option<ProviderResumeData>,
+    ) {
+        let row = self.prepare_queued(id, spec, resume_data);
+        self.queued_rows.push_back(row);
+    }
+
+    fn set_queued_front(
+        &mut self,
+        id: TransferId,
+        spec: DownloadSpec,
+        resume_data: Option<ProviderResumeData>,
+    ) {
+        let row = self.prepare_queued(id, spec, resume_data);
+        self.queued_rows.push_front(row);
+    }
+
+    fn set_paused(
+        &mut self,
+        id: TransferId,
+        spec: DownloadSpec,
+        resume_data: Option<ProviderResumeData>,
+    ) {
+        let row = self.ensure_row(id);
+        self.leave_current_list(row);
+        self.states[row.0] = TransferRuntimeState::Paused;
+        self.specs[row.0] = Some(spec);
+        self.active_entries[row.0] = None;
+        self.resume_data[row.0] = resume_data;
+        self.flags.pause_requested.set(row.0, false);
+        self.paused_positions[row.0] = self.paused_rows.len();
+        self.paused_rows.push(row);
+    }
+
+    fn mark_pause_requested(&mut self, id: TransferId) -> bool {
+        let Some(row) = self.row_for(id) else {
+            return false;
+        };
+        if self.states[row.0] != TransferRuntimeState::Active {
+            return false;
+        }
+        self.flags.pause_requested.set(row.0, true);
+        true
+    }
+
+    fn pause_requested(&self, id: TransferId) -> bool {
+        self.row_for(id).is_some_and(|row| {
+            self.flags
+                .pause_requested
+                .get(row.0)
+                .is_some_and(|bit| *bit)
+        })
+    }
+
+    fn take_queued(&mut self, id: TransferId) -> Option<TransferStart> {
+        let row = self.row_for(id)?;
+        if self.states[row.0] != TransferRuntimeState::Queued {
+            return None;
+        }
+        let pos = self.queued_rows.iter().position(|queued| *queued == row)?;
+        self.queued_rows.remove(pos);
+        self.take_start(row)
+    }
+
+    fn take_paused(&mut self, id: TransferId) -> Option<TransferStart> {
+        let row = self.row_for(id)?;
+        if self.states[row.0] != TransferRuntimeState::Paused {
+            return None;
+        }
+        self.remove_paused(row);
+        self.take_start(row)
+    }
+
+    fn pop_next_queued(&mut self) -> Option<TransferStart> {
+        let row = self.queued_rows.pop_front()?;
+        self.take_start(row)
+    }
+
+    fn remove_active(&mut self, id: TransferId) -> Option<(TaskEntry, DownloadSpec)> {
+        let row = self.row_for(id)?;
+        if self.states[row.0] != TransferRuntimeState::Active {
+            return None;
+        }
+        self.remove_active_row(row);
+        self.states[row.0] = TransferRuntimeState::Removed;
+        self.flags.pause_requested.set(row.0, false);
+        let entry = self.active_entries[row.0].take()?;
+        let spec = self.specs[row.0].take()?;
+        self.resume_data[row.0] = None;
+        Some((entry, spec))
+    }
+
+    fn remove_any(&mut self, id: TransferId) -> Option<RemovedTransfer> {
+        let row = self.row_for(id)?;
+        let state = self.states[row.0];
+        let active_entry = if state == TransferRuntimeState::Active {
+            self.remove_active_row(row);
+            self.active_entries[row.0].take()
+        } else {
+            None
+        };
+        if state == TransferRuntimeState::Paused {
+            self.remove_paused(row);
+        }
+        if state == TransferRuntimeState::Queued {
+            self.remove_queued(row);
+        }
+        if state == TransferRuntimeState::Removed {
+            return None;
+        }
+
+        self.states[row.0] = TransferRuntimeState::Removed;
+        self.flags.pause_requested.set(row.0, false);
+        self.specs[row.0] = None;
+        self.resume_data[row.0] = None;
+        Some(RemovedTransfer { active_entry })
+    }
+
+    fn clear(&mut self) {
+        for entry in self.active_entries.iter_mut().filter_map(Option::take) {
+            entry.handle.abort();
+        }
+        self.active_rows.clear();
+        self.paused_rows.clear();
+        self.queued_rows.clear();
+        for state in &mut self.states {
+            *state = TransferRuntimeState::Removed;
+        }
+        for spec in &mut self.specs {
+            *spec = None;
+        }
+        for resume_data in &mut self.resume_data {
+            *resume_data = None;
+        }
+    }
+
+    fn prepare_queued(
+        &mut self,
+        id: TransferId,
+        spec: DownloadSpec,
+        resume_data: Option<ProviderResumeData>,
+    ) -> TransferRow {
+        let row = self.ensure_row(id);
+        self.leave_current_list(row);
+        self.states[row.0] = TransferRuntimeState::Queued;
+        self.specs[row.0] = Some(spec);
+        self.active_entries[row.0] = None;
+        self.resume_data[row.0] = resume_data;
+        self.flags.pause_requested.set(row.0, false);
+        row
+    }
+
+    fn take_start(&mut self, row: TransferRow) -> Option<TransferStart> {
+        let id = self.ids[row.0];
+        self.states[row.0] = TransferRuntimeState::Removed;
+        self.flags.pause_requested.set(row.0, false);
+        Some(TransferStart {
+            id,
+            spec: self.specs[row.0].take()?,
+            resume_data: self.resume_data[row.0].take(),
+        })
+    }
+
+    fn ensure_row(&mut self, id: TransferId) -> TransferRow {
+        if let Some(row) = self.row_for(id) {
+            return row;
+        }
+
+        let row = TransferRow(self.ids.len());
+        self.row_by_id.insert(id, row);
+        self.ids.push(id);
+        self.states.push(TransferRuntimeState::Removed);
+        self.specs.push(None);
+        self.active_entries.push(None);
+        self.resume_data.push(None);
+        self.flags.pause_requested.push(false);
+        self.active_positions.push(NO_INDEX);
+        self.paused_positions.push(NO_INDEX);
+        row
+    }
+
+    fn row_for(&self, id: TransferId) -> Option<TransferRow> {
+        self.row_by_id.get(&id).copied()
+    }
+
+    fn leave_current_list(&mut self, row: TransferRow) {
+        match self.states[row.0] {
+            TransferRuntimeState::Active => {
+                self.remove_active_row(row);
+                self.active_entries[row.0] = None;
+            }
+            TransferRuntimeState::Paused => self.remove_paused(row),
+            TransferRuntimeState::Queued => self.remove_queued(row),
+            TransferRuntimeState::Removed => {}
+        }
+    }
+
+    fn remove_active_row(&mut self, row: TransferRow) {
+        let pos = self.active_positions[row.0];
+        if pos == NO_INDEX {
+            return;
+        }
+        self.active_rows.swap_remove(pos);
+        if let Some(&moved) = self.active_rows.get(pos) {
+            self.active_positions[moved.0] = pos;
+        }
+        self.active_positions[row.0] = NO_INDEX;
+    }
+
+    fn remove_paused(&mut self, row: TransferRow) {
+        let pos = self.paused_positions[row.0];
+        if pos == NO_INDEX {
+            return;
+        }
+        self.paused_rows.swap_remove(pos);
+        if let Some(&moved) = self.paused_rows.get(pos) {
+            self.paused_positions[moved.0] = pos;
+        }
+        self.paused_positions[row.0] = NO_INDEX;
+    }
+
+    fn remove_queued(&mut self, row: TransferRow) {
+        if let Some(pos) = self.queued_rows.iter().position(|queued| *queued == row) {
+            self.queued_rows.remove(pos);
+        }
+    }
+}
+
+struct RemovedTransfer {
+    active_entry: Option<TaskEntry>,
+}
+
 pub(super) struct TransferRuntime {
-    tasks: HashMap<TransferId, TaskEntry>,
-    paused: HashMap<TransferId, PausedTask>,
-    queue: VecDeque<QueuedTask>,
+    transfers: TransferTable,
+    disk: DiskHandle,
     max_concurrent: usize,
     next_id: u64,
     config: EngineConfig,
@@ -117,15 +424,15 @@ impl TransferRuntime {
         config: EngineConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
         initial_next_id: u64,
+        disk: DiskHandle,
     ) -> Self {
         let (runtime_update_tx, runtime_update_rx) =
             mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
         let max_concurrent = config.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(config.global_speed_limit_bps));
         Self {
-            tasks: HashMap::new(),
-            paused: HashMap::new(),
-            queue: VecDeque::new(),
+            transfers: TransferTable::default(),
+            disk,
             max_concurrent,
             next_id: initial_next_id,
             config,
@@ -252,21 +559,22 @@ impl TransferRuntime {
             ProviderRuntimeContext {
                 shared_scheduler_semaphore: self.shared_scheduler_semaphore(&spec),
                 global_throttle: Arc::clone(&self.global_throttle),
+                disk: self.disk.clone(),
                 runtime_update_tx: self.runtime_update_tx.clone(),
             },
         );
 
         let chunk_map_state = spec.active_chunk_map_state();
-        self.tasks.insert(
+        let control_support = spec.control_support();
+        self.transfers.set_active(
             id,
+            spec,
             TaskEntry {
                 handle,
                 pause_token,
                 pause_sink,
                 destination_sink,
-                control_support: spec.control_support(),
-                pause_requested: false,
-                spec,
+                control_support,
             },
         );
         self.emit(TransferRuntimeEvent::ChunkMapChanged {
@@ -278,13 +586,13 @@ impl TransferRuntime {
 
     /// Start queued downloads until capacity is full
     async fn try_start_next(&mut self) {
-        while self.tasks.len() < self.max_concurrent {
-            let Some(next) = self.queue.pop_front() else {
+        while self.transfers.active_len() < self.max_concurrent {
+            let Some(next) = self.transfers.pop_next_queued() else {
                 break;
             };
             tracing::info!(
                 id = next.id.0,
-                queued_remaining = self.queue.len(),
+                queued_remaining = self.transfers.queued_len(),
                 "starting queued download"
             );
             let _ = self.db_tx.send(DbEvent::Started { id: next.id });
@@ -309,7 +617,7 @@ impl TransferRuntime {
             ),
         })
         .await;
-        if self.tasks.len() < self.max_concurrent {
+        if self.transfers.active_len() < self.max_concurrent {
             tracing::info!(id = id.0, url = spec.url(), "download starting");
             let _ = self.db_tx.send(DbEvent::Started { id });
             self.spawn_task(id, spec, None).await;
@@ -317,14 +625,10 @@ impl TransferRuntime {
             tracing::info!(
                 id = id.0,
                 url = spec.url(),
-                queued = self.queue.len() + 1,
+                queued = self.transfers.queued_len() + 1,
                 "download queued (at capacity)"
             );
-            self.queue.push_back(QueuedTask {
-                id,
-                spec,
-                resume_data: None,
-            });
+            self.transfers.set_queued_back(id, spec, None);
         }
         Ok(id)
     }
@@ -344,13 +648,11 @@ impl TransferRuntime {
             });
         }
 
-        if let Some(entry) = self.tasks.get_mut(&id) {
+        if let Some(entry) = self.transfers.active_entry_mut(id) {
             tracing::info!(id = id.0, "pausing download");
             entry.pause_token.cancel();
-            entry.pause_requested = true;
-        } else if let Some(pos) = self.queue.iter().position(|t| t.id == id) {
-            // Not started yet -> pull from queue and park in paused with no progress
-            let task = self.queue.remove(pos).unwrap();
+            self.transfers.mark_pause_requested(id);
+        } else if let Some(task) = self.transfers.take_queued(id) {
             tracing::info!(id = id.0, "pausing queued (unstarted) download");
             let _ = self.db_tx.send(DbEvent::Paused {
                 id,
@@ -364,13 +666,7 @@ impl TransferRuntime {
             .await;
             self.emit(self.status_event(id, TransferStatus::Paused, 0, None))
                 .await;
-            self.paused.insert(
-                id,
-                PausedTask {
-                    spec: task.spec,
-                    resume_data: task.resume_data,
-                },
-            );
+            self.transfers.set_paused(id, task.spec, task.resume_data);
         }
         Ok(())
     }
@@ -405,13 +701,8 @@ impl TransferRuntime {
             id = download.id.0,
             "restoring paused download from database"
         );
-        self.paused.insert(
-            download.id,
-            PausedTask {
-                spec: download.spec,
-                resume_data: download.resume_data,
-            },
-        );
+        self.transfers
+            .set_paused(download.id, download.spec, download.resume_data);
         Ok(())
     }
 
@@ -428,13 +719,14 @@ impl TransferRuntime {
             });
         }
 
-        if let Some(pt) = self.paused.remove(&id) {
+        if let Some(pt) = self.transfers.take_paused(id) {
             tracing::info!(id = id.0, "resuming download");
             if pt.resume_data.is_none() {
-                remove_stale_part_file_for_fresh_resume(pt.spec.destination());
+                self.disk
+                    .remove_stale_part_for_fresh_resume(pt.spec.destination());
             }
             let (downloaded_bytes, total_bytes) = snapshot_totals(pt.resume_data.as_ref());
-            if self.tasks.len() < self.max_concurrent {
+            if self.transfers.active_len() < self.max_concurrent {
                 let _ = self.db_tx.send(DbEvent::Resumed { id });
                 self.emit(self.status_event(
                     id,
@@ -445,7 +737,6 @@ impl TransferRuntime {
                 .await;
                 self.spawn_task(id, pt.spec, pt.resume_data).await;
             } else {
-                // At capacity -> put at front of queue so it starts next
                 let _ = self.db_tx.send(DbEvent::Queued { id });
                 self.emit(self.status_event(
                     id,
@@ -454,11 +745,7 @@ impl TransferRuntime {
                     total_bytes,
                 ))
                 .await;
-                self.queue.push_front(QueuedTask {
-                    id,
-                    spec: pt.spec,
-                    resume_data: pt.resume_data,
-                });
+                self.transfers.set_queued_front(id, pt.spec, pt.resume_data);
             }
         }
         Ok(())
@@ -477,21 +764,18 @@ impl TransferRuntime {
             });
         }
 
-        let mut removed = false;
-        if let Some(entry) = self.tasks.remove(&id) {
+        let removed = self.transfers.remove_any(id);
+        if let Some(entry) = removed
+            .as_ref()
+            .and_then(|removed| removed.active_entry.as_ref())
+        {
             tracing::info!(id = id.0, "download cancelled");
-            // abort() prevents TaskRuntimeUpdate::Done, so advance the queue here
             entry.handle.abort();
             self.try_start_next().await;
-            removed = true;
         }
-        let queued_before = self.queue.len();
-        self.queue.retain(|t| t.id != id);
-        removed |= self.queue.len() != queued_before;
-        removed |= self.paused.remove(&id).is_some();
 
-        if removed {
-            let artifact_state = current_artifact_state(&destination);
+        if removed.is_some() {
+            let artifact_state = self.disk.artifact_state(&destination);
             let _ = self.db_tx.send(DbEvent::Cancelled { id });
             let _ = self
                 .db_tx
@@ -515,23 +799,21 @@ impl TransferRuntime {
         let Some(resolved_destination) = self.known_destination(id) else {
             return Err(EngineError::NotFound { id });
         };
-        let was_active = self.tasks.remove(&id).map(|entry| {
-            entry.handle.abort();
-        });
+        let removed = self.transfers.remove_any(id);
+        let was_active = removed
+            .as_ref()
+            .and_then(|removed| removed.active_entry.as_ref())
+            .map(|entry| {
+                entry.handle.abort();
+            });
         if was_active.is_some() {
             self.try_start_next().await;
         }
 
-        let queued_before = self.queue.len();
-        self.queue.retain(|task| task.id != id);
-        let removed_queued = self.queue.len() != queued_before;
-        let removed_paused = self.paused.remove(&id).is_some();
-        let removed_runtime_state = was_active.is_some() || removed_queued || removed_paused;
-
-        if removed_runtime_state {
+        if removed.is_some() {
             let _ = self.db_tx.send(DbEvent::Cancelled { id });
         }
-        let artifact_state = delete_artifact_files(&resolved_destination);
+        let artifact_state = self.disk.delete_artifacts(&resolved_destination);
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
@@ -551,16 +833,12 @@ impl TransferRuntime {
 
     fn handle_shutdown(&mut self) {
         tracing::info!(
-            active = self.tasks.len(),
-            paused = self.paused.len(),
-            queued = self.queue.len(),
+            active = self.transfers.active_len(),
+            paused = self.transfers.paused_len(),
+            queued = self.transfers.queued_len(),
             "transfer runtime shutting down, aborting active tasks"
         );
-        for (_, entry) in self.tasks.drain() {
-            entry.handle.abort();
-        }
-        self.paused.clear();
-        self.queue.clear();
+        self.transfers.clear();
     }
 
     async fn handle_task_done(
@@ -570,15 +848,19 @@ impl TransferRuntime {
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
     ) {
-        let active_entry = self.tasks.remove(&id);
-        if active_entry.is_none() && !self.paused.contains_key(&id) {
+        let active_entry = self.transfers.remove_active(id);
+        if active_entry.is_none() && !self.transfers.contains_paused(id) {
             return;
         }
         let mut active_entry = active_entry;
-        if let Some(entry) = active_entry.as_mut() {
-            let destination_sink = &entry.destination_sink;
-            self.sync_runtime_destination(id, &mut entry.spec, destination_sink)
-                .await;
+        if let Some((entry, spec)) = active_entry.as_mut() {
+            sync_runtime_destination(
+                &self.db_tx,
+                &mut self.events,
+                id,
+                spec,
+                &entry.destination_sink,
+            );
         }
 
         match status {
@@ -604,8 +886,8 @@ impl TransferRuntime {
                 self.try_start_next().await;
             }
             TransferStatus::Paused => {
-                if let Some(entry) = active_entry {
-                    self.finish_active_pause(id, entry).await;
+                if let Some((entry, spec)) = active_entry {
+                    self.finish_active_pause(id, entry, spec).await;
                 }
                 self.try_start_next().await;
             }
@@ -634,7 +916,7 @@ impl TransferRuntime {
     async fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
         match update {
             TaskRuntimeUpdate::Progress(update) => {
-                if self.tasks.contains_key(&update.id)
+                if self.transfers.contains_active(update.id)
                     || matches!(
                         update.status,
                         TransferStatus::Finished | TransferStatus::Paused | TransferStatus::Error
@@ -653,20 +935,23 @@ impl TransferRuntime {
                     .await;
             }
             TaskRuntimeUpdate::TransferBytesWritten { id, bytes } => {
-                if !self.tasks.contains_key(&id) {
+                if !self.transfers.contains_active(id) {
                     return;
                 }
                 self.emit(TransferRuntimeEvent::TransferBytesWritten { id, bytes })
                     .await;
             }
             TaskRuntimeUpdate::DestinationChanged { id, destination } => {
-                let Some(entry) = self.tasks.get_mut(&id) else {
-                    return;
-                };
-                if destination == entry.spec.destination() {
+                if !self.transfers.contains_active(id) {
                     return;
                 }
-                entry.spec.update_destination(destination.clone());
+                let Some(spec) = self.transfers.spec_mut(id) else {
+                    return;
+                };
+                if destination == spec.destination() {
+                    return;
+                }
+                spec.update_destination(destination.clone());
                 let _ = self.db_tx.send(DbEvent::DestinationChanged {
                     id,
                     destination: destination.clone(),
@@ -675,7 +960,7 @@ impl TransferRuntime {
                     .await;
             }
             TaskRuntimeUpdate::ControlSupportChanged { id, support } => {
-                let Some(entry) = self.tasks.get_mut(&id) else {
+                let Some(entry) = self.transfers.active_entry_mut(id) else {
                     return;
                 };
                 if entry.control_support == support {
@@ -686,7 +971,7 @@ impl TransferRuntime {
                     .await;
             }
             TaskRuntimeUpdate::ChunkMapChanged { id, state } => {
-                if !self.tasks.contains_key(&id) {
+                if !self.transfers.contains_active(id) {
                     return;
                 }
                 self.emit(TransferRuntimeEvent::ChunkMapChanged { id, state })
@@ -769,8 +1054,8 @@ impl TransferRuntime {
         }
     }
 
-    async fn finish_active_pause(&mut self, id: TransferId, entry: TaskEntry) {
-        if !entry.pause_requested {
+    async fn finish_active_pause(&mut self, id: TransferId, entry: TaskEntry, spec: DownloadSpec) {
+        if !self.transfers.pause_requested(id) {
             tracing::warn!(id = id.0, "download paused without a service pause request");
         }
         let resume_data = provider::take_resume_data(entry.pause_sink);
@@ -789,13 +1074,7 @@ impl TransferRuntime {
             .await;
             self.emit(self.status_event(id, TransferStatus::Paused, downloaded_bytes, total_bytes))
                 .await;
-            self.paused.insert(
-                id,
-                PausedTask {
-                    spec: entry.spec,
-                    resume_data: Some(resume_data),
-                },
-            );
+            self.transfers.set_paused(id, spec, Some(resume_data));
         } else {
             tracing::warn!(id = id.0, "download reported paused without resume data");
             let _ = self.db_tx.send(DbEvent::Error { id });
@@ -819,142 +1098,78 @@ impl TransferRuntime {
     }
 
     fn pause_target(&self, id: TransferId) -> Option<(bool, &DownloadSpec)> {
-        if let Some(entry) = self.tasks.get(&id) {
-            return Some((entry.control_support.can_pause, &entry.spec));
+        if let Some(entry) = self.transfers.active_entry(id) {
+            return Some((entry.control_support.can_pause, self.transfers.spec(id)?));
         }
-        self.queue.iter().find(|task| task.id == id).map(|task| {
-            (
-                provider::supports_control_action(&task.spec, TransferControlAction::Pause),
-                &task.spec,
-            )
-        })
+        let spec = self.transfers.spec(id)?;
+        Some((
+            provider::supports_control_action(spec, TransferControlAction::Pause),
+            spec,
+        ))
     }
 
     fn resume_target_spec(&self, id: TransferId) -> Option<&DownloadSpec> {
-        self.paused.get(&id).map(|task| &task.spec)
+        self.transfers
+            .contains_paused(id)
+            .then(|| self.transfers.spec(id))
+            .flatten()
     }
 
     fn cancel_target(&self, id: TransferId) -> Option<(bool, PathBuf)> {
-        if let Some(entry) = self.tasks.get(&id) {
+        if let Some(entry) = self.transfers.active_entry(id) {
+            let spec = self.transfers.spec(id)?;
             return Some((
                 entry.control_support.can_cancel,
-                self.runtime_destination(entry),
+                runtime_destination(spec, entry),
             ));
         }
-        if let Some(task) = self.paused.get(&id) {
-            return Some((
-                provider::supports_control_action(&task.spec, TransferControlAction::Cancel),
-                task.spec.destination().to_path_buf(),
-            ));
-        }
-        self.queue.iter().find(|task| task.id == id).map(|task| {
-            (
-                provider::supports_control_action(&task.spec, TransferControlAction::Cancel),
-                task.spec.destination().to_path_buf(),
-            )
-        })
+        let spec = self.transfers.spec(id)?;
+        Some((
+            provider::supports_control_action(spec, TransferControlAction::Cancel),
+            spec.destination().to_path_buf(),
+        ))
     }
 
     fn known_destination(&self, id: TransferId) -> Option<PathBuf> {
-        self.tasks
-            .get(&id)
-            .map(|entry| self.runtime_destination(entry))
-            .or_else(|| {
-                self.paused
-                    .get(&id)
-                    .map(|task| task.spec.destination().to_path_buf())
-            })
-            .or_else(|| {
-                self.queue
-                    .iter()
-                    .find(|task| task.id == id)
-                    .map(|task| task.spec.destination().to_path_buf())
-            })
-    }
-
-    fn runtime_destination(&self, entry: &TaskEntry) -> PathBuf {
-        provider::current_destination(&entry.destination_sink)
-            .unwrap_or_else(|| entry.spec.destination().to_path_buf())
-    }
-
-    async fn sync_runtime_destination(
-        &mut self,
-        id: TransferId,
-        spec: &mut DownloadSpec,
-        destination_sink: &TaskDestinationSink,
-    ) {
-        let Some(destination) = provider::current_destination(destination_sink) else {
-            return;
-        };
-        if destination == spec.destination() {
-            return;
+        if let Some(entry) = self.transfers.active_entry(id) {
+            let spec = self.transfers.spec(id)?;
+            return Some(runtime_destination(spec, entry));
         }
-        spec.update_destination(destination.clone());
-        let _ = self.db_tx.send(DbEvent::DestinationChanged {
-            id,
-            destination: destination.clone(),
-        });
-        self.emit(TransferRuntimeEvent::DestinationChanged { id, destination })
-            .await;
+        self.transfers
+            .spec(id)
+            .map(|spec| spec.destination().to_path_buf())
     }
+}
+
+fn runtime_destination(spec: &DownloadSpec, entry: &TaskEntry) -> PathBuf {
+    provider::current_destination(&entry.destination_sink)
+        .unwrap_or_else(|| spec.destination().to_path_buf())
+}
+
+fn sync_runtime_destination(
+    db_tx: &std::sync::mpsc::Sender<DbEvent>,
+    events: &mut Vec<TransferRuntimeEvent>,
+    id: TransferId,
+    spec: &mut DownloadSpec,
+    destination_sink: &TaskDestinationSink,
+) {
+    let Some(destination) = provider::current_destination(destination_sink) else {
+        return;
+    };
+    if destination == spec.destination() {
+        return;
+    }
+    spec.update_destination(destination.clone());
+    let _ = db_tx.send(DbEvent::DestinationChanged {
+        id,
+        destination: destination.clone(),
+    });
+    events.push(TransferRuntimeEvent::DestinationChanged { id, destination });
 }
 
 fn snapshot_totals(resume_data: Option<&ProviderResumeData>) -> (u64, Option<u64>) {
     match resume_data {
         Some(data) => (data.downloaded_bytes(), data.total_bytes()),
         None => (0, None),
-    }
-}
-
-fn remove_stale_part_file_for_fresh_resume(destination: &Path) {
-    let part_path = part_path_for(destination);
-    match std::fs::remove_file(&part_path) {
-        Ok(()) => {
-            tracing::info!(
-                path = %part_path.display(),
-                "removed stale part file before restarting restored download"
-            );
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                path = %part_path.display(),
-                "failed to remove stale part file before restarting restored download"
-            );
-        }
-    }
-}
-
-fn artifact_paths(destination: &Path) -> [PathBuf; 2] {
-    [destination.to_path_buf(), part_path_for(destination)]
-}
-
-fn current_artifact_state(destination: &Path) -> ArtifactState {
-    if artifact_paths(destination).iter().any(|path| path.exists()) {
-        ArtifactState::Present
-    } else {
-        ArtifactState::Missing
-    }
-}
-
-pub(crate) fn delete_artifact_files(destination: &Path) -> ArtifactState {
-    let mut removed_any = false;
-    for path in artifact_paths(destination) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => removed_any = true,
-            Err(error) => match error.kind() {
-                ErrorKind::NotFound => {}
-                _ => tracing::warn!(path = %path.display(), "failed to delete artifact: {error}"),
-            },
-        }
-    }
-
-    if artifact_paths(destination).iter().any(|path| path.exists()) {
-        ArtifactState::Present
-    } else if removed_any {
-        ArtifactState::Deleted
-    } else {
-        ArtifactState::Missing
     }
 }

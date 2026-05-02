@@ -24,16 +24,71 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use bitvec::prelude::{BitVec, Lsb0};
 
 use super::events::{SchedulerAction, WorkerEvent, WorkerFailure};
 use super::ranges::{ByteRange, RangeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct AttemptId(u64);
+const NO_INDEX: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct HedgeGroupId(u64);
+pub(super) struct AttemptId {
+    slot: u32,
+    generation: u32,
+}
+
+impl AttemptId {
+    fn new(slot: usize, generation: u32) -> Self {
+        Self {
+            slot: slot as u32,
+            generation,
+        }
+    }
+
+    fn index(self) -> AttemptIndex {
+        AttemptIndex(self.slot as usize)
+    }
+
+    pub(super) fn slot(self) -> usize {
+        self.slot as usize
+    }
+
+    pub(super) fn generation(self) -> u32 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    fn stale_for_test(slot: usize) -> Self {
+        Self::new(slot, 1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttemptIndex(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HedgeGroupId {
+    slot: u32,
+    generation: u32,
+}
+
+impl HedgeGroupId {
+    fn new(slot: usize, generation: u32) -> Self {
+        Self {
+            slot: slot as u32,
+            generation,
+        }
+    }
+
+    fn index(self) -> HedgeGroupIndex {
+        HedgeGroupIndex(self.slot as usize)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HedgeGroupIndex(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttemptRole {
@@ -94,28 +149,321 @@ struct HedgeGroup {
     winner: Option<AttemptId>,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptRoleCode {
+    Normal,
+    HedgeOriginal,
+    HedgeDuplicate,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HedgeWinnerCode {
+    None,
+    Original,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingRangeTable {
+    starts: Vec<u64>,
+    ends: Vec<u64>,
+    queued: VecDeque<PendingRangeIndex>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRangeIndex(usize);
+
+#[derive(Debug, Clone, Default)]
+struct AttemptTable {
+    starts: Vec<u64>,
+    ends: Vec<u64>,
+    currents: Vec<u64>,
+    stop_ats: Vec<u64>,
+    generations: Vec<u32>,
+    roles: Vec<AttemptRoleCode>,
+    hedge_group_slots: Vec<usize>,
+    hedge_group_generations: Vec<u32>,
+    active: BitVec<usize, Lsb0>,
+    active_rows: Vec<AttemptIndex>,
+    active_positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HedgeGroupTable {
+    originals: Vec<AttemptId>,
+    duplicates: Vec<AttemptId>,
+    winners: Vec<HedgeWinnerCode>,
+    generations: Vec<u32>,
+    active: BitVec<usize, Lsb0>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RangeScheduler {
     total_bytes: u64,
-    pending: VecDeque<ByteRange>,
+    pending: PendingRangeTable,
     completed: RangeSet,
-    active: HashMap<AttemptId, ActiveAttempt>,
-    hedges: HashMap<HedgeGroupId, HedgeGroup>,
-    next_attempt: u64,
-    next_hedge_group: u64,
+    active: AttemptTable,
+    hedges: HedgeGroupTable,
+}
+
+impl PendingRangeTable {
+    fn from_ranges(ranges: VecDeque<ByteRange>) -> Self {
+        let mut table = Self::default();
+        for range in ranges {
+            table.push_back(range);
+        }
+        table
+    }
+
+    fn push_front(&mut self, range: ByteRange) {
+        let index = self.push(range);
+        self.queued.push_front(index);
+    }
+
+    fn push_back(&mut self, range: ByteRange) {
+        let index = self.push(range);
+        self.queued.push_back(index);
+    }
+
+    fn pop_front(&mut self) -> Option<ByteRange> {
+        let index = self.queued.pop_front()?;
+        self.range(index)
+    }
+
+    fn len(&self) -> usize {
+        self.queued.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = ByteRange> + '_ {
+        self.queued.iter().filter_map(|&index| self.range(index))
+    }
+
+    fn push(&mut self, range: ByteRange) -> PendingRangeIndex {
+        let index = PendingRangeIndex(self.starts.len());
+        self.starts.push(range.start());
+        self.ends.push(range.end());
+        index
+    }
+
+    fn range(&self, index: PendingRangeIndex) -> Option<ByteRange> {
+        ByteRange::new(self.starts[index.0], self.ends[index.0])
+    }
+}
+
+impl AttemptTable {
+    fn active_len(&self) -> usize {
+        self.active_rows.len()
+    }
+
+    fn contains(&self, id: AttemptId) -> bool {
+        self.index_for(id).is_some()
+    }
+
+    fn get(&self, id: AttemptId) -> Option<ActiveAttempt> {
+        self.attempt_at(self.index_for(id)?)
+    }
+
+    fn insert(&mut self, range: ByteRange, role: AttemptRole) -> ActiveAttempt {
+        let generation = 1;
+        let index = AttemptIndex(self.starts.len());
+        let id = AttemptId::new(index.0, generation);
+        let (role_code, group) = role_parts(role);
+
+        self.starts.push(range.start());
+        self.ends.push(range.end());
+        self.currents.push(range.start());
+        self.stop_ats.push(range.end());
+        self.generations.push(generation);
+        self.roles.push(role_code);
+        self.hedge_group_slots
+            .push(group.map_or(NO_INDEX, |group| group.index().0));
+        self.hedge_group_generations
+            .push(group.map_or(0, |group| group.generation));
+        self.active.push(true);
+        self.active_positions.push(self.active_rows.len());
+        self.active_rows.push(index);
+
+        ActiveAttempt {
+            id,
+            range,
+            current: range.start(),
+            stop_at: range.end(),
+            role,
+        }
+    }
+
+    fn remove(&mut self, id: AttemptId) -> Option<ActiveAttempt> {
+        let index = self.index_for(id)?;
+        let attempt = self.attempt_at(index)?;
+        self.active.set(index.0, false);
+        self.remove_active_index(index);
+        Some(attempt)
+    }
+
+    fn record_written(&mut self, id: AttemptId, written: ByteRange) -> Option<ByteRange> {
+        let index = self.index_for(id)?;
+        let stop_at = self.stop_ats[index.0];
+        let allowed = ByteRange::new(self.starts[index.0], stop_at)?;
+        let written = written.intersection(allowed)?;
+        self.currents[index.0] = self.currents[index.0].max(written.end()).min(stop_at);
+        Some(written)
+    }
+
+    fn set_stop_at(&mut self, id: AttemptId, stop_at: u64) -> Option<()> {
+        let index = self.index_for(id)?;
+        self.stop_ats[index.0] = stop_at;
+        self.currents[index.0] = self.currents[index.0].min(stop_at);
+        Some(())
+    }
+
+    fn set_role(&mut self, id: AttemptId, role: AttemptRole) -> Option<()> {
+        let index = self.index_for(id)?;
+        let (role_code, group) = role_parts(role);
+        self.roles[index.0] = role_code;
+        self.hedge_group_slots[index.0] = group.map_or(NO_INDEX, |group| group.index().0);
+        self.hedge_group_generations[index.0] = group.map_or(0, |group| group.generation);
+        Some(())
+    }
+
+    fn iter_active(&self) -> impl Iterator<Item = ActiveAttempt> + '_ {
+        self.active_rows
+            .iter()
+            .filter_map(|&index| self.attempt_at(index))
+    }
+
+    fn index_for(&self, id: AttemptId) -> Option<AttemptIndex> {
+        let index = id.index();
+        if self.generations.get(index.0).copied()? != id.generation {
+            return None;
+        }
+        self.active
+            .get(index.0)
+            .is_some_and(|bit| *bit)
+            .then_some(index)
+    }
+
+    fn attempt_at(&self, index: AttemptIndex) -> Option<ActiveAttempt> {
+        let range = ByteRange::new(self.starts[index.0], self.ends[index.0])?;
+        Some(ActiveAttempt {
+            id: AttemptId::new(index.0, self.generations[index.0]),
+            range,
+            current: self.currents[index.0],
+            stop_at: self.stop_ats[index.0],
+            role: self.role_at(index)?,
+        })
+    }
+
+    fn role_at(&self, index: AttemptIndex) -> Option<AttemptRole> {
+        let group = || {
+            let slot = self.hedge_group_slots[index.0];
+            (slot != NO_INDEX)
+                .then(|| HedgeGroupId::new(slot, self.hedge_group_generations[index.0]))
+        };
+        Some(match self.roles[index.0] {
+            AttemptRoleCode::Normal => AttemptRole::Normal,
+            AttemptRoleCode::HedgeOriginal => AttemptRole::HedgeOriginal { group: group()? },
+            AttemptRoleCode::HedgeDuplicate => AttemptRole::HedgeDuplicate { group: group()? },
+        })
+    }
+
+    fn remove_active_index(&mut self, index: AttemptIndex) {
+        let pos = self.active_positions[index.0];
+        self.active_rows.swap_remove(pos);
+        if let Some(&moved) = self.active_rows.get(pos) {
+            self.active_positions[moved.0] = pos;
+        }
+        self.active_positions[index.0] = NO_INDEX;
+    }
+}
+
+impl HedgeGroupTable {
+    fn next_id(&self) -> HedgeGroupId {
+        HedgeGroupId::new(self.originals.len(), 1)
+    }
+
+    fn insert(&mut self, original: AttemptId, duplicate: AttemptId) -> HedgeGroupId {
+        let generation = 1;
+        let index = HedgeGroupIndex(self.originals.len());
+        let id = HedgeGroupId::new(index.0, generation);
+        self.originals.push(original);
+        self.duplicates.push(duplicate);
+        self.winners.push(HedgeWinnerCode::None);
+        self.generations.push(generation);
+        self.active.push(true);
+        id
+    }
+
+    fn get(&self, id: HedgeGroupId) -> Option<HedgeGroup> {
+        let index = self.index_for(id)?;
+        Some(self.group_at(index))
+    }
+
+    fn remove(&mut self, id: HedgeGroupId) -> Option<HedgeGroup> {
+        let index = self.index_for(id)?;
+        let group = self.group_at(index);
+        self.active.set(index.0, false);
+        Some(group)
+    }
+
+    fn mark_winner(&mut self, id: HedgeGroupId, winner: AttemptId) -> Option<AttemptId> {
+        let index = self.index_for(id)?;
+        if winner == self.originals[index.0] {
+            self.winners[index.0] = HedgeWinnerCode::Original;
+            Some(self.duplicates[index.0])
+        } else if winner == self.duplicates[index.0] {
+            self.winners[index.0] = HedgeWinnerCode::Duplicate;
+            Some(self.originals[index.0])
+        } else {
+            None
+        }
+    }
+
+    fn index_for(&self, id: HedgeGroupId) -> Option<HedgeGroupIndex> {
+        let index = id.index();
+        if self.generations.get(index.0).copied()? != id.generation {
+            return None;
+        }
+        self.active
+            .get(index.0)
+            .is_some_and(|bit| *bit)
+            .then_some(index)
+    }
+
+    fn group_at(&self, index: HedgeGroupIndex) -> HedgeGroup {
+        let original = self.originals[index.0];
+        let duplicate = self.duplicates[index.0];
+        let winner = match self.winners[index.0] {
+            HedgeWinnerCode::None => None,
+            HedgeWinnerCode::Original => Some(original),
+            HedgeWinnerCode::Duplicate => Some(duplicate),
+        };
+        HedgeGroup {
+            original,
+            duplicate,
+            winner,
+        }
+    }
+}
+
+fn role_parts(role: AttemptRole) -> (AttemptRoleCode, Option<HedgeGroupId>) {
+    match role {
+        AttemptRole::Normal => (AttemptRoleCode::Normal, None),
+        AttemptRole::HedgeOriginal { group } => (AttemptRoleCode::HedgeOriginal, Some(group)),
+        AttemptRole::HedgeDuplicate { group } => (AttemptRoleCode::HedgeDuplicate, Some(group)),
+    }
 }
 
 impl RangeScheduler {
     pub(super) fn new(total_bytes: u64, pending: impl IntoIterator<Item = ByteRange>) -> Self {
-        let pending = normalize_pending(total_bytes, pending);
+        let pending = PendingRangeTable::from_ranges(normalize_pending(total_bytes, pending));
         Self {
             total_bytes,
             pending,
             completed: RangeSet::new(),
-            active: HashMap::new(),
-            hedges: HashMap::new(),
-            next_attempt: 0,
-            next_hedge_group: 0,
+            active: AttemptTable::default(),
+            hedges: HedgeGroupTable::default(),
         }
     }
 
@@ -142,12 +490,10 @@ impl RangeScheduler {
         }
         Self {
             total_bytes,
-            pending,
+            pending: PendingRangeTable::from_ranges(pending),
             completed,
-            active: HashMap::new(),
-            hedges: HashMap::new(),
-            next_attempt: 0,
-            next_hedge_group: 0,
+            active: AttemptTable::default(),
+            hedges: HedgeGroupTable::default(),
         }
     }
 
@@ -168,11 +514,11 @@ impl RangeScheduler {
     }
 
     pub(super) fn active_len(&self) -> usize {
-        self.active.len()
+        self.active.active_len()
     }
 
     pub(super) fn pending_ranges(&self) -> impl Iterator<Item = ByteRange> + '_ {
-        self.pending.iter().copied()
+        self.pending.iter()
     }
 
     pub(super) fn completed_ranges(&self) -> &[ByteRange] {
@@ -180,20 +526,20 @@ impl RangeScheduler {
     }
 
     pub(super) fn active_attempt(&self, id: AttemptId) -> Option<ActiveAttempt> {
-        self.active.get(&id).copied()
+        self.active.get(id)
     }
 
     pub(super) fn apply_worker_event(&mut self, event: WorkerEvent) -> SchedulerAction {
         match event {
             WorkerEvent::DataReceived { attempt, .. } => {
-                if self.active.contains_key(&attempt) {
+                if self.active.contains(attempt) {
                     SchedulerAction::Nothing
                 } else {
                     SchedulerAction::UnknownAttempt { attempt }
                 }
             }
             WorkerEvent::BytesWritten { attempt, written } => {
-                let known = self.active.contains_key(&attempt);
+                let known = self.active.contains(attempt);
                 match self.record_progress(attempt, written) {
                     Some(new_bytes) => SchedulerAction::CountedProgress { new_bytes },
                     None if known => SchedulerAction::Nothing,
@@ -208,14 +554,14 @@ impl RangeScheduler {
                 None => SchedulerAction::UnknownAttempt { attempt },
             },
             WorkerEvent::Paused { attempt } => {
-                if self.active.contains_key(&attempt) {
+                if self.active.contains(attempt) {
                     SchedulerAction::PauseDownload
                 } else {
                     SchedulerAction::UnknownAttempt { attempt }
                 }
             }
             WorkerEvent::Failed { attempt, failure } => {
-                let known = self.active.contains_key(&attempt);
+                let known = self.active.contains(attempt);
                 if !known {
                     return SchedulerAction::UnknownAttempt { attempt };
                 }
@@ -235,20 +581,16 @@ impl RangeScheduler {
 
     pub(super) fn start_next_attempt(&mut self) -> Option<ActiveAttempt> {
         let range = self.pending.pop_front()?;
-        Some(self.insert_attempt(range, AttemptRole::Normal))
+        Some(self.active.insert(range, AttemptRole::Normal))
     }
 
     fn record_progress(&mut self, id: AttemptId, written: ByteRange) -> Option<u64> {
-        let attempt = self.active.get_mut(&id)?;
-        let allowed = ByteRange::new(attempt.range.start(), attempt.stop_at)?;
-        let written = written.intersection(allowed)?;
-
-        attempt.current = attempt.current.max(written.end()).min(attempt.stop_at);
+        let written = self.active.record_written(id, written)?;
         Some(self.completed.insert_and_count_new(written))
     }
 
     fn finish_attempt(&mut self, id: AttemptId) -> Option<FinishResult> {
-        let attempt = self.active.remove(&id)?;
+        let attempt = self.active.remove(id)?;
         let cancel_loser = match attempt.role {
             AttemptRole::Normal => None,
             AttemptRole::HedgeOriginal { group } | AttemptRole::HedgeDuplicate { group } => {
@@ -259,7 +601,7 @@ impl RangeScheduler {
     }
 
     fn fail_attempt(&mut self, id: AttemptId, failure: AttemptFailure) -> Option<ByteRange> {
-        let attempt = self.active.remove(&id)?;
+        let attempt = self.active.remove(id)?;
         match failure {
             AttemptFailure::Retryable => self.handle_retryable_failure(attempt),
             AttemptFailure::HedgeLost => {
@@ -288,10 +630,10 @@ impl RangeScheduler {
         align: u64,
     ) -> Option<StealResult> {
         let align = align.max(1);
-        let (&victim_id, victim, stealable_start, stealable) = self
+        let (victim_id, victim, stealable_start, stealable) = self
             .active
-            .iter()
-            .filter_map(|(id, attempt)| {
+            .iter_active()
+            .filter_map(|attempt| {
                 if !matches!(attempt.role, AttemptRole::Normal) {
                     return None;
                 }
@@ -302,7 +644,7 @@ impl RangeScheduler {
                     .min(attempt.stop_at);
                 let stealable = attempt.stop_at.saturating_sub(stealable_start);
                 (stealable >= 2 * min_steal_bytes).then_some((
-                    id,
+                    attempt.id,
                     attempt,
                     stealable_start,
                     stealable,
@@ -317,8 +659,7 @@ impl RangeScheduler {
         }
 
         let stolen = ByteRange::new(midpoint, victim.stop_at)?;
-        let victim = self.active.get_mut(&victim_id)?;
-        victim.stop_at = midpoint;
+        self.active.set_stop_at(victim_id, midpoint)?;
         self.pending.push_front(stolen);
 
         Some(StealResult {
@@ -333,7 +674,7 @@ impl RangeScheduler {
         original_id: AttemptId,
         min_remaining: u64,
     ) -> Option<ActiveAttempt> {
-        let original = self.active.get(&original_id).copied()?;
+        let original = self.active.get(original_id)?;
         if !matches!(original.role, AttemptRole::Normal) {
             return None;
         }
@@ -343,21 +684,14 @@ impl RangeScheduler {
             return None;
         }
 
-        let group = HedgeGroupId(self.next_hedge_group);
-        self.next_hedge_group += 1;
+        let group = self.hedges.next_id();
 
-        let duplicate = self.insert_attempt(remaining, AttemptRole::HedgeDuplicate { group });
-        let original = self.active.get_mut(&original_id)?;
-        original.role = AttemptRole::HedgeOriginal { group };
-
-        self.hedges.insert(
-            group,
-            HedgeGroup {
-                original: original_id,
-                duplicate: duplicate.id,
-                winner: None,
-            },
-        );
+        let duplicate = self
+            .active
+            .insert(remaining, AttemptRole::HedgeDuplicate { group });
+        self.active
+            .set_role(original_id, AttemptRole::HedgeOriginal { group })?;
+        self.hedges.insert(original_id, duplicate.id);
 
         Some(duplicate)
     }
@@ -365,11 +699,11 @@ impl RangeScheduler {
     pub(super) fn start_largest_hedge(&mut self, min_remaining: u64) -> Option<ActiveAttempt> {
         let original_id = self
             .active
-            .iter()
-            .filter(|(_, attempt)| matches!(attempt.role, AttemptRole::Normal))
-            .filter_map(|(id, attempt)| {
+            .iter_active()
+            .filter(|attempt| matches!(attempt.role, AttemptRole::Normal))
+            .filter_map(|attempt| {
                 let remaining = attempt.remaining_range()?;
-                (remaining.len() >= min_remaining).then_some((*id, remaining.len()))
+                (remaining.len() >= min_remaining).then_some((attempt.id, remaining.len()))
             })
             .max_by_key(|(_, remaining)| *remaining)
             .map(|(id, _)| id)?;
@@ -378,8 +712,8 @@ impl RangeScheduler {
     }
 
     pub(super) fn pause_remaining(&self) -> RangeSet {
-        let mut remaining = RangeSet::from_ranges(self.pending.iter().copied());
-        for attempt in self.active.values() {
+        let mut remaining = RangeSet::from_ranges(self.pending.iter());
+        for attempt in self.active.iter_active() {
             if let Some(range) = attempt.remaining_range() {
                 remaining.insert(range);
             }
@@ -390,25 +724,11 @@ impl RangeScheduler {
         remaining
     }
 
-    fn insert_attempt(&mut self, range: ByteRange, role: AttemptRole) -> ActiveAttempt {
-        let id = AttemptId(self.next_attempt);
-        self.next_attempt += 1;
-        let attempt = ActiveAttempt {
-            id,
-            range,
-            current: range.start(),
-            stop_at: range.end(),
-            role,
-        };
-        self.active.insert(id, attempt);
-        attempt
-    }
-
     fn handle_retryable_failure(&mut self, attempt: ActiveAttempt) -> Option<ByteRange> {
         match attempt.role {
             AttemptRole::Normal => self.requeue_remaining(attempt),
             AttemptRole::HedgeOriginal { group } | AttemptRole::HedgeDuplicate { group } => {
-                let Some(hedge) = self.hedges.remove(&group) else {
+                let Some(hedge) = self.hedges.remove(group) else {
                     return self.requeue_remaining(attempt);
                 };
 
@@ -418,8 +738,11 @@ impl RangeScheduler {
                     hedge.original
                 };
 
-                if let Some(survivor) = self.active.get_mut(&survivor_id) {
-                    survivor.role = AttemptRole::Normal;
+                if self
+                    .active
+                    .set_role(survivor_id, AttemptRole::Normal)
+                    .is_some()
+                {
                     return None;
                 }
 
@@ -429,7 +752,7 @@ impl RangeScheduler {
     }
 
     fn handle_unrecoverable_failure(&mut self, id: AttemptId) -> bool {
-        let Some(attempt) = self.active.remove(&id) else {
+        let Some(attempt) = self.active.remove(id) else {
             return false;
         };
 
@@ -438,7 +761,7 @@ impl RangeScheduler {
             AttemptRole::HedgeOriginal { group } | AttemptRole::HedgeDuplicate { group } => group,
         };
 
-        let Some(hedge) = self.hedges.remove(&group) else {
+        let Some(hedge) = self.hedges.remove(group) else {
             return false;
         };
         let survivor_id = if id == hedge.original {
@@ -447,8 +770,11 @@ impl RangeScheduler {
             hedge.original
         };
 
-        if let Some(survivor) = self.active.get_mut(&survivor_id) {
-            survivor.role = AttemptRole::Normal;
+        if self
+            .active
+            .set_role(survivor_id, AttemptRole::Normal)
+            .is_some()
+        {
             return true;
         }
 
@@ -462,13 +788,7 @@ impl RangeScheduler {
     }
 
     fn mark_hedge_winner(&mut self, group: HedgeGroupId, winner: AttemptId) -> Option<AttemptId> {
-        let hedge = self.hedges.get_mut(&group)?;
-        hedge.winner = Some(winner);
-        if winner == hedge.original {
-            Some(hedge.duplicate)
-        } else {
-            Some(hedge.original)
-        }
+        self.hedges.mark_winner(group, winner)
     }
 
     fn remove_from_hedge_group(&mut self, attempt: ActiveAttempt) {
@@ -479,10 +799,10 @@ impl RangeScheduler {
 
         let should_remove = self
             .hedges
-            .get(&group)
+            .get(group)
             .is_none_or(|hedge| hedge.winner.is_some());
         if should_remove {
-            self.hedges.remove(&group);
+            self.hedges.remove(group);
         }
     }
 }
@@ -892,11 +1212,29 @@ mod tests {
     #[test]
     fn worker_event_for_unknown_attempt_is_reported() {
         let mut scheduler = RangeScheduler::new(100, [range(0, 100)]);
-        let unknown = super::AttemptId(99);
+        let unknown = super::AttemptId::stale_for_test(99);
 
         assert_eq!(
             scheduler.apply_worker_event(WorkerEvent::Paused { attempt: unknown }),
             SchedulerAction::UnknownAttempt { attempt: unknown }
+        );
+    }
+
+    #[test]
+    fn worker_event_for_stale_attempt_generation_is_reported() {
+        let mut scheduler = RangeScheduler::new(100, [range(0, 100)]);
+        let attempt = scheduler.start_next_attempt().unwrap();
+        let stale = super::AttemptId {
+            slot: attempt.id().slot,
+            generation: attempt.id().generation + 1,
+        };
+
+        assert_eq!(
+            scheduler.apply_worker_event(WorkerEvent::DataReceived {
+                attempt: stale,
+                bytes: 1,
+            }),
+            SchedulerAction::UnknownAttempt { attempt: stale }
         );
     }
 }

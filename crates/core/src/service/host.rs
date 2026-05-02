@@ -1,7 +1,8 @@
 use super::lock::{ServiceLock, service_lock_path};
 use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
-use super::transfer_runtime::{TransferRuntime, TransferRuntimeEvent, delete_artifact_files};
+use super::transfer_runtime::{TransferRuntime, TransferRuntimeEvent};
 use super::*;
+use crate::disk::DiskHandle;
 
 const SERVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TASK_UPDATE_DRAIN_AFTER_COMMAND: usize = 64;
@@ -72,8 +73,13 @@ impl OpheliaService {
         let (event_tx, _) = broadcast::channel(SERVICE_EVENT_CAPACITY);
         let client = OpheliaClient::in_process(tx);
         let db_tx = bootstrap.db_tx.clone();
-        let transfers =
-            TransferRuntime::new(config.clone(), db_tx.clone(), bootstrap.next_download_id);
+        let disk = DiskHandle::new();
+        let transfers = TransferRuntime::new(
+            config.clone(),
+            db_tx.clone(),
+            bootstrap.next_download_id,
+            disk.clone(),
+        );
         let task = runtime.spawn(
             OpheliaServiceRuntime {
                 config,
@@ -81,6 +87,7 @@ impl OpheliaService {
                 paths,
                 service_info,
                 transfers,
+                disk,
                 db_tx,
                 saved_downloads: bootstrap.saved_downloads,
                 _db_worker: bootstrap.worker,
@@ -149,6 +156,7 @@ struct OpheliaServiceRuntime {
     paths: ProfilePaths,
     service_info: OpheliaServiceInfo,
     transfers: TransferRuntime,
+    disk: DiskHandle,
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     saved_downloads: Vec<crate::engine::SavedDownload>,
     _db_worker: state::DbWorkerHandle,
@@ -389,7 +397,7 @@ impl OpheliaServiceRuntime {
         }
         .ok_or(OpheliaError::NotFound { id })?;
 
-        let artifact_state = delete_artifact_files(&destination);
+        let artifact_state = self.disk.delete_artifacts(&destination);
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });

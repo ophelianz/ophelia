@@ -33,18 +33,21 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use super::disk_writer::{RangeWriteJob, RangeWriteResult, RangeWriteSender};
 use super::events::{WorkerEvent, WorkerFailure};
 use super::ranges::ByteRange;
-use super::scheduler::ActiveAttempt;
+use super::scheduler::{ActiveAttempt, AttemptId};
 use super::throttle::Throttle;
+use crate::disk::{
+    DiskSessionId, DiskWriteFailure, DiskWriteJob, DiskWriteResult, DiskWriteSender,
+};
 
 pub(super) struct RangeWorkerConfig {
     pub(super) client: Arc<reqwest::Client>,
     pub(super) url: String,
     pub(super) attempt: ActiveAttempt,
     pub(super) live_stop_at: Arc<AtomicU64>,
-    pub(super) write_jobs: RangeWriteSender,
+    pub(super) disk_session: DiskSessionId,
+    pub(super) write_jobs: DiskWriteSender<AttemptId>,
     pub(super) write_buffer_size: usize,
     pub(super) stall_timeout: Duration,
     pub(super) pause_token: CancellationToken,
@@ -340,7 +343,13 @@ impl RangeWorker {
 
         let bytes = self.take_writable_bytes(writable_len);
         let (reply_tx, reply_rx) = oneshot::channel();
-        let job = RangeWriteJob::new(self.config.attempt.id(), self.offset, bytes, reply_tx);
+        let job = DiskWriteJob::new(
+            self.config.disk_session,
+            self.config.attempt.id(),
+            self.offset,
+            bytes,
+            reply_tx,
+        );
         if self.config.write_jobs.send(job).await.is_err() {
             self.fail(WorkerFailure::FatalIo {
                 message: "disk writer stopped".to_string(),
@@ -350,7 +359,14 @@ impl RangeWorker {
         }
 
         match reply_rx.await {
-            Ok(RangeWriteResult::Written { range, .. }) => {
+            Ok(DiskWriteResult::Written { range, .. }) => {
+                let Some(range) = ByteRange::new(range.start(), range.end()) else {
+                    self.fail(WorkerFailure::FatalIo {
+                        message: "disk writer returned invalid range".to_string(),
+                    })
+                    .await;
+                    return Err(());
+                };
                 debug_assert_eq!(range, written);
                 self.event(WorkerEvent::BytesWritten {
                     attempt: self.config.attempt.id(),
@@ -360,8 +376,8 @@ impl RangeWorker {
                 self.offset = range.end();
                 Ok(())
             }
-            Ok(RangeWriteResult::Failed { failure, .. }) => {
-                self.fail(failure).await;
+            Ok(DiskWriteResult::Failed { failure, .. }) => {
+                self.fail(worker_failure_from_disk(failure)).await;
                 Err(())
             }
             Err(_closed) => {
@@ -418,6 +434,13 @@ impl RangeWorker {
 
     async fn event(&self, event: WorkerEvent) {
         send_event(&self.config.events, event).await;
+    }
+}
+
+fn worker_failure_from_disk(failure: DiskWriteFailure) -> WorkerFailure {
+    match failure {
+        DiskWriteFailure::FatalIo { message } => WorkerFailure::FatalIo { message },
+        DiskWriteFailure::RetryableIo { message } => WorkerFailure::RetryableIo { message },
     }
 }
 
@@ -575,11 +598,12 @@ mod tests {
         AppendOutcome, RangeWorker, RangeWorkerConfig, WorkerSignal, append_bytes_with_live_stop,
         run_range_worker,
     };
+    use crate::disk::{DiskHandle, DiskWriter};
+    use crate::engine::destination::{FinalizeStrategy, ResolvedDestination};
     use crate::engine::http::{
-        disk_writer::RangeDiskWriter,
         events::{WorkerEvent, WorkerFailure},
         ranges::ByteRange,
-        scheduler::RangeScheduler,
+        scheduler::{AttemptId, RangeScheduler},
         throttle::{Throttle, TokenBucket},
     };
 
@@ -594,16 +618,20 @@ mod tests {
         })
     }
 
-    fn test_file() -> (tempfile::TempDir, std::fs::File) {
+    fn test_destination(dir: &tempfile::TempDir) -> ResolvedDestination {
+        ResolvedDestination {
+            destination: dir.path().join("done.bin"),
+            part_path: dir.path().join("part.bin"),
+            finalize_strategy: FinalizeStrategy::MoveNoReplace,
+        }
+    }
+
+    fn test_disk() -> (tempfile::TempDir, crate::disk::DiskLease) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("part.bin");
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
+        let lease = DiskHandle::new()
+            .create_new(crate::engine::TransferId(1), test_destination(&dir), None)
             .unwrap();
-        (dir, file)
+        (dir, lease)
     }
 
     fn events_from(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<WorkerEvent> {
@@ -617,9 +645,10 @@ mod tests {
     fn worker_config(
         url: String,
         events: mpsc::Sender<WorkerEvent>,
-    ) -> (RangeWorkerConfig, tempfile::TempDir, RangeDiskWriter) {
-        let (dir, file) = test_file();
-        let writer = RangeDiskWriter::spawn(file);
+    ) -> (RangeWorkerConfig, tempfile::TempDir, DiskWriter<AttemptId>) {
+        let (dir, lease) = test_disk();
+        let session = lease.session();
+        let (_disk, writer) = lease.split_for_writes();
         let mut scheduler = RangeScheduler::new(8, [range(0, 8)]);
         let attempt = scheduler.start_next_attempt().unwrap();
         let config = RangeWorkerConfig {
@@ -627,6 +656,7 @@ mod tests {
             url,
             attempt,
             live_stop_at: Arc::new(AtomicU64::new(attempt.stop_at())),
+            disk_session: session,
             write_jobs: writer.sender(),
             write_buffer_size: 4,
             stall_timeout: Duration::from_secs(5),

@@ -24,11 +24,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::destination::{ResolvedDestination, finalize_part_file};
+use crate::disk::{
+    DiskLease, DiskSessionLease, DiskWriteFailure, DiskWriteJob, DiskWriteResult, DiskWriteSender,
+    DiskWriter,
+};
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{ProgressUpdate, TaskRuntimeUpdate, TransferId, TransferStatus};
 
@@ -53,7 +56,7 @@ pub(super) struct SingleTransferRequest {
     pub(super) id: TransferId,
     pub(super) client: Arc<reqwest::Client>,
     pub(super) url: String,
-    pub(super) resolved_destination: ResolvedDestination,
+    pub(super) disk: DiskLease,
     pub(super) stall_timeout_secs: u64,
     pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
     pub(super) pause_token: CancellationToken,
@@ -84,28 +87,27 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
         id,
         client,
         url,
-        resolved_destination,
+        disk,
         stall_timeout_secs,
         runtime_update_tx,
         pause_token,
         throttle,
     } = request;
-    let ResolvedDestination {
-        part_path,
-        destination,
-        finalize_strategy,
-    } = resolved_destination;
     let stall_timeout = Duration::from_secs(stall_timeout_secs);
+    let disk_lease = disk;
+    let session = disk_lease.session();
 
     let response = tokio::select! {
         biased;
         _ = pause_token.cancelled() => {
+            disk_lease.mark_failed(None);
             send_progress(&runtime_update_tx, id, TransferStatus::Error, 0, None, 0).await;
             return task_state(TransferStatus::Error, 0, None);
         }
         result = client.get(&url).send() => match result {
             Ok(r) => r,
             Err(_) => {
+                disk_lease.mark_failed(None);
                 send_progress(&runtime_update_tx, id, TransferStatus::Error, 0, None, 0).await;
                 return task_state(TransferStatus::Error, 0, None);
             }
@@ -113,17 +115,14 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
     };
     if !response.status().is_success() {
         tracing::warn!(status = %response.status(), "single-stream request failed");
+        disk_lease.mark_failed(None);
         send_progress(&runtime_update_tx, id, TransferStatus::Error, 0, None, 0).await;
         return task_state(TransferStatus::Error, 0, None);
     }
 
-    let mut file = match tokio::fs::File::create(&part_path).await {
-        Ok(f) => f,
-        Err(_) => {
-            send_progress(&runtime_update_tx, id, TransferStatus::Error, 0, None, 0).await;
-            return task_state(TransferStatus::Error, 0, None);
-        }
-    };
+    let (disk, writer) = disk_lease.split_for_writes::<TransferId>();
+    let mut writer = Some(writer);
+    let write_jobs = writer.as_ref().unwrap().sender();
 
     let mut downloaded: u64 = 0;
     let mut stream = response.bytes_stream();
@@ -145,68 +144,114 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
         let result = tokio::select! {
             biased;
             _ = pause_token.cancelled() => {
-                send_progress(&runtime_update_tx, id, TransferStatus::Error, downloaded, None, 0).await;
-                return task_state(TransferStatus::Error, downloaded, None);
+                return fail_after_writer(
+                    &runtime_update_tx,
+                    id,
+                    downloaded,
+                    disk,
+                    writer.take().unwrap(),
+                    write_jobs,
+                    None,
+                ).await;
             }
             result = tokio::time::timeout(stall_timeout, stream.next()) => result,
         };
         let Ok(maybe) = result else {
-            send_progress(
+            return fail_after_writer(
                 &runtime_update_tx,
                 id,
-                TransferStatus::Error,
                 downloaded,
+                disk,
+                writer.take().unwrap(),
+                write_jobs,
                 None,
-                0,
             )
             .await;
-            return task_state(TransferStatus::Error, downloaded, None);
         };
         let Some(item) = maybe else { break };
         let Ok(chunk) = item else {
-            send_progress(
+            return fail_after_writer(
                 &runtime_update_tx,
                 id,
-                TransferStatus::Error,
                 downloaded,
+                disk,
+                writer.take().unwrap(),
+                write_jobs,
                 None,
-                0,
             )
             .await;
-            return task_state(TransferStatus::Error, downloaded, None);
         };
 
-        if file.write_all(&chunk).await.is_err() {
-            send_progress(
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let job = DiskWriteJob::new(session, id, downloaded, chunk.to_vec(), reply_tx);
+        if write_jobs.send(job).await.is_err() {
+            return fail_after_writer(
                 &runtime_update_tx,
                 id,
-                TransferStatus::Error,
                 downloaded,
-                None,
-                0,
+                disk,
+                writer.take().unwrap(),
+                write_jobs,
+                Some("disk writer stopped".into()),
             )
             .await;
-            return task_state(TransferStatus::Error, downloaded, None);
         }
-        let _ = runtime_update_tx
-            .send(TaskRuntimeUpdate::TransferBytesWritten {
-                id,
-                bytes: chunk.len() as u64,
-            })
-            .await;
+        match reply_rx.await {
+            Ok(DiskWriteResult::Written { range, .. }) => {
+                disk.confirm_logical(range.len());
+                let _ = runtime_update_tx
+                    .send(TaskRuntimeUpdate::TransferBytesWritten {
+                        id,
+                        bytes: range.len(),
+                    })
+                    .await;
+                downloaded = range.end();
+                window_bytes += range.len();
+            }
+            Ok(DiskWriteResult::Failed { failure, .. }) => {
+                tracing::warn!(failure = %disk_failure_label(&failure), "single-stream disk write failed");
+                return fail_after_writer(
+                    &runtime_update_tx,
+                    id,
+                    downloaded,
+                    disk,
+                    writer.take().unwrap(),
+                    write_jobs,
+                    Some(disk_failure_message(failure)),
+                )
+                .await;
+            }
+            Err(_closed) => {
+                return fail_after_writer(
+                    &runtime_update_tx,
+                    id,
+                    downloaded,
+                    disk,
+                    writer.take().unwrap(),
+                    write_jobs,
+                    Some("disk writer dropped write result".into()),
+                )
+                .await;
+            }
+        }
         let wait = throttle.consume(chunk.len() as u64);
         if !wait.is_zero() {
             tokio::select! {
                 biased;
                 _ = pause_token.cancelled() => {
-                    send_progress(&runtime_update_tx, id, TransferStatus::Error, downloaded, None, 0).await;
-                    return task_state(TransferStatus::Error, downloaded, None);
+                    return fail_after_writer(
+                        &runtime_update_tx,
+                        id,
+                        downloaded,
+                        disk,
+                        writer.take().unwrap(),
+                        write_jobs,
+                        None,
+                    ).await;
                 }
                 _ = tokio::time::sleep(wait) => {}
             }
         }
-        downloaded += chunk.len() as u64;
-        window_bytes += chunk.len() as u64;
         let elapsed = window_start.elapsed().as_secs_f64();
         if elapsed >= WINDOW_SECS {
             let recent = window_bytes as f64 / elapsed;
@@ -225,20 +270,24 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
         .await;
     }
 
-    if file.flush().await.is_err() {
-        send_progress(
-            &runtime_update_tx,
-            id,
-            TransferStatus::Error,
-            downloaded,
-            None,
-            0,
-        )
-        .await;
-        return task_state(TransferStatus::Error, downloaded, None);
+    drop(write_jobs);
+    for result in writer.take().unwrap().shutdown().await {
+        if let DiskWriteResult::Failed { failure, .. } = result {
+            disk.mark_failed(Some(disk_failure_message(failure)));
+            send_progress(
+                &runtime_update_tx,
+                id,
+                TransferStatus::Error,
+                downloaded,
+                None,
+                0,
+            )
+            .await;
+            return task_state(TransferStatus::Error, downloaded, None);
+        }
     }
-    drop(file);
-    match finalize_part_file(&part_path, &destination, finalize_strategy) {
+
+    match disk.commit() {
         Ok(()) => {
             send_progress(
                 &runtime_update_tx,
@@ -264,5 +313,44 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
             .await;
             task_state(TransferStatus::Error, downloaded, None)
         }
+    }
+}
+
+async fn fail_after_writer(
+    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    id: TransferId,
+    downloaded: u64,
+    disk: DiskSessionLease,
+    writer: DiskWriter<TransferId>,
+    write_jobs: DiskWriteSender<TransferId>,
+    message: Option<String>,
+) -> TaskFinalState {
+    drop(write_jobs);
+    let _ = writer.shutdown().await;
+    disk.mark_failed(message);
+    send_progress(
+        runtime_update_tx,
+        id,
+        TransferStatus::Error,
+        downloaded,
+        None,
+        0,
+    )
+    .await;
+    task_state(TransferStatus::Error, downloaded, None)
+}
+
+fn disk_failure_message(failure: DiskWriteFailure) -> String {
+    match failure {
+        DiskWriteFailure::FatalIo { message } | DiskWriteFailure::RetryableIo { message } => {
+            message
+        }
+    }
+}
+
+fn disk_failure_label(failure: &DiskWriteFailure) -> &'static str {
+    match failure {
+        DiskWriteFailure::FatalIo { .. } => "fatal_io",
+        DiskWriteFailure::RetryableIo { .. } => "retryable_io",
     }
 }

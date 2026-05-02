@@ -6,6 +6,7 @@ description = "Ophelia download engine"
 license = "GPL-3.0"
 
 [dependencies]
+bitvec = "1.0.1"
 futures = "0.3.32"
 hex = "0.4.3"
 libc = "0.2.183"
@@ -39,4 +40,8 @@ harness = false
 
 [[bench]]
 name = "session_events"
+harness = false
+
+[[bench]]
+name = "disk_data"
 harness = false

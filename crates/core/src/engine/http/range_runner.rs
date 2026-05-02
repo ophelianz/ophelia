@@ -25,18 +25,18 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bitvec::prelude::{BitVec, Lsb0};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::{Instant as TokioInstant, Interval};
 use tokio_util::sync::CancellationToken;
 
+use crate::disk::{DiskLease, DiskSessionLease, DiskWriteFailure, DiskWriteResult, DiskWriter};
 use crate::engine::chunk;
-use crate::engine::destination::{FinalizeStrategy, finalize_part_file};
 use crate::engine::http::config::HttpRangeStrategyConfig;
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{
@@ -45,7 +45,6 @@ use crate::engine::types::{
 };
 
 use super::chunk_map::snapshot_from_covered_ranges;
-use super::disk_writer::{RangeDiskWriter, RangeWriteResult};
 use super::events::{SchedulerAction, WorkerEvent};
 use super::range_worker::{RangeWorkerConfig, run_range_worker};
 use super::ranges::{ByteRange, RangeSet};
@@ -59,18 +58,16 @@ const HEALTH_EMA_ALPHA: f64 = 0.3;
 const PROGRESS_EMA_ALPHA: f64 = 0.3;
 const PROGRESS_WINDOW_SECS: f64 = 2.0;
 const WORKER_EVENT_CAPACITY: usize = 256;
+const NO_ATTEMPT_INDEX: usize = usize::MAX;
 
 pub(super) struct RangeDownloadConfig {
     pub(super) id: TransferId,
     pub(super) url: String,
     pub(super) client: Arc<reqwest::Client>,
-    pub(super) file: std::fs::File,
+    pub(super) disk: DiskLease,
     pub(super) chunks: chunk::ChunkList,
     pub(super) total_bytes: u64,
-    pub(super) part_path: PathBuf,
-    pub(super) destination: PathBuf,
-    pub(super) finalize_strategy: FinalizeStrategy,
-    pub(super) chunk_map_supported: bool,
+    pub(super) chunk_map_support: ChunkMapSupport,
     pub(super) connection_limit: usize,
     pub(super) write_buffer_size: usize,
     pub(super) stall_timeout: Duration,
@@ -87,6 +84,22 @@ pub(super) struct RangeDownloadConfig {
     pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChunkMapSupport {
+    Supported,
+    Unsupported,
+}
+
+impl ChunkMapSupport {
+    pub(super) fn from_supported(supported: bool) -> Self {
+        if supported {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+}
+
 pub(super) async fn run_range_download(config: RangeDownloadConfig) -> super::task::TaskFinalState {
     RangeDownload::new(config).run().await
 }
@@ -101,17 +114,44 @@ struct AttemptControl {
     ema_socket_bytes_per_tick: f64,
 }
 
+#[derive(Default)]
+struct AttemptControlTable {
+    rows: AttemptControlRows,
+    health: AttemptHealthTable,
+    controls: AttemptCancelTable,
+}
+
+#[derive(Default)]
+struct AttemptControlRows {
+    generations: Vec<u32>,
+    active: BitVec<usize, Lsb0>,
+    active_rows: Vec<AttemptId>,
+    active_positions: Vec<usize>,
+}
+
+#[derive(Default)]
+struct AttemptHealthTable {
+    started_at_ms: Vec<u64>,
+    socket_bytes: Vec<u64>,
+    previous_socket_bytes: Vec<u64>,
+    ema_socket_bytes_per_tick: Vec<f64>,
+}
+
+#[derive(Default)]
+struct AttemptCancelTable {
+    live_stop_ats: Vec<Option<Arc<AtomicU64>>>,
+    health_retry_tokens: Vec<Option<CancellationToken>>,
+    hedge_lost_tokens: Vec<Option<CancellationToken>>,
+}
+
 struct RangeDownload {
     id: TransferId,
     url: String,
     client: Arc<reqwest::Client>,
-    writer: Option<RangeDiskWriter>,
+    disk: Option<DiskSessionLease>,
+    writer: Option<DiskWriter<AttemptId>>,
     scheduler: RangeScheduler,
     total_bytes: u64,
-    part_path: PathBuf,
-    destination: PathBuf,
-    finalize_strategy: FinalizeStrategy,
-    chunk_map_supported: bool,
     connection_limit: usize,
     write_buffer_size: usize,
     stall_timeout: Duration,
@@ -128,7 +168,7 @@ struct RangeDownload {
     events_tx: mpsc::Sender<WorkerEvent>,
     events_rx: mpsc::Receiver<WorkerEvent>,
     workers: JoinSet<()>,
-    attempts: HashMap<AttemptId, AttemptControl>,
+    attempts: AttemptControlTable,
     retry_counts: HashMap<(u64, u64), u32>,
     strategy_tick: Interval,
     health_tick: Interval,
@@ -136,9 +176,204 @@ struct RangeDownload {
     retry_cooldown_until: Option<TokioInstant>,
     speed: ProgressSpeed,
     pending_written_bytes: u64,
-    chunk_map_dirty: bool,
-    failed: bool,
-    paused: bool,
+    flags: RangeDownloadFlags,
+    stop_reason: RangeStopReason,
+}
+
+impl AttemptControlTable {
+    fn len(&self) -> usize {
+        self.rows.active_rows.len()
+    }
+
+    fn contains(&self, attempt: AttemptId) -> bool {
+        self.index_for(attempt).is_some()
+    }
+
+    fn insert(&mut self, attempt: AttemptId, control: AttemptControl) {
+        let slot = attempt.slot();
+        self.grow_to_slot(slot);
+        self.remove(attempt);
+
+        self.rows.generations[slot] = attempt.generation();
+        self.controls.live_stop_ats[slot] = Some(control.live_stop_at);
+        self.controls.health_retry_tokens[slot] = Some(control.health_retry_token);
+        self.controls.hedge_lost_tokens[slot] = Some(control.hedge_lost_token);
+        self.health.started_at_ms[slot] = control.started_at_ms;
+        self.health.socket_bytes[slot] = control.socket_bytes;
+        self.health.previous_socket_bytes[slot] = control.previous_socket_bytes;
+        self.health.ema_socket_bytes_per_tick[slot] = control.ema_socket_bytes_per_tick;
+        self.rows.active.set(slot, true);
+        self.rows.active_positions[slot] = self.rows.active_rows.len();
+        self.rows.active_rows.push(attempt);
+    }
+
+    fn remove(&mut self, attempt: AttemptId) -> Option<AttemptControl> {
+        let slot = self.index_for(attempt)?;
+        self.rows.active.set(slot, false);
+        self.remove_active_row(slot);
+        Some(AttemptControl {
+            live_stop_at: self.controls.live_stop_ats[slot].take()?,
+            health_retry_token: self.controls.health_retry_tokens[slot].take()?,
+            hedge_lost_token: self.controls.hedge_lost_tokens[slot].take()?,
+            started_at_ms: self.health.started_at_ms[slot],
+            socket_bytes: self.health.socket_bytes[slot],
+            previous_socket_bytes: self.health.previous_socket_bytes[slot],
+            ema_socket_bytes_per_tick: self.health.ema_socket_bytes_per_tick[slot],
+        })
+    }
+
+    fn add_socket_bytes(&mut self, attempt: AttemptId, bytes: u64) -> bool {
+        let Some(slot) = self.index_for(attempt) else {
+            return false;
+        };
+        self.health.socket_bytes[slot] = self.health.socket_bytes[slot].saturating_add(bytes);
+        true
+    }
+
+    fn store_live_stop(&self, attempt: AttemptId, stop_at: u64) -> bool {
+        let Some(slot) = self.index_for(attempt) else {
+            return false;
+        };
+        let Some(live_stop_at) = self.controls.live_stop_ats[slot].as_ref() else {
+            return false;
+        };
+        live_stop_at.store(stop_at, Ordering::Release);
+        true
+    }
+
+    fn cancel_hedge_lost(&self, attempt: AttemptId) {
+        if let Some(slot) = self.index_for(attempt)
+            && let Some(token) = self.controls.hedge_lost_tokens[slot].as_ref()
+        {
+            token.cancel();
+        }
+    }
+
+    fn cancel_health_retry(&self, attempt: AttemptId) {
+        if let Some(slot) = self.index_for(attempt)
+            && let Some(token) = self.controls.health_retry_tokens[slot].as_ref()
+        {
+            token.cancel();
+        }
+    }
+
+    fn health_samples(&mut self, now: u64) -> Vec<(AttemptId, f64)> {
+        let mut samples = Vec::new();
+        for attempt in self.rows.active_rows.iter().copied() {
+            let Some(slot) = self.index_for(attempt) else {
+                continue;
+            };
+            if self.controls.health_retry_tokens[slot]
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                continue;
+            }
+            if now.saturating_sub(self.health.started_at_ms[slot]) < HEALTH_GRACE_MS {
+                continue;
+            }
+
+            let delta = self.health.socket_bytes[slot]
+                .saturating_sub(self.health.previous_socket_bytes[slot]);
+            self.health.previous_socket_bytes[slot] = self.health.socket_bytes[slot];
+            self.health.ema_socket_bytes_per_tick[slot] = (1.0 - HEALTH_EMA_ALPHA)
+                * self.health.ema_socket_bytes_per_tick[slot]
+                + HEALTH_EMA_ALPHA * delta as f64;
+            samples.push((attempt, self.health.ema_socket_bytes_per_tick[slot]));
+        }
+        samples
+    }
+
+    fn index_for(&self, attempt: AttemptId) -> Option<usize> {
+        let slot = attempt.slot();
+        if self.rows.generations.get(slot).copied()? != attempt.generation() {
+            return None;
+        }
+        self.rows
+            .active
+            .get(slot)
+            .is_some_and(|bit| *bit)
+            .then_some(slot)
+    }
+
+    fn grow_to_slot(&mut self, slot: usize) {
+        while self.rows.generations.len() <= slot {
+            self.rows.generations.push(0);
+            self.rows.active.push(false);
+            self.rows.active_positions.push(NO_ATTEMPT_INDEX);
+            self.controls.live_stop_ats.push(None);
+            self.controls.health_retry_tokens.push(None);
+            self.controls.hedge_lost_tokens.push(None);
+            self.health.started_at_ms.push(0);
+            self.health.socket_bytes.push(0);
+            self.health.previous_socket_bytes.push(0);
+            self.health.ema_socket_bytes_per_tick.push(0.0);
+        }
+    }
+
+    fn remove_active_row(&mut self, slot: usize) {
+        let pos = self.rows.active_positions[slot];
+        if pos == NO_ATTEMPT_INDEX {
+            return;
+        }
+        self.rows.active_rows.swap_remove(pos);
+        if let Some(&moved) = self.rows.active_rows.get(pos) {
+            self.rows.active_positions[moved.slot()] = pos;
+        }
+        self.rows.active_positions[slot] = NO_ATTEMPT_INDEX;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeStopReason {
+    Running,
+    Failed,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RangeDownloadFlags(u8);
+
+impl RangeDownloadFlags {
+    const CHUNK_MAP_SUPPORTED: u8 = 1 << 0;
+    const CHUNK_MAP_DIRTY: u8 = 1 << 1;
+
+    fn new(chunk_map_support: ChunkMapSupport) -> Self {
+        let mut flags = Self(0);
+        flags.set(
+            Self::CHUNK_MAP_SUPPORTED,
+            chunk_map_support == ChunkMapSupport::Supported,
+        );
+        flags
+    }
+
+    fn chunk_map_supported(self) -> bool {
+        self.has(Self::CHUNK_MAP_SUPPORTED)
+    }
+
+    fn chunk_map_dirty(self) -> bool {
+        self.has(Self::CHUNK_MAP_DIRTY)
+    }
+
+    fn mark_chunk_map_dirty(&mut self) {
+        self.set(Self::CHUNK_MAP_DIRTY, true);
+    }
+
+    fn clear_chunk_map_dirty(&mut self) {
+        self.set(Self::CHUNK_MAP_DIRTY, false);
+    }
+
+    fn has(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    fn set(&mut self, flag: u8, enabled: bool) {
+        if enabled {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+    }
 }
 
 struct ProgressSpeed {
@@ -190,19 +425,16 @@ impl RangeDownload {
         let (events_tx, events_rx) = mpsc::channel(WORKER_EVENT_CAPACITY);
         let scheduler = scheduler_from_chunks(config.total_bytes, &config.chunks);
         let initial_downloaded = scheduler.downloaded_bytes();
-        let writer = RangeDiskWriter::spawn(config.file);
+        let (disk, writer) = config.disk.split_for_writes();
 
         Self {
             id: config.id,
             url: config.url,
             client: config.client,
+            disk: Some(disk),
             writer: Some(writer),
             scheduler,
             total_bytes: config.total_bytes,
-            part_path: config.part_path,
-            destination: config.destination,
-            finalize_strategy: config.finalize_strategy,
-            chunk_map_supported: config.chunk_map_supported,
             connection_limit: config.connection_limit.max(1),
             write_buffer_size: config.write_buffer_size,
             stall_timeout: config.stall_timeout,
@@ -219,7 +451,7 @@ impl RangeDownload {
             events_tx,
             events_rx,
             workers: JoinSet::new(),
-            attempts: HashMap::new(),
+            attempts: AttemptControlTable::default(),
             retry_counts: HashMap::new(),
             strategy_tick: interval_from_now(STRATEGY_TICK_MS),
             health_tick: interval_from_now(HEALTH_TICK_MS),
@@ -229,9 +461,8 @@ impl RangeDownload {
             retry_cooldown_until: None,
             speed: ProgressSpeed::new(initial_downloaded),
             pending_written_bytes: 0,
-            chunk_map_dirty: false,
-            failed: false,
-            paused: false,
+            flags: RangeDownloadFlags::new(config.chunk_map_support),
+            stop_reason: RangeStopReason::Running,
         }
     }
 
@@ -247,7 +478,7 @@ impl RangeDownload {
             }
 
             if self.scheduler.active_len() == 0 && !self.retry_cooldown_active() {
-                self.failed = true;
+                self.fail_download();
                 break;
             }
 
@@ -259,9 +490,18 @@ impl RangeDownload {
     }
 
     fn should_stop(&self) -> bool {
-        self.failed
-            || self.paused
+        self.stop_reason != RangeStopReason::Running
             || (self.scheduler.is_complete() && self.scheduler.active_len() == 0)
+    }
+
+    fn fail_download(&mut self) {
+        self.stop_reason = RangeStopReason::Failed;
+    }
+
+    fn pause_download(&mut self) {
+        if self.stop_reason == RangeStopReason::Running {
+            self.stop_reason = RangeStopReason::Paused;
+        }
     }
 
     fn start_ready_attempts(&mut self) {
@@ -271,7 +511,7 @@ impl RangeDownload {
 
         while self.scheduler.active_len() < self.connection_limit {
             if self.pause_token.is_cancelled() {
-                self.paused = true;
+                self.pause_download();
                 return;
             }
 
@@ -299,14 +539,14 @@ impl RangeDownload {
             self.scheduler
                 .steal_largest(self.safe_zone, self.min_steal_bytes, self.steal_align)
         {
-            if let Some(control) = self.attempts.get(&steal.victim) {
-                control
-                    .live_stop_at
-                    .store(steal.victim_stop_at, Ordering::Release);
+            if self
+                .attempts
+                .store_live_stop(steal.victim, steal.victim_stop_at)
+            {
                 return true;
             }
 
-            self.failed = true;
+            self.fail_download();
             return false;
         }
 
@@ -327,8 +567,12 @@ impl RangeDownload {
     }
 
     fn spawn_attempt(&mut self, attempt: ActiveAttempt) {
-        let Some(write_jobs) = self.writer.as_ref().map(RangeDiskWriter::sender) else {
-            self.failed = true;
+        let Some(write_jobs) = self.writer.as_ref().map(DiskWriter::sender) else {
+            self.fail_download();
+            return;
+        };
+        let Some(disk_session) = self.disk.as_ref().map(DiskSessionLease::session) else {
+            self.fail_download();
             return;
         };
 
@@ -340,6 +584,7 @@ impl RangeDownload {
             url: self.url.clone(),
             attempt,
             live_stop_at: Arc::clone(&live_stop_at),
+            disk_session,
             write_jobs,
             write_buffer_size: self.write_buffer_size,
             stall_timeout: self.stall_timeout,
@@ -390,12 +635,12 @@ impl RangeDownload {
             event = self.events_rx.recv() => {
                 match event {
                     Some(event) => self.apply_event(event),
-                    None => self.failed = true,
+                    None => self.fail_download(),
                 }
             }
             result = self.workers.join_next(), if !self.workers.is_empty() => {
                 if !matches!(result, Some(Ok(()))) {
-                    self.failed = true;
+                    self.fail_download();
                 }
             }
             _ = self.strategy_tick.tick(), if self.strategies.can_create_extra_work() => {
@@ -425,23 +670,26 @@ impl RangeDownload {
         if let Some(attempt) = terminal_attempt
             && !matches!(action, SchedulerAction::UnknownAttempt { .. })
         {
-            self.attempts.remove(&attempt);
+            self.attempts.remove(attempt);
         }
 
         match action {
             SchedulerAction::Nothing => {}
-            SchedulerAction::CountedProgress { .. } => {
-                self.chunk_map_dirty = true;
+            SchedulerAction::CountedProgress { new_bytes } => {
+                if let Some(disk) = self.disk.as_ref() {
+                    disk.confirm_logical(new_bytes);
+                }
+                self.flags.mark_chunk_map_dirty();
             }
             SchedulerAction::Requeued { range, retry_after } => {
                 self.record_retry(range);
                 self.apply_retry_after(retry_after);
             }
             SchedulerAction::PauseDownload => {
-                self.paused = true;
+                self.pause_download();
             }
             SchedulerAction::FailDownload { .. } | SchedulerAction::UnknownAttempt { .. } => {
-                self.failed = true;
+                self.fail_download();
             }
             SchedulerAction::CancelAttempt { attempt } => {
                 self.cancel_attempt_as_hedge_loser(attempt);
@@ -454,11 +702,9 @@ impl RangeDownload {
             return false;
         };
 
-        let Some(control) = self.attempts.get_mut(attempt) else {
+        if !self.attempts.add_socket_bytes(*attempt, *bytes) {
             return false;
-        };
-
-        control.socket_bytes = control.socket_bytes.saturating_add(*bytes);
+        }
         true
     }
 
@@ -466,16 +712,14 @@ impl RangeDownload {
         let WorkerEvent::BytesWritten { attempt, written } = event else {
             return;
         };
-        if !self.attempts.contains_key(attempt) {
+        if !self.attempts.contains(*attempt) {
             return;
         }
         self.pending_written_bytes = self.pending_written_bytes.saturating_add(written.len());
     }
 
     fn cancel_attempt_as_hedge_loser(&self, attempt: AttemptId) {
-        if let Some(control) = self.attempts.get(&attempt) {
-            control.hedge_lost_token.cancel();
-        }
+        self.attempts.cancel_hedge_lost(attempt);
     }
 
     fn check_health(&mut self) {
@@ -484,26 +728,7 @@ impl RangeDownload {
         }
 
         let now = activation_now();
-        let mut eligible = Vec::new();
-
-        for (&attempt, control) in &mut self.attempts {
-            if control.health_retry_token.is_cancelled() {
-                continue;
-            }
-
-            if now.saturating_sub(control.started_at_ms) < HEALTH_GRACE_MS {
-                continue;
-            }
-
-            let delta = control
-                .socket_bytes
-                .saturating_sub(control.previous_socket_bytes) as f64;
-            control.previous_socket_bytes = control.socket_bytes;
-            control.ema_socket_bytes_per_tick = (1.0 - HEALTH_EMA_ALPHA)
-                * control.ema_socket_bytes_per_tick
-                + HEALTH_EMA_ALPHA * delta;
-            eligible.push((attempt, control.ema_socket_bytes_per_tick));
-        }
+        let eligible = self.attempts.health_samples(now);
 
         let positive_speeds = eligible
             .iter()
@@ -519,10 +744,8 @@ impl RangeDownload {
         }
 
         for (attempt, speed) in eligible {
-            if speed < mean * HEALTH_SLOW_FACTOR
-                && let Some(control) = self.attempts.get(&attempt)
-            {
-                control.health_retry_token.cancel();
+            if speed < mean * HEALTH_SLOW_FACTOR {
+                self.attempts.cancel_health_retry(attempt);
             }
         }
     }
@@ -533,7 +756,7 @@ impl RangeDownload {
         *count += 1;
 
         if *count >= self.max_retries {
-            self.failed = true;
+            self.fail_download();
         }
     }
 
@@ -565,7 +788,7 @@ impl RangeDownload {
     }
 
     async fn stop_workers(&mut self) {
-        if self.paused && !self.failed {
+        if self.stop_reason == RangeStopReason::Paused {
             self.wait_for_workers_to_stop().await;
         } else {
             self.abort_workers().await;
@@ -593,7 +816,7 @@ impl RangeDownload {
                     match event {
                         Some(event) => self.apply_event(event),
                         None => {
-                            self.failed = true;
+                            self.fail_download();
                             break;
                         }
                     }
@@ -601,15 +824,15 @@ impl RangeDownload {
                 result = self.workers.join_next() => {
                     match result {
                         Some(Ok(())) | None => {}
-                        Some(Err(_error)) => self.failed = true,
+                        Some(Err(_error)) => self.fail_download(),
                     }
                 }
             }
         }
     }
 
-    fn apply_write_result(&mut self, result: RangeWriteResult) {
-        self.apply_event(result.into_worker_event());
+    fn apply_write_result(&mut self, result: DiskWriteResult<AttemptId>) {
+        self.apply_event(worker_event_from_disk_result(result));
     }
 
     fn drain_worker_events(&mut self) {
@@ -619,17 +842,22 @@ impl RangeDownload {
     }
 
     async fn finish(mut self) -> super::task::TaskFinalState {
-        if self.failed {
-            self.flush_runtime_updates().await;
-            self.send_progress(TransferStatus::Error).await;
-            return self.task_state(TransferStatus::Error);
-        }
-
-        if self.paused {
-            self.save_pause_snapshot();
-            self.flush_runtime_updates().await;
-            self.send_progress(TransferStatus::Paused).await;
-            return self.task_state(TransferStatus::Paused);
+        match self.stop_reason {
+            RangeStopReason::Running => {}
+            RangeStopReason::Failed => {
+                if let Some(disk) = self.disk.take() {
+                    disk.mark_failed(None);
+                }
+                self.flush_runtime_updates().await;
+                self.send_progress(TransferStatus::Error).await;
+                return self.task_state(TransferStatus::Error);
+            }
+            RangeStopReason::Paused => {
+                self.save_pause_snapshot();
+                self.flush_runtime_updates().await;
+                self.send_progress(TransferStatus::Paused).await;
+                return self.task_state(TransferStatus::Paused);
+            }
         }
 
         if !self.scheduler.is_complete() {
@@ -638,7 +866,13 @@ impl RangeDownload {
             return self.task_state(TransferStatus::Error);
         }
 
-        match finalize_part_file(&self.part_path, &self.destination, self.finalize_strategy) {
+        let Some(disk) = self.disk.take() else {
+            self.flush_runtime_updates().await;
+            self.send_progress(TransferStatus::Error).await;
+            return self.task_state(TransferStatus::Error);
+        };
+
+        match disk.commit() {
             Ok(()) => {
                 self.flush_runtime_updates().await;
                 self.send_progress(TransferStatus::Finished).await;
@@ -722,16 +956,16 @@ impl RangeDownload {
     }
 
     async fn send_dirty_chunk_map(&mut self) {
-        if !self.chunk_map_dirty {
+        if !self.flags.chunk_map_dirty() {
             return;
         }
 
-        self.chunk_map_dirty = false;
+        self.flags.clear_chunk_map_dirty();
         self.send_chunk_map().await;
     }
 
     async fn send_chunk_map(&self) {
-        if !self.chunk_map_supported {
+        if !self.flags.chunk_map_supported() {
             return;
         }
 
@@ -756,6 +990,38 @@ impl RangeDownload {
             status,
             downloaded_bytes: self.downloaded_for_status(status),
             total_bytes: Some(self.total_bytes),
+        }
+    }
+}
+
+fn worker_event_from_disk_result(result: DiskWriteResult<AttemptId>) -> WorkerEvent {
+    match result {
+        DiskWriteResult::Written { owner, range, .. } => {
+            let Some(written) = ByteRange::new(range.start(), range.end()) else {
+                return WorkerEvent::Failed {
+                    attempt: owner,
+                    failure: super::events::WorkerFailure::FatalIo {
+                        message: "disk writer returned invalid range".to_string(),
+                    },
+                };
+            };
+            WorkerEvent::BytesWritten {
+                attempt: owner,
+                written,
+            }
+        }
+        DiskWriteResult::Failed { owner, failure, .. } => WorkerEvent::Failed {
+            attempt: owner,
+            failure: worker_failure_from_disk(failure),
+        },
+    }
+}
+
+fn worker_failure_from_disk(failure: DiskWriteFailure) -> super::events::WorkerFailure {
+    match failure {
+        DiskWriteFailure::FatalIo { message } => super::events::WorkerFailure::FatalIo { message },
+        DiskWriteFailure::RetryableIo { message } => {
+            super::events::WorkerFailure::RetryableIo { message }
         }
     }
 }

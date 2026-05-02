@@ -31,11 +31,9 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::alloc::preallocate;
+use crate::disk::{DiskHandle, DiskLease};
 use crate::engine::chunk;
-use crate::engine::destination::{
-    DestinationPolicy, FinalizeStrategy, ResolvedDestination, part_path_for,
-};
+use crate::engine::destination::{DestinationPolicy, ResolvedDestination, part_path_for};
 use crate::engine::http::throttle::{Throttle, TokenBucket};
 use crate::engine::http::{HttpDownloadConfig, HttpRangeStrategyConfig};
 use crate::engine::types::{
@@ -45,7 +43,7 @@ use crate::engine::types::{
 
 use super::config::RangeOrdering;
 use super::probe::probe;
-use super::range_runner::{RangeDownloadConfig, run_range_download};
+use super::range_runner::{ChunkMapSupport, RangeDownloadConfig, run_range_download};
 use super::resume::RangeResumeSnapshot;
 use super::single::{SingleTransferRequest, single_download};
 
@@ -71,7 +69,42 @@ pub struct DownloadTaskRequest {
     pub resume_from: Option<Vec<ChunkSnapshot>>,
     pub server_semaphore: Arc<Semaphore>,
     pub global_throttle: Arc<TokenBucket>,
+    pub(crate) disk: DiskHandle,
     pub runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+}
+
+impl DownloadTaskRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: TransferId,
+        url: String,
+        destination: PathBuf,
+        destination_policy: DestinationPolicy,
+        config: HttpDownloadConfig,
+        pause_token: CancellationToken,
+        pause_sink: Arc<Mutex<Option<Vec<ChunkSnapshot>>>>,
+        destination_sink: Arc<Mutex<Option<PathBuf>>>,
+        resume_from: Option<Vec<ChunkSnapshot>>,
+        server_semaphore: Arc<Semaphore>,
+        global_throttle: Arc<TokenBucket>,
+        runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    ) -> Self {
+        Self {
+            id,
+            url,
+            destination,
+            destination_policy,
+            config,
+            pause_token,
+            pause_sink,
+            destination_sink,
+            resume_from,
+            server_semaphore,
+            global_throttle,
+            disk: DiskHandle::new(),
+            runtime_update_tx,
+        }
+    }
 }
 
 fn task_state(
@@ -95,11 +128,8 @@ fn task_state(
 struct ResolvedChunks {
     total_bytes: u64,
     chunks: chunk::ChunkList,
-    file: std::fs::File,
-    part_path: PathBuf,
-    destination: PathBuf,
-    finalize_strategy: FinalizeStrategy,
-    chunk_map_supported: bool,
+    disk: DiskLease,
+    chunk_map_support: ChunkMapSupport,
     ordering: RangeOrdering,
 }
 
@@ -119,6 +149,7 @@ struct ResolveChunksRequest<'a> {
     destination_policy: &'a DestinationPolicy,
     config: &'a HttpDownloadConfig,
     id: TransferId,
+    disk: DiskHandle,
     runtime_update_tx: &'a mpsc::Sender<TaskRuntimeUpdate>,
     destination_sink: &'a Arc<Mutex<Option<PathBuf>>>,
     pause_token: &'a CancellationToken,
@@ -156,6 +187,7 @@ async fn resolve_chunks(
         destination_policy,
         config,
         id,
+        disk,
         runtime_update_tx,
         destination_sink,
         pause_token,
@@ -209,8 +241,17 @@ async fn resolve_chunks(
             let snapshots = snapshot.chunk_snapshots();
             let cl = chunk_list_from_snapshots(&snapshots);
             let part_path = part_path_for(&destination);
-            let file = match std::fs::OpenOptions::new().write(true).open(&part_path) {
-                Ok(f) => f,
+            let disk = match disk.resume_existing(
+                id,
+                ResolvedDestination {
+                    part_path,
+                    destination: destination.clone(),
+                    finalize_strategy: destination_policy.finalize_strategy(),
+                },
+                Some(total),
+                downloaded,
+            ) {
+                Ok(disk) => disk,
                 Err(_) => {
                     send_progress_update(
                         runtime_update_tx,
@@ -234,11 +275,8 @@ async fn resolve_chunks(
             Ok(ResolvedChunks {
                 total_bytes: total,
                 chunks: cl,
-                file,
-                part_path,
-                destination,
-                finalize_strategy: destination_policy.finalize_strategy(),
-                chunk_map_supported: true,
+                disk,
+                chunk_map_support: ChunkMapSupport::Supported,
                 ordering,
             })
         }
@@ -317,10 +355,32 @@ async fn resolve_chunks(
                     id,
                     client: Arc::clone(chunk_client),
                     url: url.to_owned(),
-                    resolved_destination: ResolvedDestination {
-                        part_path,
-                        destination,
-                        finalize_strategy,
+                    disk: match disk.create_new(
+                        id,
+                        ResolvedDestination {
+                            part_path,
+                            destination,
+                            finalize_strategy,
+                        },
+                        None,
+                    ) {
+                        Ok(disk) => disk,
+                        Err(_) => {
+                            send_progress_update(
+                                runtime_update_tx,
+                                id,
+                                TransferStatus::Error,
+                                0,
+                                probe_result.content_length,
+                                0,
+                            )
+                            .await;
+                            return Err(task_state(
+                                TransferStatus::Error,
+                                0,
+                                probe_result.content_length,
+                            ));
+                        }
                     },
                     stall_timeout_secs: config.stall_timeout_secs,
                     runtime_update_tx: runtime_update_tx.clone(),
@@ -333,16 +393,21 @@ async fn resolve_chunks(
             let total_bytes = probe_result
                 .content_length
                 .expect("content length checked before chunked download");
+            let part_path_for_log = part_path.clone();
 
-            let file = match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&part_path)
-            {
-                Ok(f) => f,
+            let disk = match disk.create_new(
+                id,
+                ResolvedDestination {
+                    part_path,
+                    destination,
+                    finalize_strategy,
+                },
+                Some(total_bytes),
+            ) {
+                Ok(disk) => disk,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     tracing::warn!(
-                        path = %part_path.display(),
+                        path = %part_path_for_log.display(),
                         "part file already exists, another download may be active"
                     );
                     send_progress_update(
@@ -359,8 +424,8 @@ async fn resolve_chunks(
                 Err(error) => {
                     tracing::error!(
                         ?error,
-                        path = %part_path.display(),
-                        "failed to create part file"
+                        path = %part_path_for_log.display(),
+                        "failed to prepare part file"
                     );
                     send_progress_update(
                         runtime_update_tx,
@@ -375,25 +440,6 @@ async fn resolve_chunks(
                 }
             };
 
-            if let Err(error) = preallocate(&file, total_bytes) {
-                tracing::error!(
-                    ?error,
-                    path = %part_path.display(),
-                    total_bytes,
-                    "failed to preallocate part file"
-                );
-                send_progress_update(
-                    runtime_update_tx,
-                    id,
-                    TransferStatus::Error,
-                    0,
-                    Some(total_bytes),
-                    0,
-                )
-                .await;
-                return Err(task_state(TransferStatus::Error, 0, Some(total_bytes)));
-            }
-
             let chunks = planned_chunks(total_bytes, ordering, config);
             tracing::info!(
                 total_bytes,
@@ -404,11 +450,8 @@ async fn resolve_chunks(
             Ok(ResolvedChunks {
                 total_bytes,
                 chunks,
-                file,
-                part_path,
-                destination,
-                finalize_strategy,
-                chunk_map_supported: probe_result.accepts_ranges,
+                disk,
+                chunk_map_support: ChunkMapSupport::from_supported(probe_result.accepts_ranges),
                 ordering,
             })
         }
@@ -494,6 +537,7 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         resume_from,
         server_semaphore,
         global_throttle,
+        disk,
         runtime_update_tx,
     } = request;
 
@@ -525,6 +569,7 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         destination_policy: &destination_policy,
         config: &config,
         id,
+        disk,
         runtime_update_tx: &runtime_update_tx,
         destination_sink: &destination_sink,
         pause_token: &pause_token,
@@ -538,11 +583,8 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
     let ResolvedChunks {
         total_bytes,
         chunks,
-        file,
-        part_path,
-        destination,
-        finalize_strategy,
-        chunk_map_supported,
+        disk,
+        chunk_map_support,
         ordering,
     } = resolved;
     let plan = range_download_plan(ordering, chunks, &config);
@@ -570,13 +612,10 @@ pub async fn download_task(request: DownloadTaskRequest) -> TaskFinalState {
         id,
         url,
         client: Arc::clone(&chunk_client),
-        file,
+        disk,
         chunks,
         total_bytes,
-        part_path,
-        destination,
-        finalize_strategy,
-        chunk_map_supported,
+        chunk_map_support,
         connection_limit,
         write_buffer_size,
         stall_timeout,

@@ -119,6 +119,12 @@ fn bench_session_event_coalescing(c: &mut Criterion) {
     });
 }
 
+fn bench_session_event_coalescing_large(c: &mut Criterion) {
+    c.bench_function("session_event_coalescing_10000_hot_updates", |bench| {
+        bench.iter(|| black_box(apply_hot_events(10_000)));
+    });
+}
+
 fn bench_session_event_json_transfer_changed(c: &mut Criterion) {
     let event = OpheliaEvent::TransferChanged {
         snapshot: snapshot(TransferId(1)),
@@ -166,6 +172,7 @@ fn bench_session_event_json_control_unsupported(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_session_event_coalescing,
+    bench_session_event_coalescing_large,
     bench_session_event_json_transfer_changed,
     bench_session_event_json_write_bytes,
     bench_session_event_json_removed,

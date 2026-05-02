@@ -61,7 +61,7 @@ pub async fn download_task(
     global_throttle: Arc<TokenBucket>,
     runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 ) -> ophelia::engine::http::TaskFinalState {
-    ophelia::engine::http::download_task(DownloadTaskRequest {
+    ophelia::engine::http::download_task(DownloadTaskRequest::new(
         id,
         url,
         destination,
@@ -74,7 +74,7 @@ pub async fn download_task(
         server_semaphore,
         global_throttle,
         runtime_update_tx,
-    })
+    ))
     .await
 }
 
