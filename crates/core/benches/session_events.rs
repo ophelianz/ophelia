@@ -65,6 +65,7 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
     let settings = ServiceSettings::default();
     let snapshot_len = read_model.snapshot(&settings).transfers.len();
     let has_destination = u64::from(read_model.destination(id).is_some());
+    let has_running = u64::from(read_model.has_running_transfers());
     read_model.remove(TransferId(999_999));
     let emitted = coalescer.drain_events().len();
     let stats = coalescer.stats();
@@ -72,7 +73,7 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
         emitted,
         stats.coalesced_transfer_updates(),
         stats.coalesced_write_updates(),
-        snapshot_len as u64 + has_destination,
+        snapshot_len as u64 + has_destination + has_running,
     )
 }
 

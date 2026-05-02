@@ -9,7 +9,15 @@ use block2::RcBlock;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-pub fn run_mach_service(runtime: &Handle, client: OpheliaClient) -> Result<(), OpheliaError> {
+pub struct MachServiceListener {
+    _listener: XpcConnection,
+    _handler: RcBlock<dyn Fn(XpcObjectRaw)>,
+}
+
+pub fn run_mach_service(
+    runtime: &Handle,
+    client: OpheliaClient,
+) -> Result<MachServiceListener, OpheliaError> {
     let listener = XpcConnection::connect_listener()?;
     let runtime = runtime.clone();
     let handler = RcBlock::new(move |peer: XpcObjectRaw| {
@@ -28,10 +36,10 @@ pub fn run_mach_service(runtime: &Handle, client: OpheliaClient) -> Result<(), O
         xpc_connection_set_event_handler(listener.raw(), &handler);
         xpc_connection_activate(listener.raw());
     }
-
-    loop {
-        std::thread::park();
-    }
+    Ok(MachServiceListener {
+        _listener: listener,
+        _handler: handler,
+    })
 }
 
 fn accept_peer_connection(peer: XpcConnection, runtime: Handle, client: OpheliaClient) {

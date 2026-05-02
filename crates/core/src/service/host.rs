@@ -2,6 +2,8 @@ use super::lock::{ServiceLock, service_lock_path};
 use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
 use super::*;
 
+const SERVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct OpheliaService {
     client: OpheliaClient,
     task: Option<JoinHandle<()>>,
@@ -32,11 +34,32 @@ impl OpheliaService {
         Self::start_inner(runtime, paths, settings, config)
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_with_engine_config_and_idle_timeout(
+        runtime: &Handle,
+        config: EngineConfig,
+        paths: ProfilePaths,
+        idle_timeout: Duration,
+    ) -> Result<Self, OpheliaError> {
+        let settings = ServiceSettings::default_for_paths(&paths);
+        Self::start_inner_with_idle_timeout(runtime, paths, settings, config, idle_timeout)
+    }
+
     fn start_inner(
         runtime: &Handle,
         paths: ProfilePaths,
         settings: ServiceSettings,
         config: EngineConfig,
+    ) -> Result<Self, OpheliaError> {
+        Self::start_inner_with_idle_timeout(runtime, paths, settings, config, SERVICE_IDLE_TIMEOUT)
+    }
+
+    fn start_inner_with_idle_timeout(
+        runtime: &Handle,
+        paths: ProfilePaths,
+        settings: ServiceSettings,
+        config: EngineConfig,
+        idle_timeout: Duration,
     ) -> Result<Self, OpheliaError> {
         let lock = ServiceLock::acquire(service_lock_path(&paths))?;
         let bootstrap = state::bootstrap(&paths).map_err(|error| OpheliaError::Io {
@@ -68,6 +91,7 @@ impl OpheliaService {
                 read_model: OpheliaReadModel::default(),
                 coalescer: OpheliaEventCoalescer::default(),
                 event_tx,
+                idle_timeout,
             }
             .run(rx),
         );
@@ -88,6 +112,12 @@ impl OpheliaService {
             let _ = task.await;
         }
         result
+    }
+
+    pub async fn wait(mut self) {
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 
@@ -129,6 +159,7 @@ struct OpheliaServiceRuntime {
     read_model: OpheliaReadModel,
     coalescer: OpheliaEventCoalescer,
     event_tx: broadcast::Sender<OpheliaEvent>,
+    idle_timeout: Duration,
 }
 
 impl OpheliaServiceRuntime {
@@ -139,27 +170,21 @@ impl OpheliaServiceRuntime {
         hot_event_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
-                request = rx.recv() => {
-                    let Some(request) = request else {
-                        break;
-                    };
-                    self.drain_engine_events();
-                    self.flush_coalesced_events();
-                    if self.handle_request(request).await {
-                        break;
+            if self.should_idle_exit() {
+                tokio::select! {
+                    _ = tokio::time::sleep(self.idle_timeout) => {
+                        if self.should_idle_exit() {
+                            break;
+                        }
                     }
-                    self.drain_engine_events();
+                    should_stop = self.next_runtime_step(&mut rx, &mut hot_event_flush) => {
+                        if should_stop {
+                            break;
+                        }
+                    }
                 }
-                event = self.engine.next_event() => {
-                    let Some(event) = event else {
-                        break;
-                    };
-                    self.apply_engine_event(event);
-                }
-                _ = hot_event_flush.tick() => {
-                    self.flush_coalesced_events();
-                }
+            } else if self.next_runtime_step(&mut rx, &mut hot_event_flush).await {
+                break;
             }
         }
 
@@ -181,6 +206,36 @@ impl OpheliaServiceRuntime {
             }
             self.drain_engine_events();
         }
+    }
+
+    async fn next_runtime_step(
+        &mut self,
+        rx: &mut mpsc::Receiver<OpheliaRequest>,
+        hot_event_flush: &mut tokio::time::Interval,
+    ) -> bool {
+        tokio::select! {
+            request = rx.recv() => {
+                let Some(request) = request else {
+                    return true;
+                };
+                self.drain_engine_events();
+                self.flush_coalesced_events();
+                if self.handle_request(request).await {
+                    return true;
+                }
+                self.drain_engine_events();
+            }
+            event = self.engine.next_event() => {
+                let Some(event) = event else {
+                    return true;
+                };
+                self.apply_engine_event(event);
+            }
+            _ = hot_event_flush.tick() => {
+                self.flush_coalesced_events();
+            }
+        }
+        false
     }
 
     async fn handle_request(&mut self, request: OpheliaRequest) -> bool {
@@ -323,6 +378,10 @@ impl OpheliaServiceRuntime {
             coalesced_write_updates = stats.coalesced_write_updates(),
             "service event coalescing summary"
         );
+    }
+
+    fn should_idle_exit(&self) -> bool {
+        self.event_tx.receiver_count() == 0 && !self.read_model.has_running_transfers()
     }
 
     async fn delete_artifact_from_service_state(

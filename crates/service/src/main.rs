@@ -34,7 +34,10 @@ fn main() -> ExitCode {
     tracing::info!(service = OPHELIA_MACH_SERVICE_NAME, "Ophelia service ready");
 
     match run_mach_service(runtime.handle(), service.client()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_listener) => {
+            runtime.block_on(service.wait());
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             drop(service);
             eprintln!("failed to run Mach service: {error}");

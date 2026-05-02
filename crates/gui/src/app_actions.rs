@@ -215,6 +215,12 @@ fn open_settings_impl(cx: &mut App) {
     };
 
     let bounds = Bounds::centered(None, size(px(1280.), px(600.)), cx);
+    let settings = cx
+        .global::<AppState>()
+        .downloads
+        .read(cx)
+        .settings_snapshot();
+
     let Ok(settings_window) = cx.open_window(
         platform::window_options(
             bounds,
@@ -223,7 +229,7 @@ fn open_settings_impl(cx: &mut App) {
                 px(SETTINGS_WINDOW_MIN_HEIGHT),
             ),
         ),
-        |_, cx| cx.new(SettingsWindow::new),
+        move |_, cx| cx.new(|cx| SettingsWindow::from_settings(settings.clone(), cx)),
     ) else {
         return;
     };

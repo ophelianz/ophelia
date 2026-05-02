@@ -1,21 +1,18 @@
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "bootstraps a user LaunchAgent and talks to the real Mach service"]
-fn launchd_starts_service_and_answers_snapshot() {
+#[ignore = "bootstraps the debug-only launchctl fallback and talks to the real Mach service"]
+fn dev_launchctl_starts_service_and_answers_snapshot() {
     use ophelia::service::{OPHELIA_MACH_SERVICE_NAME, OpheliaClient};
     use std::time::Duration;
 
     let test_dir =
-        std::env::temp_dir().join(format!("ophelia-launchd-smoke-{}", std::process::id()));
+        std::env::temp_dir().join(format!("ophelia-launchctl-smoke-{}", std::process::id()));
     std::fs::create_dir_all(&test_dir).unwrap();
     let plist_path = test_dir.join("nz.ophelia.service.plist");
     let binary = env!("CARGO_BIN_EXE_ophelia-service");
     let logs = test_dir.join("logs");
     std::fs::create_dir_all(&logs).unwrap();
-    let plist = include_str!("../macos/nz.ophelia.service.plist")
-        .replace("__OPHELIA_SERVICE_BINARY__", binary)
-        .replace("__OPHELIA_LOG_DIR__", &logs.to_string_lossy());
-    std::fs::write(&plist_path, plist).unwrap();
+    std::fs::write(&plist_path, dev_launchctl_plist(binary, &logs)).unwrap();
 
     let domain = format!("gui/{}", current_uid());
     launchctl(["bootstrap", &domain, &plist_path.to_string_lossy()]);
@@ -43,6 +40,40 @@ fn launchd_starts_service_and_answers_snapshot() {
     std::fs::remove_dir_all(&test_dir).ok();
 
     assert!(result.unwrap().transfers.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+fn dev_launchctl_plist(binary: &str, logs: &std::path::Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>nz.ophelia.service</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary}</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>nz.ophelia.service</key>
+        <true/>
+    </dict>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>{}/ophelia-service.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{}/ophelia-service.err.log</string>
+</dict>
+</plist>
+"#,
+        logs.display(),
+        logs.display()
+    )
 }
 
 #[cfg(target_os = "macos")]

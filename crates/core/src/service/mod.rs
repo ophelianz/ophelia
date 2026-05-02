@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -31,6 +32,8 @@ pub const OPHELIA_MACH_SERVICE_NAME: &str = "nz.ophelia.service";
 mod client;
 mod host;
 mod lock;
+#[cfg(target_os = "macos")]
+mod macos_startup;
 mod read_model;
 mod wire;
 #[cfg(target_os = "macos")]
@@ -39,11 +42,14 @@ mod xpc;
 #[cfg(test)]
 mod tests;
 
-pub use client::{OpheliaClient, OpheliaSubscription};
+pub use client::{
+    LocalServiceConnection, LocalServiceOptions, LocalServiceRepairPolicy, LocalServiceWarning,
+    OpheliaClient, OpheliaSubscription,
+};
 pub use host::OpheliaService;
 pub use lock::service_lock_path;
 #[cfg(target_os = "macos")]
-pub use xpc::run_mach_service;
+pub use xpc::{MachServiceListener, run_mach_service};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRequest {
@@ -103,6 +109,7 @@ pub struct OpheliaServiceInfo {
     pub service_name: String,
     pub version: String,
     pub owner: OpheliaServiceOwner,
+    pub helper: OpheliaHelperInfo,
     pub profile: OpheliaProfileInfo,
     pub endpoint: OpheliaServiceEndpoint,
 }
@@ -110,13 +117,23 @@ pub struct OpheliaServiceInfo {
 impl OpheliaServiceInfo {
     pub fn current(paths: &ProfilePaths) -> Self {
         let executable = std::env::current_exe().ok();
+        let install_kind = infer_install_kind(executable.as_deref());
+        let executable_sha256 = executable
+            .as_deref()
+            .and_then(|path| executable_sha256(path).ok());
         Self {
             service_name: OPHELIA_MACH_SERVICE_NAME.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             owner: OpheliaServiceOwner {
-                install_kind: infer_install_kind(executable.as_deref()),
+                install_kind,
+                executable: executable.clone(),
+                pid: std::process::id(),
+            },
+            helper: OpheliaHelperInfo {
+                install_kind,
                 executable,
                 pid: std::process::id(),
+                executable_sha256,
             },
             profile: OpheliaProfileInfo::from_paths(paths),
             endpoint: OpheliaServiceEndpoint {
@@ -132,6 +149,14 @@ pub struct OpheliaServiceOwner {
     pub install_kind: OpheliaInstallKind,
     pub executable: Option<PathBuf>,
     pub pid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpheliaHelperInfo {
+    pub install_kind: OpheliaInstallKind,
+    pub executable: Option<PathBuf>,
+    pub pid: u32,
+    pub executable_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,7 +206,7 @@ pub enum OpheliaEndpointKind {
     MachService,
 }
 
-fn infer_install_kind(executable: Option<&Path>) -> OpheliaInstallKind {
+pub(super) fn infer_install_kind(executable: Option<&Path>) -> OpheliaInstallKind {
     let Some(executable) = executable else {
         return OpheliaInstallKind::Unknown;
     };
@@ -198,6 +223,25 @@ fn infer_install_kind(executable: Option<&Path>) -> OpheliaInstallKind {
     } else {
         OpheliaInstallKind::Other
     }
+}
+
+pub(super) fn executable_sha256(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    sha256_reader(&mut file)
+}
+
+pub(super) fn sha256_reader(reader: &mut impl Read) -> io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex::encode(digest))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +331,9 @@ pub enum OpheliaError {
     StaleService {
         path: PathBuf,
     },
+    ServiceApprovalRequired {
+        service_name: String,
+    },
     BadRequest {
         message: String,
     },
@@ -311,6 +358,9 @@ impl fmt::Display for OpheliaError {
             }
             Self::LockHeld { path } => write!(f, "service lock is held at {}", path.display()),
             Self::StaleService { path } => write!(f, "stale service state at {}", path.display()),
+            Self::ServiceApprovalRequired { .. } => {
+                write!(f, "OpheliaService needs approval in System Settings")
+            }
             Self::BadRequest { message } => write!(f, "bad request: {message}"),
             Self::Io { message } => write!(f, "io error: {message}"),
             Self::Transport { message } => write!(f, "transport error: {message}"),
