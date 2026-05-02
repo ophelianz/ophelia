@@ -166,7 +166,7 @@ impl Db {
     }
 
     /// Load paused/pending downloads for startup
-    /// Also returns the max id so DownloadEngine can keep counting from there
+    /// Also returns the max id so OpheliaService can keep counting from there
     pub fn load_for_restore(&self) -> rusqlite::Result<(Vec<SavedDownload>, u64)> {
         let max_id = self
             .conn

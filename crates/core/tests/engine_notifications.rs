@@ -1,59 +1,119 @@
-/***************************************************
-** This file is part of Ophelia.
-** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
-** Released under the GPL License, version 3 or later.
-**
-** If you found a weird little bug in here, tell the cat:
-** viktor@hystericca.dev
-**
-**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
-** ( bugs behave plz, we're all trying our best )
-**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
-**   ○
-**     ○
-**       ／l、
-**     （ﾟ､ ｡ ７
-**       l  ~ヽ
-**       じしf_,)ノ
-**************************************************/
-
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ophelia::engine::destination::{DestinationPolicy, part_path_for};
-use ophelia::engine::http::HttpDownloadConfig;
+use ophelia::engine::destination::part_path_for;
 use ophelia::engine::{
-    ArtifactState, DownloadEngine, DownloadSpec, EngineError, EngineEvent,
-    LiveTransferRemovalAction, RestoredDownload, TransferChunkMapState, TransferControlSupport,
-    TransferId, TransferStatus,
+    ArtifactState, DbEvent, LiveTransferRemovalAction, PersistedDownloadSource, ProviderResumeData,
+    TransferChunkMapState, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
 };
-use ophelia::engine::{DestinationPolicyConfig, EngineConfig};
+use ophelia::service::{
+    OpheliaClient, OpheliaError, OpheliaEvent, OpheliaService, OpheliaSubscription,
+    TransferDestination, TransferRequest, TransferRequestSource,
+};
+use ophelia::{ProfilePaths, ServiceSettings};
 use tokio::runtime::Handle;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn exact_destination_policy(destination: &std::path::Path) -> DestinationPolicy {
-    DestinationPolicy::for_resolved_destination(&DestinationPolicyConfig::default(), destination)
+struct ServiceHarness {
+    _profile: tempfile::TempDir,
+    _service: OpheliaService,
+    client: OpheliaClient,
+    subscription: OpheliaSubscription,
 }
 
-fn engine_config(max_concurrent_downloads: usize) -> EngineConfig {
-    EngineConfig {
-        max_concurrent_downloads,
-        ..EngineConfig::default()
+fn profile_paths(profile: &tempfile::TempDir, downloads: &Path) -> ProfilePaths {
+    ProfilePaths::new(profile.path().join("downloads.db"), downloads)
+}
+
+async fn start_service(max_concurrent_transfers: usize, downloads: &Path) -> ServiceHarness {
+    let profile = tempfile::tempdir().unwrap();
+    let paths = profile_paths(&profile, downloads);
+    let mut settings = ServiceSettings::default_for_paths(&paths);
+    settings.max_concurrent_transfers = max_concurrent_transfers;
+    settings.default_download_dir = Some(downloads.to_path_buf());
+    let service = OpheliaService::start_with_settings(&Handle::current(), paths, settings).unwrap();
+    let client = service.client();
+    let subscription = client.subscribe().await.unwrap();
+    ServiceHarness {
+        _profile: profile,
+        _service: service,
+        client,
+        subscription,
     }
 }
 
-fn start_engine(
-    config: EngineConfig,
-    db_tx: std::sync::mpsc::Sender<ophelia::engine::DbEvent>,
-    initial_next_id: u64,
-) -> DownloadEngine {
-    DownloadEngine::spawn_on(&Handle::current(), config, db_tx, initial_next_id)
+async fn start_service_with_paths(
+    paths: ProfilePaths,
+    profile: tempfile::TempDir,
+    max_concurrent_transfers: usize,
+) -> ServiceHarness {
+    let mut settings = ServiceSettings::default_for_paths(&paths);
+    settings.max_concurrent_transfers = max_concurrent_transfers;
+    settings.default_download_dir = Some(paths.default_download_dir.clone());
+    let service = OpheliaService::start_with_settings(&Handle::current(), paths, settings).unwrap();
+    let client = service.client();
+    let subscription = client.subscribe().await.unwrap();
+    ServiceHarness {
+        _profile: profile,
+        _service: service,
+        client,
+        subscription,
+    }
+}
+
+fn http_request(url: impl Into<String>, destination: impl Into<PathBuf>) -> TransferRequest {
+    TransferRequest {
+        source: TransferRequestSource::Http { url: url.into() },
+        destination: TransferDestination::ExplicitPath(destination.into()),
+    }
+}
+
+fn automatic_http_request(
+    url: impl Into<String>,
+    suggested_filename: Option<String>,
+) -> TransferRequest {
+    TransferRequest {
+        source: TransferRequestSource::Http { url: url.into() },
+        destination: TransferDestination::Automatic { suggested_filename },
+    }
+}
+
+fn seed_paused_http_download(
+    paths: &ProfilePaths,
+    id: TransferId,
+    url: String,
+    destination: PathBuf,
+    resume_data: Option<ProviderResumeData>,
+) {
+    let bootstrap = ophelia::engine::state::bootstrap(paths).unwrap();
+    bootstrap
+        .db_tx
+        .send(DbEvent::Added {
+            id,
+            source: PersistedDownloadSource::Http { url },
+            destination,
+        })
+        .unwrap();
+    bootstrap
+        .db_tx
+        .send(DbEvent::Paused {
+            id,
+            downloaded_bytes: resume_data
+                .as_ref()
+                .map(ProviderResumeData::downloaded_bytes)
+                .unwrap_or(0),
+            resume_data,
+        })
+        .unwrap();
+    drop(bootstrap.db_tx);
+    drop(bootstrap.worker);
 }
 
 async fn wait_for_matching_event(
-    engine: &mut DownloadEngine,
-    mut predicate: impl FnMut(&EngineEvent) -> bool,
-) -> EngineEvent {
+    subscription: &mut OpheliaSubscription,
+    mut predicate: impl FnMut(&OpheliaEvent) -> bool,
+) -> OpheliaEvent {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     let mut seen = Vec::new();
 
@@ -61,63 +121,42 @@ async fn wait_for_matching_event(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             panic!(
-                "timed out waiting for matching engine event\nseen events:\n{}",
+                "timed out waiting for matching service event\nseen events:\n{}",
                 seen.join("\n")
             );
         }
 
-        let event = tokio::time::timeout(remaining, engine.next_event())
+        let event = tokio::time::timeout(remaining, subscription.next_event())
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "timed out waiting for matching engine event: {error:?}\nseen events:\n{}",
+                    "timed out waiting for matching service event: {error:?}\nseen events:\n{}",
                     seen.join("\n")
                 )
             })
-            .expect("engine event channel closed");
+            .expect("service event channel closed");
+        let event_debug = format!("{event:?}");
 
         if predicate(&event) {
             return event;
         }
 
-        seen.push(format!("{event:?}"));
+        seen.push(event_debug);
     }
 }
 
-async fn wait_for_matching_progress(
-    engine: &mut DownloadEngine,
-    mut predicate: impl FnMut(&ophelia::engine::ProgressUpdate) -> bool,
-) -> ophelia::engine::ProgressUpdate {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    let mut seen = Vec::new();
-
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "timed out waiting for matching progress update\nseen events:\n{}",
-                seen.join("\n")
-            );
-        }
-
-        let event = tokio::time::timeout(remaining, engine.next_event())
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "timed out waiting for matching progress update: {error:?}\nseen events:\n{}",
-                    seen.join("\n")
-                )
-            })
-            .expect("engine event channel closed");
-        let event_debug = format!("{event:?}");
-
-        if let EngineEvent::Progress(update) = event
-            && predicate(&update)
-        {
-            return update;
-        }
-
-        seen.push(event_debug);
+async fn wait_for_matching_transfer(
+    subscription: &mut OpheliaSubscription,
+    mut predicate: impl FnMut(&TransferSummary) -> bool,
+) -> TransferSummary {
+    match wait_for_matching_event(
+        subscription,
+        |event| matches!(event, OpheliaEvent::TransferChanged { snapshot } if predicate(snapshot)),
+    )
+    .await
+    {
+        OpheliaEvent::TransferChanged { snapshot } => snapshot,
+        other => panic!("expected transfer update, got {other:?}"),
     }
 }
 
@@ -224,70 +263,43 @@ fn spawn_slow_range_server(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(engine_config(0), db_tx, 1);
-
+async fn queued_pause_resume_cancel_and_delete_emit_distinct_events() {
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
-            "https://example.com/file.bin".to_string(),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
-        ))
+    let mut harness = start_service(0, tempdir.path()).await;
+
+    let id = harness
+        .client
+        .add(http_request("https://example.com/file.bin", &destination))
         .await
         .unwrap();
 
-    engine.pause(id).await.unwrap();
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::Progress(update)
-                if update.id == id && update.status == TransferStatus::Paused
-        )
+    harness.client.pause(id).await.unwrap();
+    let paused = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.status == TransferStatus::Paused
     })
-    .await
-    {
-        EngineEvent::Progress(update) => {
-            assert_eq!(update.id, id);
-            assert_eq!(update.status, TransferStatus::Paused);
-            assert_eq!(update.downloaded_bytes, 0);
-            assert_eq!(update.total_bytes, None);
-        }
-        other => panic!("expected pause update, got {other:?}"),
-    }
+    .await;
+    assert_eq!(paused.downloaded_bytes, 0);
+    assert_eq!(paused.total_bytes, None);
 
-    engine.resume(id).await.unwrap();
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::Progress(update)
-                if update.id == id && update.status == TransferStatus::Pending
-        )
+    harness.client.resume(id).await.unwrap();
+    let pending = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.status == TransferStatus::Pending
     })
-    .await
-    {
-        EngineEvent::Progress(update) => {
-            assert_eq!(update.id, id);
-            assert_eq!(update.status, TransferStatus::Pending);
-            assert_eq!(update.downloaded_bytes, 0);
-            assert_eq!(update.total_bytes, None);
-        }
-        other => panic!("expected pending update, got {other:?}"),
-    }
+    .await;
+    assert_eq!(pending.downloaded_bytes, 0);
+    assert_eq!(pending.total_bytes, None);
 
-    engine.cancel(id).await.unwrap();
-    match wait_for_matching_event(&mut engine, |notification| {
+    harness.client.cancel(id).await.unwrap();
+    match wait_for_matching_event(&mut harness.subscription, |event| {
         matches!(
-            notification,
-            EngineEvent::LiveTransferRemoved { id: removed, .. } if *removed == id
+            event,
+            OpheliaEvent::TransferRemoved { id: removed, .. } if *removed == id
         )
     })
     .await
     {
-        EngineEvent::LiveTransferRemoved {
+        OpheliaEvent::TransferRemoved {
             id: removed,
             action,
             artifact_state,
@@ -296,29 +308,25 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             assert_eq!(action, LiveTransferRemovalAction::Cancelled);
             assert_eq!(artifact_state, ArtifactState::Missing);
         }
-        other => panic!("expected cancelled removal notification, got {other:?}"),
+        other => panic!("expected cancelled removal event, got {other:?}"),
     }
 
-    let id = engine
-        .add(DownloadSpec::http(
-            "https://example.com/file.bin".to_string(),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
-        ))
+    let id = harness
+        .client
+        .add(http_request("https://example.com/file.bin", &destination))
         .await
         .unwrap();
     std::fs::write(&destination, b"partial").unwrap();
-    engine.delete_artifact(id).await.unwrap();
-    match wait_for_matching_event(&mut engine, |notification| {
+    harness.client.delete_artifact(id).await.unwrap();
+    match wait_for_matching_event(&mut harness.subscription, |event| {
         matches!(
-            notification,
-            EngineEvent::LiveTransferRemoved { id: removed, .. } if *removed == id
+            event,
+            OpheliaEvent::TransferRemoved { id: removed, .. } if *removed == id
         )
     })
     .await
     {
-        EngineEvent::LiveTransferRemoved {
+        OpheliaEvent::TransferRemoved {
             id: removed,
             action,
             artifact_state,
@@ -328,172 +336,134 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_notifications() {
             assert_eq!(artifact_state, ArtifactState::Deleted);
             assert!(!destination.exists());
         }
-        other => panic!("expected removed notification, got {other:?}"),
+        other => panic!("expected removed event, got {other:?}"),
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn add_emits_transfer_snapshot_for_frontends() {
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(engine_config(0), db_tx, 1);
-
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
-            "https://example.com/file.bin".to_string(),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
-        ))
+    let mut harness = start_service(0, tempdir.path()).await;
+
+    let id = harness
+        .client
+        .add(http_request("https://example.com/file.bin", &destination))
         .await
         .unwrap();
 
-    match wait_for_matching_event(
-        &mut engine,
-        |event| matches!(event, EngineEvent::TransferAdded { snapshot } if snapshot.id == id),
-    )
-    .await
-    {
-        EngineEvent::TransferAdded { snapshot } => {
-            assert_eq!(snapshot.id, id);
-            assert_eq!(snapshot.provider_kind, "http");
-            assert_eq!(snapshot.source_label, "https://example.com/file.bin");
-            assert_eq!(snapshot.destination, destination);
-            assert_eq!(snapshot.status, TransferStatus::Pending);
-            assert_eq!(snapshot.downloaded_bytes, 0);
-            assert_eq!(snapshot.total_bytes, None);
-            assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Unsupported);
-        }
-        other => panic!("expected transfer-added event, got {other:?}"),
-    }
+    let snapshot =
+        wait_for_matching_transfer(&mut harness.subscription, |snapshot| snapshot.id == id).await;
+    assert_eq!(snapshot.provider_kind, "http");
+    assert_eq!(snapshot.source_label, "https://example.com/file.bin");
+    assert_eq!(snapshot.destination, destination);
+    assert_eq!(snapshot.status, TransferStatus::Pending);
+    assert_eq!(snapshot.downloaded_bytes, 0);
+    assert_eq!(snapshot.total_bytes, None);
+    assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restore_emits_transfer_snapshot_for_frontends() {
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
-
-    let tempdir = tempfile::tempdir().unwrap();
-    let destination = tempdir.path().join("file.bin");
+async fn restore_returns_transfer_snapshot_for_frontends() {
+    let profile = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let paths = profile_paths(&profile, downloads.path());
+    let destination = downloads.path().join("file.bin");
     let id = TransferId(77);
-    engine
-        .restore(RestoredDownload::http(
-            id,
-            "https://example.com/file.bin".to_string(),
-            destination.clone(),
-            &DestinationPolicyConfig::default(),
-            HttpDownloadConfig::default(),
-            None,
-        ))
-        .await
-        .unwrap();
+    seed_paused_http_download(
+        &paths,
+        id,
+        "https://example.com/file.bin".to_string(),
+        destination.clone(),
+        None,
+    );
 
-    match wait_for_matching_event(
-        &mut engine,
-        |event| matches!(event, EngineEvent::TransferRestored { snapshot } if snapshot.id == id),
-    )
-    .await
-    {
-        EngineEvent::TransferRestored { snapshot } => {
-            assert_eq!(snapshot.id, id);
-            assert_eq!(snapshot.destination, destination);
-            assert_eq!(snapshot.status, TransferStatus::Paused);
-            assert_eq!(snapshot.downloaded_bytes, 0);
-            assert_eq!(snapshot.total_bytes, None);
-        }
-        other => panic!("expected transfer-restored event, got {other:?}"),
-    }
+    let harness = start_service_with_paths(paths, profile, 3).await;
+    let snapshot = harness
+        .subscription
+        .snapshot
+        .transfers
+        .iter()
+        .find(|snapshot| snapshot.id == id)
+        .expect("restored transfer was not in the initial snapshot");
+
+    assert_eq!(snapshot.destination, destination);
+    assert_eq!(snapshot.status, TransferStatus::Paused);
+    assert_eq!(snapshot.downloaded_bytes, 0);
+    assert_eq!(snapshot.total_bytes, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_delete_rejects_id_and_leaves_caller_path_alone() {
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let engine = start_engine(EngineConfig::default(), db_tx, 1);
-
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("caller-owned.bin");
     std::fs::write(&destination, b"do not delete").unwrap();
+    let harness = start_service(3, tempdir.path()).await;
 
-    let err = engine.delete_artifact(TransferId(999)).await.unwrap_err();
-    assert_eq!(
+    let err = harness
+        .client
+        .delete_artifact(TransferId(999))
+        .await
+        .unwrap_err();
+    assert!(matches!(
         err,
-        EngineError::NotFound {
+        OpheliaError::NotFound {
             id: TransferId(999)
         }
-    );
+    ));
     assert_eq!(std::fs::read(&destination).unwrap(), b"do not delete");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn single_stream_http_emits_runtime_control_support_narrowing() {
     let server = spawn_no_content_length_server(vec![7u8; 2048]);
-
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(http_request(
             format!("http://{server}/file.bin"),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
+            &destination,
         ))
         .await
         .unwrap();
 
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ControlSupportChanged { id: changed, .. } if *changed == id
-        )
-    })
-    .await
-    {
-        EngineEvent::ControlSupportChanged {
-            id: changed,
-            support,
-        } => {
-            assert_eq!(changed, id);
-            assert_eq!(
-                support,
-                TransferControlSupport {
+    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id
+            && snapshot.control_support
+                == TransferControlSupport {
                     can_pause: false,
                     can_resume: false,
                     can_cancel: true,
                     can_restore: false,
                 }
-            );
-        }
-        other => panic!("expected control-support change, got {other:?}"),
-    }
+    })
+    .await;
+    assert_eq!(snapshot.id, id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn single_stream_http_emits_download_bytes_written_event() {
     let server = spawn_no_content_length_server(vec![3u8; 4096]);
-
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(http_request(
             format!("http://{server}/file.bin"),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
+            &destination,
         ))
         .await
         .unwrap();
 
-    match wait_for_matching_event(&mut engine, |event| {
-        matches!(event, EngineEvent::TransferBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
+    match wait_for_matching_event(&mut harness.subscription, |event| {
+        matches!(event, OpheliaEvent::TransferBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
     })
     .await
     {
-        EngineEvent::TransferBytesWritten { id: changed, bytes } => {
+        OpheliaEvent::TransferBytesWritten { id: changed, bytes } => {
             assert_eq!(changed, id);
             assert!(bytes > 0);
         }
@@ -508,6 +478,7 @@ async fn destination_change_event_arrives_before_finished_progress() {
         .and(path("/file.bin"))
         .respond_with(
             ResponseTemplate::new(200)
+                .insert_header("content-length", "2048")
                 .insert_header("content-disposition", "attachment; filename=\"server.bin\""),
         )
         .mount(&server)
@@ -522,213 +493,125 @@ async fn destination_change_event_arrives_before_finished_progress() {
         .mount(&server)
         .await;
 
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
-    let requested_destination = tempdir.path().join("file.bin");
     let server_destination = tempdir.path().join("server.bin");
-    let destination_config = DestinationPolicyConfig {
-        default_download_dir: tempdir.path().to_path_buf(),
-        ..DestinationPolicyConfig::default()
-    };
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(automatic_http_request(
             format!("{}/file.bin", server.uri()),
-            requested_destination.clone(),
-            DestinationPolicy::automatic(&destination_config),
-            HttpDownloadConfig::default(),
+            Some("file.bin".to_string()),
         ))
         .await
         .unwrap();
 
     let mut saw_destination_change = false;
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            match engine
-                .next_event()
-                .await
-                .expect("engine event channel closed")
-            {
-                EngineEvent::DestinationChanged {
-                    id: changed,
-                    destination,
-                } if changed == id => {
-                    assert_eq!(destination, server_destination);
-                    saw_destination_change = true;
-                }
-                EngineEvent::Progress(update)
-                    if update.id == id && update.status == TransferStatus::Finished =>
-                {
-                    assert!(saw_destination_change);
-                    break;
-                }
-                _ => {}
-            }
+    let _ = wait_for_matching_event(&mut harness.subscription, |event| {
+        let OpheliaEvent::TransferChanged { snapshot } = event else {
+            return false;
+        };
+        if snapshot.id != id {
+            return false;
         }
+        if snapshot.destination == server_destination {
+            saw_destination_change = true;
+        }
+        if snapshot.status == TransferStatus::Finished {
+            return saw_destination_change;
+        }
+        false
     })
-    .await
-    .expect("timed out waiting for destination and finish events");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pause_during_probe_before_single_stream_fallback_exits_cleanly() {
     let server = spawn_slow_no_content_length_server(vec![7u8; 2048], Duration::from_millis(100));
-
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(http_request(
             format!("http://{server}/file.bin"),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig::default(),
+            &destination,
         ))
         .await
         .unwrap();
 
-    engine.pause(id).await.unwrap();
+    harness.client.pause(id).await.unwrap();
 
-    let update = wait_for_matching_progress(&mut engine, |update| {
-        update.id == id && update.status == TransferStatus::Error
+    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.status == TransferStatus::Error
     })
     .await;
-    assert_eq!(update.downloaded_bytes, 0);
+    assert_eq!(snapshot.downloaded_bytes, 0);
     assert!(!destination.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
     let server = spawn_slow_range_server(vec![5u8; 32 * 1024], 512, Duration::from_millis(25));
-
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(http_request(
             format!("http://{server}/file.bin"),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig {
-                speed_limit_bps: 20_000,
-                write_buffer_size: 1024,
-                ..HttpDownloadConfig::default()
-            },
+            &destination,
         ))
         .await
         .unwrap();
 
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id: changed,
-                state: TransferChunkMapState::Loading,
-            } if *changed == id
-        )
+    let loading = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Loading
     })
-    .await
-    {
-        EngineEvent::ChunkMapChanged {
-            id: changed,
-            state: TransferChunkMapState::Loading,
-        } => assert_eq!(changed, id),
-        other => panic!("expected loading chunk-map state, got {other:?}"),
-    }
+    .await;
+    assert_eq!(loading.id, id);
 
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id: changed,
-                state: TransferChunkMapState::Http(_),
-            } if *changed == id
-        )
+    let http = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_)) && snapshot.id == id
     })
-    .await
-    {
-        EngineEvent::ChunkMapChanged {
-            id: changed,
-            state: TransferChunkMapState::Http(snapshot),
-        } => {
-            assert_eq!(changed, id);
-            assert_eq!(snapshot.cells.len(), 128);
-        }
+    .await;
+    match http.chunk_map_state {
+        TransferChunkMapState::Http(snapshot) => assert_eq!(snapshot.cells.len(), 128),
         other => panic!("expected http chunk-map snapshot, got {other:?}"),
     }
 
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id: changed,
-                state: TransferChunkMapState::Unsupported,
-            } if *changed == id
-        )
+    let terminal = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Unsupported
     })
-    .await
-    {
-        EngineEvent::ChunkMapChanged {
-            id: changed,
-            state: TransferChunkMapState::Unsupported,
-        } => assert_eq!(changed, id),
-        other => panic!("expected terminal unsupported chunk-map state, got {other:?}"),
-    }
+    .await;
+    assert_eq!(terminal.id, id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pausing_active_http_clears_chunk_map_to_unsupported() {
     let server = spawn_slow_range_server(vec![9u8; 32 * 1024], 512, Duration::from_millis(25));
-
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let destination = tempdir.path().join("file.bin");
-    let id = engine
-        .add(DownloadSpec::http(
+    let mut harness = start_service(3, tempdir.path()).await;
+    let id = harness
+        .client
+        .add(http_request(
             format!("http://{server}/file.bin"),
-            destination.clone(),
-            exact_destination_policy(&destination),
-            HttpDownloadConfig {
-                speed_limit_bps: 20_000,
-                write_buffer_size: 1024,
-                ..HttpDownloadConfig::default()
-            },
+            &destination,
         ))
         .await
         .unwrap();
 
-    let _ = wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id: changed,
-                state: TransferChunkMapState::Http(_),
-            } if *changed == id
-        )
+    let _ = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_)) && snapshot.id == id
     })
     .await;
 
-    engine.pause(id).await.unwrap();
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id: changed,
-                state: TransferChunkMapState::Unsupported,
-            } if *changed == id
-        )
+    harness.client.pause(id).await.unwrap();
+    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Unsupported
     })
-    .await
-    {
-        EngineEvent::ChunkMapChanged {
-            id: changed,
-            state: TransferChunkMapState::Unsupported,
-        } => assert_eq!(changed, id),
-        other => panic!("expected paused unsupported chunk-map state, got {other:?}"),
-    }
+    .await;
+    assert_eq!(snapshot.id, id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -738,69 +621,41 @@ async fn pausing_active_http_starts_next_queued_download() {
     let second_server =
         spawn_slow_range_server(vec![2u8; 32 * 1024], 512, Duration::from_millis(25));
 
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(engine_config(1), db_tx, 1);
     let tempdir = tempfile::tempdir().unwrap();
     let first_destination = tempdir.path().join("first.bin");
     let second_destination = tempdir.path().join("second.bin");
+    let mut harness = start_service(1, tempdir.path()).await;
 
-    let first_id = engine
-        .add(DownloadSpec::http(
+    let first_id = harness
+        .client
+        .add(http_request(
             format!("http://{first_server}/first.bin"),
-            first_destination.clone(),
-            exact_destination_policy(&first_destination),
-            HttpDownloadConfig {
-                speed_limit_bps: 20_000,
-                write_buffer_size: 1024,
-                ..HttpDownloadConfig::default()
-            },
+            &first_destination,
         ))
         .await
         .unwrap();
-    let second_id = engine
-        .add(DownloadSpec::http(
+    let second_id = harness
+        .client
+        .add(http_request(
             format!("http://{second_server}/second.bin"),
-            second_destination.clone(),
-            exact_destination_policy(&second_destination),
-            HttpDownloadConfig {
-                speed_limit_bps: 20_000,
-                write_buffer_size: 1024,
-                ..HttpDownloadConfig::default()
-            },
+            &second_destination,
         ))
         .await
         .unwrap();
 
-    let _ = wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id,
-                state: TransferChunkMapState::Http(_),
-            } if *id == first_id
-        )
+    let _ = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_))
+            && snapshot.id == first_id
     })
     .await;
 
-    engine.pause(first_id).await.unwrap();
+    harness.client.pause(first_id).await.unwrap();
 
-    match wait_for_matching_event(&mut engine, |notification| {
-        matches!(
-            notification,
-            EngineEvent::ChunkMapChanged {
-                id,
-                state: TransferChunkMapState::Loading,
-            } if *id == second_id
-        )
+    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == second_id && snapshot.status == TransferStatus::Downloading
     })
-    .await
-    {
-        EngineEvent::ChunkMapChanged {
-            id,
-            state: TransferChunkMapState::Loading,
-        } => assert_eq!(id, second_id),
-        other => panic!("expected queued download to start, got {other:?}"),
-    }
+    .await;
+    assert_eq!(snapshot.id, second_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -808,33 +663,30 @@ async fn restored_http_without_resume_data_discards_stale_part_file_before_resta
     let data = vec![8u8; 32 * 1024];
     let server = spawn_slow_range_server(data.clone(), 8192, Duration::from_millis(0));
 
-    let (db_tx, _db_rx) = std::sync::mpsc::channel();
-    let mut engine = start_engine(EngineConfig::default(), db_tx, 1);
-    let tempdir = tempfile::tempdir().unwrap();
-    let destination = tempdir.path().join("file.bin");
+    let profile = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let paths = profile_paths(&profile, downloads.path());
+    let destination = downloads.path().join("file.bin");
     let part_path = part_path_for(&destination);
     std::fs::write(&part_path, b"stale partial bytes").unwrap();
 
     let id = TransferId(77);
-    engine
-        .restore(RestoredDownload::http(
-            id,
-            format!("http://{server}/file.bin"),
-            destination.clone(),
-            &DestinationPolicyConfig::default(),
-            HttpDownloadConfig::default(),
-            None,
-        ))
-        .await
-        .unwrap();
+    seed_paused_http_download(
+        &paths,
+        id,
+        format!("http://{server}/file.bin"),
+        destination.clone(),
+        None,
+    );
 
-    engine.resume(id).await.unwrap();
+    let mut harness = start_service_with_paths(paths, profile, 3).await;
+    harness.client.resume(id).await.unwrap();
 
-    let update = wait_for_matching_progress(&mut engine, |update| {
-        update.id == id && update.status == TransferStatus::Finished
+    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
+        snapshot.id == id && snapshot.status == TransferStatus::Finished
     })
     .await;
-    assert_eq!(update.downloaded_bytes, data.len() as u64);
+    assert_eq!(snapshot.downloaded_bytes, data.len() as u64);
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(!part_path.exists());
 }

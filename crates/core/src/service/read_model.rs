@@ -1,4 +1,10 @@
-use super::*;
+use std::collections::HashMap;
+use std::path::Path;
+
+use super::{
+    OpheliaEvent, OpheliaSnapshot, ProgressUpdate, ServiceSettings, TransferId,
+    TransferRuntimeEvent, TransferStatus, TransferSummary,
+};
 
 #[derive(Default)]
 pub(super) struct OpheliaReadModel {
@@ -94,24 +100,24 @@ impl OpheliaReadModel {
         }
     }
 
-    pub(super) fn apply_engine_event(
+    pub(super) fn apply_transfer_event(
         &mut self,
-        event: EngineEvent,
+        event: TransferRuntimeEvent,
         coalescer: &mut OpheliaEventCoalescer,
     ) -> Option<OpheliaEvent> {
         match event {
-            EngineEvent::TransferAdded { snapshot }
-            | EngineEvent::TransferRestored { snapshot } => {
+            TransferRuntimeEvent::TransferAdded { snapshot }
+            | TransferRuntimeEvent::TransferRestored { snapshot } => {
                 let snapshot = self.upsert(snapshot);
                 coalescer.remove_transfer(snapshot.id);
                 Some(OpheliaEvent::TransferChanged { snapshot })
             }
-            EngineEvent::Progress(update) => self.apply_progress(update, coalescer),
-            EngineEvent::TransferBytesWritten { id, bytes } => {
+            TransferRuntimeEvent::Progress(update) => self.apply_progress(update, coalescer),
+            TransferRuntimeEvent::TransferBytesWritten { id, bytes } => {
                 coalescer.record_bytes_written(id, bytes);
                 None
             }
-            EngineEvent::DestinationChanged { id, destination } => self
+            TransferRuntimeEvent::DestinationChanged { id, destination } => self
                 .mutate(id, |snapshot| {
                     snapshot.destination = destination;
                 })
@@ -119,7 +125,7 @@ impl OpheliaReadModel {
                     coalescer.remove_transfer(id);
                     OpheliaEvent::TransferChanged { snapshot }
                 }),
-            EngineEvent::ControlSupportChanged { id, support } => self
+            TransferRuntimeEvent::ControlSupportChanged { id, support } => self
                 .mutate(id, |snapshot| {
                     snapshot.control_support = support;
                 })
@@ -127,7 +133,7 @@ impl OpheliaReadModel {
                     coalescer.remove_transfer(id);
                     OpheliaEvent::TransferChanged { snapshot }
                 }),
-            EngineEvent::ChunkMapChanged { id, state } => {
+            TransferRuntimeEvent::ChunkMapChanged { id, state } => {
                 if let Some(snapshot) = self.mutate(id, |snapshot| {
                     snapshot.chunk_map_state = state;
                 }) {
@@ -135,7 +141,7 @@ impl OpheliaReadModel {
                 }
                 None
             }
-            EngineEvent::LiveTransferRemoved {
+            TransferRuntimeEvent::TransferRemoved {
                 id,
                 action,
                 artifact_state,
@@ -149,7 +155,7 @@ impl OpheliaReadModel {
                     artifact_state,
                 })
             }
-            EngineEvent::ControlUnsupported { id, action } => {
+            TransferRuntimeEvent::ControlUnsupported { id, action } => {
                 Some(OpheliaEvent::ControlUnsupported { id, action })
             }
         }

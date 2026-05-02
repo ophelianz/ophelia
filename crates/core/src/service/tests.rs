@@ -1,5 +1,6 @@
 use super::host::should_flush_before_immediate;
 use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
+use super::transfer_runtime::TransferRuntimeEvent;
 use super::wire::{
     OpheliaWireCommand, OpheliaWireFrame, command_from_payload, command_to_payload,
     frame_from_payload, frame_to_payload,
@@ -75,8 +76,8 @@ fn session_read_model_coalesces_hot_transfer_updates() {
     let mut coalescer = OpheliaEventCoalescer::default();
 
     let added = read_model
-        .apply_engine_event(
-            EngineEvent::TransferAdded {
+        .apply_transfer_event(
+            TransferRuntimeEvent::TransferAdded {
                 snapshot: test_snapshot(id, TransferStatus::Pending),
             },
             &mut coalescer,
@@ -86,8 +87,8 @@ fn session_read_model_coalesces_hot_transfer_updates() {
 
     assert!(
         read_model
-            .apply_engine_event(
-                EngineEvent::Progress(ProgressUpdate {
+            .apply_transfer_event(
+                TransferRuntimeEvent::Progress(ProgressUpdate {
                     id,
                     status: TransferStatus::Downloading,
                     downloaded_bytes: 40,
@@ -100,8 +101,8 @@ fn session_read_model_coalesces_hot_transfer_updates() {
     );
     assert!(
         read_model
-            .apply_engine_event(
-                EngineEvent::ChunkMapChanged {
+            .apply_transfer_event(
+                TransferRuntimeEvent::ChunkMapChanged {
                     id,
                     state: TransferChunkMapState::Loading,
                 },
@@ -111,16 +112,16 @@ fn session_read_model_coalesces_hot_transfer_updates() {
     );
     assert!(
         read_model
-            .apply_engine_event(
-                EngineEvent::TransferBytesWritten { id, bytes: 10 },
+            .apply_transfer_event(
+                TransferRuntimeEvent::TransferBytesWritten { id, bytes: 10 },
                 &mut coalescer,
             )
             .is_none()
     );
     assert!(
         read_model
-            .apply_engine_event(
-                EngineEvent::TransferBytesWritten { id, bytes: 15 },
+            .apply_transfer_event(
+                TransferRuntimeEvent::TransferBytesWritten { id, bytes: 15 },
                 &mut coalescer,
             )
             .is_none()
@@ -152,16 +153,16 @@ fn coalescer_stats_count_raw_and_emitted_hot_events() {
     let id = TransferId(2);
     let mut read_model = OpheliaReadModel::default();
     let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferAdded {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
         &mut coalescer,
     );
 
     for downloaded_bytes in [10, 20, 30] {
-        let _ = read_model.apply_engine_event(
-            EngineEvent::Progress(ProgressUpdate {
+        let _ = read_model.apply_transfer_event(
+            TransferRuntimeEvent::Progress(ProgressUpdate {
                 id,
                 status: TransferStatus::Downloading,
                 downloaded_bytes,
@@ -171,12 +172,12 @@ fn coalescer_stats_count_raw_and_emitted_hot_events() {
             &mut coalescer,
         );
     }
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferBytesWritten { id, bytes: 10 },
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferBytesWritten { id, bytes: 10 },
         &mut coalescer,
     );
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferBytesWritten { id, bytes: 20 },
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferBytesWritten { id, bytes: 20 },
         &mut coalescer,
     );
 
@@ -197,14 +198,14 @@ fn terminal_progress_clears_stale_coalesced_updates() {
     let id = TransferId(3);
     let mut read_model = OpheliaReadModel::default();
     let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferAdded {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
         &mut coalescer,
     );
-    let _ = read_model.apply_engine_event(
-        EngineEvent::Progress(ProgressUpdate {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Downloading,
             downloaded_bytes: 50,
@@ -215,8 +216,8 @@ fn terminal_progress_clears_stale_coalesced_updates() {
     );
 
     let finished = read_model
-        .apply_engine_event(
-            EngineEvent::Progress(ProgressUpdate {
+        .apply_transfer_event(
+            TransferRuntimeEvent::Progress(ProgressUpdate {
                 id,
                 status: TransferStatus::Finished,
                 downloaded_bytes: 100,
@@ -242,14 +243,14 @@ fn snapshot_reflects_pending_hot_updates_before_flush() {
     let id = TransferId(4);
     let mut read_model = OpheliaReadModel::default();
     let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferAdded {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
         &mut coalescer,
     );
-    let _ = read_model.apply_engine_event(
-        EngineEvent::Progress(ProgressUpdate {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Downloading,
             downloaded_bytes: 80,
@@ -258,8 +259,8 @@ fn snapshot_reflects_pending_hot_updates_before_flush() {
         }),
         &mut coalescer,
     );
-    let _ = read_model.apply_engine_event(
-        EngineEvent::ChunkMapChanged {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::ChunkMapChanged {
             id,
             state: TransferChunkMapState::Loading,
         },
@@ -279,31 +280,31 @@ fn snapshot_reflects_pending_hot_updates_before_flush() {
 #[test]
 fn terminal_events_flush_hot_updates_first() {
     assert!(!should_flush_before_immediate(
-        &EngineEvent::TransferBytesWritten {
+        &TransferRuntimeEvent::TransferBytesWritten {
             id: TransferId(5),
             bytes: 8,
         }
     ));
-    assert!(!should_flush_before_immediate(&EngineEvent::Progress(
-        ProgressUpdate {
+    assert!(!should_flush_before_immediate(
+        &TransferRuntimeEvent::Progress(ProgressUpdate {
             id: TransferId(5),
             status: TransferStatus::Downloading,
             downloaded_bytes: 8,
             total_bytes: Some(100),
             speed_bytes_per_sec: 8,
-        }
-    )));
-    assert!(should_flush_before_immediate(&EngineEvent::Progress(
-        ProgressUpdate {
+        })
+    ));
+    assert!(should_flush_before_immediate(
+        &TransferRuntimeEvent::Progress(ProgressUpdate {
             id: TransferId(5),
             status: TransferStatus::Finished,
             downloaded_bytes: 100,
             total_bytes: Some(100),
             speed_bytes_per_sec: 0,
-        }
-    )));
+        })
+    ));
     assert!(should_flush_before_immediate(
-        &EngineEvent::LiveTransferRemoved {
+        &TransferRuntimeEvent::TransferRemoved {
             id: TransferId(5),
             action: LiveTransferRemovalAction::DeleteArtifact,
             artifact_state: ArtifactState::Deleted,
@@ -316,19 +317,19 @@ fn terminal_progress_keeps_pending_write_bytes() {
     let id = TransferId(6);
     let mut read_model = OpheliaReadModel::default();
     let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferAdded {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
         &mut coalescer,
     );
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferBytesWritten { id, bytes: 32 },
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferBytesWritten { id, bytes: 32 },
         &mut coalescer,
     );
 
-    let finished = read_model.apply_engine_event(
-        EngineEvent::Progress(ProgressUpdate {
+    let finished = read_model.apply_transfer_event(
+        TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Finished,
             downloaded_bytes: 100,

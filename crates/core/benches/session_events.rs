@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ophelia::ServiceSettings;
 use ophelia::engine::{
-    ArtifactState, EngineEvent, LiveTransferRemovalAction, ProgressUpdate, TransferChunkMapState,
+    ArtifactState, LiveTransferRemovalAction, ProgressUpdate, TransferChunkMapState,
     TransferControlAction, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
 };
 use ophelia::service::{OpheliaEvent, OpheliaSnapshot};
@@ -14,6 +13,43 @@ use ophelia::service::{OpheliaEvent, OpheliaSnapshot};
 mod read_model;
 
 use read_model::{OpheliaEventCoalescer, OpheliaReadModel};
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum TransferRuntimeEvent {
+    TransferAdded {
+        snapshot: TransferSummary,
+    },
+    TransferRestored {
+        snapshot: TransferSummary,
+    },
+    Progress(ProgressUpdate),
+    TransferBytesWritten {
+        id: TransferId,
+        bytes: u64,
+    },
+    DestinationChanged {
+        id: TransferId,
+        destination: PathBuf,
+    },
+    ControlSupportChanged {
+        id: TransferId,
+        support: TransferControlSupport,
+    },
+    ChunkMapChanged {
+        id: TransferId,
+        state: TransferChunkMapState,
+    },
+    TransferRemoved {
+        id: TransferId,
+        action: LiveTransferRemovalAction,
+        artifact_state: ArtifactState,
+    },
+    ControlUnsupported {
+        id: TransferId,
+        action: TransferControlAction,
+    },
+}
 
 fn snapshot(id: TransferId) -> TransferSummary {
     TransferSummary {
@@ -34,8 +70,8 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
     let id = TransferId(1);
     let mut read_model = OpheliaReadModel::default();
     let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_engine_event(
-        EngineEvent::TransferAdded {
+    let _ = read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
             snapshot: snapshot(id),
         },
         &mut coalescer,
@@ -43,8 +79,8 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
 
     for step in 0..count {
         let downloaded_bytes = step.saturating_mul(64 * 1024);
-        let _ = read_model.apply_engine_event(
-            EngineEvent::Progress(ProgressUpdate {
+        let _ = read_model.apply_transfer_event(
+            TransferRuntimeEvent::Progress(ProgressUpdate {
                 id,
                 status: TransferStatus::Downloading,
                 downloaded_bytes,
@@ -53,8 +89,8 @@ fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
             }),
             &mut coalescer,
         );
-        let _ = read_model.apply_engine_event(
-            EngineEvent::TransferBytesWritten {
+        let _ = read_model.apply_transfer_event(
+            TransferRuntimeEvent::TransferBytesWritten {
                 id,
                 bytes: 64 * 1024,
             },

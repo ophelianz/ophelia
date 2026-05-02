@@ -19,10 +19,9 @@
 
 pub mod alloc;
 pub mod chunk;
-mod controller;
 pub mod destination;
 pub mod http;
-mod provider;
+pub(crate) mod provider;
 pub mod spec;
 pub mod state;
 pub mod types;
@@ -31,7 +30,5 @@ pub use crate::config::{
     CollisionPolicy, DestinationPolicyConfig, DestinationRuleConfig, EngineConfig,
     HttpEngineConfig, HttpOrderingMode, ProfilePaths,
 };
-pub use controller::DownloadEngine;
-pub(crate) use controller::delete_artifact_files;
 pub use spec::{AddTransferRequest, DownloadSource, DownloadSpec, RestoredDownload};
 pub use types::*;

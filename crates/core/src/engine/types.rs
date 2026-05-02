@@ -314,42 +314,6 @@ pub struct TransferSummary {
     pub chunk_map_state: TransferChunkMapState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EngineEvent {
-    TransferAdded {
-        snapshot: TransferSummary,
-    },
-    TransferRestored {
-        snapshot: TransferSummary,
-    },
-    Progress(ProgressUpdate),
-    TransferBytesWritten {
-        id: TransferId,
-        bytes: u64,
-    },
-    DestinationChanged {
-        id: TransferId,
-        destination: PathBuf,
-    },
-    ControlSupportChanged {
-        id: TransferId,
-        support: TransferControlSupport,
-    },
-    ChunkMapChanged {
-        id: TransferId,
-        state: TransferChunkMapState,
-    },
-    LiveTransferRemoved {
-        id: TransferId,
-        action: LiveTransferRemovalAction,
-        artifact_state: ArtifactState,
-    },
-    ControlUnsupported {
-        id: TransferId,
-        action: TransferControlAction,
-    },
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineError {
     Closed,

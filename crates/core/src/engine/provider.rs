@@ -17,9 +17,9 @@
 **       じしf_,)ノ
 **************************************************/
 
-//! Starts downloads for the engine controller
+//! Starts protocol tasks for the service runtime
 //!
-//! Keeps HTTP task setup and HTTP pause data out of `controller.rs`
+//! Keeps HTTP task setup and HTTP pause data out of the service owner loop
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -36,41 +36,41 @@ use crate::engine::{
     TransferId,
 };
 
-pub(super) struct SpawnedTask {
-    pub(super) handle: JoinHandle<TaskFinalState>,
-    pub(super) pause_sink: TaskPauseSink,
-    pub(super) destination_sink: TaskDestinationSink,
+pub(crate) struct SpawnedTask {
+    pub(crate) handle: JoinHandle<TaskFinalState>,
+    pub(crate) pause_sink: TaskPauseSink,
+    pub(crate) destination_sink: TaskDestinationSink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum SchedulerKey {
+pub(crate) enum SchedulerKey {
     Hostname(String),
 }
 
-pub(super) struct SharedSchedulerRequirement {
-    pub(super) key: SchedulerKey,
-    pub(super) limit: usize,
+pub(crate) struct SharedSchedulerRequirement {
+    pub(crate) key: SchedulerKey,
+    pub(crate) limit: usize,
 }
 
-pub(super) struct ProviderCapabilities {
-    pub(super) shared_scheduler: Option<SharedSchedulerRequirement>,
+pub(crate) struct ProviderCapabilities {
+    pub(crate) shared_scheduler: Option<SharedSchedulerRequirement>,
 }
 
-pub(super) struct ProviderRuntimeContext {
-    pub(super) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
-    pub(super) global_throttle: Arc<TokenBucket>,
-    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+pub(crate) struct ProviderRuntimeContext {
+    pub(crate) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
+    pub(crate) global_throttle: Arc<TokenBucket>,
+    pub(crate) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
 }
 
-pub(super) enum TaskPauseSink {
+pub(crate) enum TaskPauseSink {
     Http(Arc<Mutex<Option<Vec<ChunkSnapshot>>>>),
 }
 
-pub(super) enum TaskDestinationSink {
+pub(crate) enum TaskDestinationSink {
     Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
-pub(super) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> ProviderCapabilities {
+pub(crate) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> ProviderCapabilities {
     match &spec.source {
         DownloadSource::Http { url, .. } => ProviderCapabilities {
             shared_scheduler: Some(SharedSchedulerRequirement {
@@ -81,23 +81,23 @@ pub(super) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> Provid
     }
 }
 
-pub(super) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupport {
+pub(crate) fn lifecycle_capabilities(spec: &DownloadSpec) -> TransferControlSupport {
     match &spec.source {
         DownloadSource::Http { .. } => TransferControlSupport::all(),
     }
 }
 
-pub(super) fn supports_control_action(spec: &DownloadSpec, action: TransferControlAction) -> bool {
+pub(crate) fn supports_control_action(spec: &DownloadSpec, action: TransferControlAction) -> bool {
     lifecycle_capabilities(spec).supports(action)
 }
 
-pub(super) fn shared_scheduler_limit(key: &SchedulerKey, config: &EngineConfig) -> Option<usize> {
+pub(crate) fn shared_scheduler_limit(key: &SchedulerKey, config: &EngineConfig) -> Option<usize> {
     match key {
         SchedulerKey::Hostname(_) => Some(config.http.max_connections_per_server),
     }
 }
 
-pub(super) fn spawn_task(
+pub(crate) fn spawn_task(
     id: TransferId,
     spec: &DownloadSpec,
     pause_token: CancellationToken,
@@ -166,7 +166,7 @@ pub(super) fn spawn_task(
     }
 }
 
-pub(super) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResumeData> {
+pub(crate) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResumeData> {
     match pause_sink {
         TaskPauseSink::Http(sink) => sink
             .lock()
@@ -177,13 +177,13 @@ pub(super) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResu
     }
 }
 
-pub(super) fn current_destination(destination_sink: &TaskDestinationSink) -> Option<PathBuf> {
+pub(crate) fn current_destination(destination_sink: &TaskDestinationSink) -> Option<PathBuf> {
     match destination_sink {
         TaskDestinationSink::Http(sink) => sink.lock().unwrap().clone(),
     }
 }
 
-pub(super) fn persisted_source(spec: &DownloadSpec) -> PersistedDownloadSource {
+pub(crate) fn persisted_source(spec: &DownloadSpec) -> PersistedDownloadSource {
     match &spec.source {
         DownloadSource::Http { url, .. } => PersistedDownloadSource::Http { url: url.clone() },
     }

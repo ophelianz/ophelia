@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -18,10 +17,9 @@ use tokio::task::JoinHandle;
 use crate::config::{EngineConfig, ProfilePaths, ServiceSettings};
 use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
-    AddTransferRequest, ArtifactState, DbEvent, DownloadEngine, DownloadSpec, EngineError,
-    EngineEvent, HistoryFilter, HistoryRow, LiveTransferRemovalAction, ProgressUpdate,
-    RestoredDownload, TransferControlAction, TransferId, TransferStatus, TransferSummary,
-    delete_artifact_files,
+    AddTransferRequest, ArtifactState, DbEvent, DownloadSpec, EngineError, HistoryFilter,
+    HistoryRow, LiveTransferRemovalAction, ProgressUpdate, RestoredDownload, TransferControlAction,
+    TransferId, TransferStatus, TransferSummary,
 };
 
 const SERVICE_COMMAND_CAPACITY: usize = 64;
@@ -35,12 +33,15 @@ mod lock;
 #[cfg(target_os = "macos")]
 mod macos_startup;
 mod read_model;
+mod transfer_runtime;
 mod wire;
 #[cfg(target_os = "macos")]
 mod xpc;
 
 #[cfg(test)]
 mod tests;
+
+use transfer_runtime::TransferRuntimeEvent;
 
 pub use client::{
     LocalServiceConnection, LocalServiceOptions, LocalServiceRepairPolicy, LocalServiceWarning,

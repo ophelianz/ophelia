@@ -1,8 +1,10 @@
 use super::lock::{ServiceLock, service_lock_path};
 use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
+use super::transfer_runtime::{TransferRuntime, TransferRuntimeEvent, delete_artifact_files};
 use super::*;
 
 const SERVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const TASK_UPDATE_DRAIN_AFTER_COMMAND: usize = 64;
 
 pub struct OpheliaService {
     client: OpheliaClient,
@@ -70,20 +72,15 @@ impl OpheliaService {
         let (event_tx, _) = broadcast::channel(SERVICE_EVENT_CAPACITY);
         let client = OpheliaClient::in_process(tx);
         let db_tx = bootstrap.db_tx.clone();
-
-        let engine = DownloadEngine::spawn_on(
-            runtime,
-            config.clone(),
-            bootstrap.db_tx,
-            bootstrap.next_download_id,
-        );
+        let transfers =
+            TransferRuntime::new(config.clone(), db_tx.clone(), bootstrap.next_download_id);
         let task = runtime.spawn(
             OpheliaServiceRuntime {
                 config,
                 settings,
                 paths,
                 service_info,
-                engine,
+                transfers,
                 db_tx,
                 saved_downloads: bootstrap.saved_downloads,
                 _db_worker: bootstrap.worker,
@@ -151,7 +148,7 @@ struct OpheliaServiceRuntime {
     settings: ServiceSettings,
     paths: ProfilePaths,
     service_info: OpheliaServiceInfo,
-    engine: DownloadEngine,
+    transfers: TransferRuntime,
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     saved_downloads: Vec<crate::engine::SavedDownload>,
     _db_worker: state::DbWorkerHandle,
@@ -190,21 +187,20 @@ impl OpheliaServiceRuntime {
 
         self.flush_coalesced_events();
         self.log_coalescer_stats();
-        if let Err(error) = self.engine.shutdown().await {
-            tracing::warn!("download engine shutdown failed: {error}");
-        }
+        self.transfers.shutdown();
     }
 
     async fn restore_saved_downloads(&mut self) {
         for saved in std::mem::take(&mut self.saved_downloads) {
             let restored = RestoredDownload::from_saved(&saved, &self.config);
-            let (result, events) = self.engine.restore_collecting_events(restored).await;
-            self.apply_engine_events(events);
+            let (result, events) = self.transfers.restore(restored).await;
+            self.apply_transfer_events(events);
             self.flush_coalesced_events();
             if let Err(error) = result {
                 tracing::warn!(id = saved.id.0, "restore failed: {error}");
             }
-            self.drain_engine_events();
+            self.drain_transfer_updates(TASK_UPDATE_DRAIN_AFTER_COMMAND)
+                .await;
         }
     }
 
@@ -218,18 +214,18 @@ impl OpheliaServiceRuntime {
                 let Some(request) = request else {
                     return true;
                 };
-                self.drain_engine_events();
+                self.drain_transfer_updates(TASK_UPDATE_DRAIN_AFTER_COMMAND).await;
                 self.flush_coalesced_events();
                 if self.handle_request(request).await {
                     return true;
                 }
-                self.drain_engine_events();
+                self.drain_transfer_updates(TASK_UPDATE_DRAIN_AFTER_COMMAND).await;
             }
-            event = self.engine.next_event() => {
-                let Some(event) = event else {
+            events = self.transfers.next_update() => {
+                let Some(events) = events else {
                     return true;
                 };
-                self.apply_engine_event(event);
+                self.apply_transfer_events(events);
             }
             _ = hot_event_flush.tick() => {
                 self.flush_coalesced_events();
@@ -267,32 +263,32 @@ impl OpheliaServiceRuntime {
         match command {
             OpheliaCommand::Add { request } => {
                 let spec = request.into_spec(&self.config)?;
-                let (result, events) = self.engine.add_collecting_events(spec).await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.add(spec).await;
+                self.apply_transfer_events(events);
                 let id = result?;
                 Ok(OpheliaResponse::TransferAdded { id })
             }
             OpheliaCommand::Pause { id } => {
-                let (result, events) = self.engine.pause_collecting_events(id).await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.pause(id).await;
+                self.apply_transfer_events(events);
                 result?;
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::Resume { id } => {
-                let (result, events) = self.engine.resume_collecting_events(id).await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.resume(id).await;
+                self.apply_transfer_events(events);
                 result?;
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::Cancel { id } => {
-                let (result, events) = self.engine.cancel_collecting_events(id).await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.cancel(id).await;
+                self.apply_transfer_events(events);
                 result?;
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::DeleteArtifact { id } => {
-                let (result, events) = self.engine.delete_artifact_collecting_events(id).await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.delete_artifact(id).await;
+                self.apply_transfer_events(events);
                 match result {
                     Ok(()) => {}
                     Err(EngineError::NotFound { id }) => {
@@ -305,11 +301,8 @@ impl OpheliaServiceRuntime {
             OpheliaCommand::UpdateSettings { settings } => {
                 settings.save(&self.paths)?;
                 let config = settings.to_engine_config(&self.paths);
-                let (result, events) = self
-                    .engine
-                    .update_config_collecting_events(config.clone())
-                    .await;
-                self.apply_engine_events(events);
+                let (result, events) = self.transfers.update_config(config.clone()).await;
+                self.apply_transfer_events(events);
                 result?;
                 self.config = config;
                 self.settings = settings.clone();
@@ -334,25 +327,24 @@ impl OpheliaServiceRuntime {
         }
     }
 
-    fn drain_engine_events(&mut self) {
-        while let Some(event) = self.engine.try_next_event() {
-            self.apply_engine_event(event);
-        }
+    async fn drain_transfer_updates(&mut self, limit: usize) {
+        let events = self.transfers.drain_updates(limit).await;
+        self.apply_transfer_events(events);
     }
 
-    fn apply_engine_events(&mut self, events: Vec<EngineEvent>) {
+    fn apply_transfer_events(&mut self, events: Vec<TransferRuntimeEvent>) {
         for event in events {
-            self.apply_engine_event(event);
+            self.apply_transfer_event(event);
         }
     }
 
-    fn apply_engine_event(&mut self, event: EngineEvent) {
+    fn apply_transfer_event(&mut self, event: TransferRuntimeEvent) {
         if should_flush_before_immediate(&event) {
             self.flush_coalesced_events();
         }
         if let Some(event) = self
             .read_model
-            .apply_engine_event(event, &mut self.coalescer)
+            .apply_transfer_event(event, &mut self.coalescer)
         {
             let _ = self.event_tx.send(event);
         }
@@ -448,10 +440,10 @@ fn history_join_error(error: tokio::task::JoinError) -> OpheliaError {
     }
 }
 
-pub(super) fn should_flush_before_immediate(event: &EngineEvent) -> bool {
+pub(super) fn should_flush_before_immediate(event: &TransferRuntimeEvent) -> bool {
     match event {
-        EngineEvent::Progress(update) => update.status != TransferStatus::Downloading,
-        EngineEvent::LiveTransferRemoved { .. } => true,
+        TransferRuntimeEvent::Progress(update) => update.status != TransferStatus::Downloading,
+        TransferRuntimeEvent::TransferRemoved { .. } => true,
         _ => false,
     }
 }

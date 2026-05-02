@@ -1,44 +1,14 @@
-/***************************************************
-** This file is part of Ophelia.
-** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
-** Released under the GPL License, version 3 or later.
-**
-** If you found a weird little bug in here, tell the cat:
-** viktor@hystericca.dev
-**
-**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
-** ( bugs behave plz, we're all trying our best )
-**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
-**   ○
-**     ○
-**       ／l、
-**     （ﾟ､ ｡ ７
-**       l  ~ヽ
-**       じしf_,)ノ
-**************************************************/
-
-//! Download engine controller
+//! Service-owned transfer runtime
 //!
-//! Sits between frontends and download tasks
-//! Commands come in through a bounded channel
-//! Frontends read one ordered event stream from the controller
-//!
-//! Queue flow:
-//!   Add    → if tasks < max_concurrent, spawn immediately; else push to queue
-//!   Done   → the task sends `TaskRuntimeUpdate::Done` after its last update
-//!   Pause  → cancel the task's CancellationToken and let the controller keep draining task updates
-//!            If the task reports paused with resume data, store it in `paused`
-//!            If it is still queued, move it directly to `paused`
-//!   Resume → if at capacity, push to front of queue; else spawn immediately
-//!   Cancel → abort the handle, drain from queue, then advance queue manually
+//! Owns active, queued, and paused transfers for one OpheliaService
+//! HTTP still does the protocol work; this module owns when transfers start and stop
 
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -49,54 +19,12 @@ use crate::engine::provider::{
     self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskPauseSink,
 };
 use crate::engine::{
-    ArtifactState, DbEvent, DownloadSpec, EngineError, EngineEvent, LiveTransferRemovalAction,
-    ProgressUpdate, ProviderResumeData, RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState,
+    ArtifactState, DbEvent, DownloadSpec, EngineError, LiveTransferRemovalAction, ProgressUpdate,
+    ProviderResumeData, RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState,
     TransferControlAction, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
 };
 
-const ENGINE_COMMAND_CAPACITY: usize = 64;
-const ENGINE_EVENT_CAPACITY: usize = 512;
 const TASK_RUNTIME_UPDATE_CAPACITY: usize = 256;
-
-type CommandReply<T> = oneshot::Sender<Result<T, EngineError>>;
-
-#[allow(dead_code)]
-enum EngineCommand {
-    Add {
-        id: TransferId,
-        spec: DownloadSpec,
-        reply: CommandReply<TransferId>,
-    },
-    Pause {
-        id: TransferId,
-        reply: CommandReply<()>,
-    },
-    Resume {
-        id: TransferId,
-        reply: CommandReply<()>,
-    },
-    Cancel {
-        id: TransferId,
-        reply: CommandReply<()>,
-    },
-    DeleteArtifact {
-        id: TransferId,
-        reply: CommandReply<()>,
-    },
-    Restore {
-        download: RestoredDownload,
-        reply: CommandReply<()>,
-    },
-    UpdateConfig {
-        config: EngineConfig,
-        reply: CommandReply<()>,
-    },
-    Shutdown {
-        reply: Option<CommandReply<()>>,
-    },
-}
-
-// --- per-task bookkeeping ------------------------------------------------
 
 /// Everything needed to pause or cancel an active task
 struct TaskEntry {
@@ -110,7 +38,7 @@ struct TaskEntry {
     destination_sink: TaskDestinationSink,
     /// May narrow after the task starts
     control_support: TransferControlSupport,
-    /// Pause finishes through TaskRuntimeUpdate::Done so the controller can keep draining channels
+    /// Pause finishes through TaskRuntimeUpdate::Done so the service keeps draining task updates
     pause_requested: bool,
     /// Kept for resume
     spec: DownloadSpec,
@@ -130,277 +58,48 @@ struct QueuedTask {
     resume_data: Option<ProviderResumeData>,
 }
 
-// --- public engine handle ------------------------------------------------
-
-pub struct DownloadEngine {
-    controller: Option<JoinHandle<()>>,
-    cmd_tx: mpsc::Sender<EngineCommand>,
-    event_rx: mpsc::Receiver<EngineEvent>,
-    next_id: u64,
+#[derive(Debug, Clone)]
+pub(super) enum TransferRuntimeEvent {
+    TransferAdded {
+        snapshot: TransferSummary,
+    },
+    TransferRestored {
+        snapshot: TransferSummary,
+    },
+    Progress(ProgressUpdate),
+    TransferBytesWritten {
+        id: TransferId,
+        bytes: u64,
+    },
+    DestinationChanged {
+        id: TransferId,
+        destination: PathBuf,
+    },
+    ControlSupportChanged {
+        id: TransferId,
+        support: TransferControlSupport,
+    },
+    ChunkMapChanged {
+        id: TransferId,
+        state: TransferChunkMapState,
+    },
+    TransferRemoved {
+        id: TransferId,
+        action: LiveTransferRemovalAction,
+        artifact_state: ArtifactState,
+    },
+    ControlUnsupported {
+        id: TransferId,
+        action: TransferControlAction,
+    },
 }
 
-impl DownloadEngine {
-    pub fn spawn_on(
-        runtime: &Handle,
-        config: EngineConfig,
-        db_tx: std::sync::mpsc::Sender<DbEvent>,
-        initial_next_id: u64,
-    ) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::channel(ENGINE_COMMAND_CAPACITY);
-        let (event_tx, event_rx) = mpsc::channel(ENGINE_EVENT_CAPACITY);
-        let (runtime_update_tx, runtime_update_rx) =
-            mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
-
-        let controller = runtime.spawn(
-            EngineController::new(event_tx, config, db_tx, runtime_update_tx)
-                .run(cmd_rx, runtime_update_rx),
-        );
-
-        Self {
-            controller: Some(controller),
-            cmd_tx,
-            event_rx,
-            next_id: initial_next_id,
-        }
-    }
-
-    /// Add a saved download to the paused map
-    /// The user must resume it explicitly
-    pub async fn restore(&self, download: RestoredDownload) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::Restore { download, reply })
-            .await
-    }
-
-    pub(crate) async fn restore_collecting_events(
-        &mut self,
-        download: RestoredDownload,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::Restore { download, reply })
-            .await
-    }
-
-    pub async fn add(&mut self, spec: DownloadSpec) -> Result<TransferId, EngineError> {
-        let id = TransferId(self.next_id);
-        self.next_id += 1;
-        let result = self
-            .command_reply(|reply| EngineCommand::Add { id, spec, reply })
-            .await;
-        if result.is_err() {
-            self.next_id -= 1;
-        }
-        result
-    }
-
-    pub(crate) async fn add_collecting_events(
-        &mut self,
-        spec: DownloadSpec,
-    ) -> (Result<TransferId, EngineError>, Vec<EngineEvent>) {
-        let id = TransferId(self.next_id);
-        self.next_id += 1;
-        let (result, events) = self
-            .command_reply_collecting_events(|reply| EngineCommand::Add { id, spec, reply })
-            .await;
-        if result.is_err() {
-            self.next_id -= 1;
-        }
-        (result, events)
-    }
-
-    /// Returns when the controller accepts the pause request
-    /// The paused state arrives later through EngineEvent::Progress
-    pub async fn pause(&self, id: TransferId) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::Pause { id, reply })
-            .await
-    }
-
-    pub(crate) async fn pause_collecting_events(
-        &mut self,
-        id: TransferId,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::Pause { id, reply })
-            .await
-    }
-
-    pub async fn resume(&self, id: TransferId) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::Resume { id, reply })
-            .await
-    }
-
-    pub(crate) async fn resume_collecting_events(
-        &mut self,
-        id: TransferId,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::Resume { id, reply })
-            .await
-    }
-
-    #[allow(dead_code)] // kept as an explicit backend control even though the current UI deletes artifacts instead.
-    pub async fn cancel(&self, id: TransferId) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::Cancel { id, reply })
-            .await
-    }
-
-    pub(crate) async fn cancel_collecting_events(
-        &mut self,
-        id: TransferId,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::Cancel { id, reply })
-            .await
-    }
-
-    pub async fn delete_artifact(&self, id: TransferId) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::DeleteArtifact { id, reply })
-            .await
-    }
-
-    pub(crate) async fn delete_artifact_collecting_events(
-        &mut self,
-        id: TransferId,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::DeleteArtifact { id, reply })
-            .await
-    }
-
-    pub async fn update_config(&self, config: EngineConfig) -> Result<(), EngineError> {
-        self.command_reply(|reply| EngineCommand::UpdateConfig { config, reply })
-            .await
-    }
-
-    pub(crate) async fn update_config_collecting_events(
-        &mut self,
-        config: EngineConfig,
-    ) -> (Result<(), EngineError>, Vec<EngineEvent>) {
-        self.command_reply_collecting_events(|reply| EngineCommand::UpdateConfig { config, reply })
-            .await
-    }
-
-    pub async fn next_event(&mut self) -> Option<EngineEvent> {
-        self.event_rx.recv().await
-    }
-
-    pub fn try_next_event(&mut self) -> Option<EngineEvent> {
-        self.event_rx.try_recv().ok()
-    }
-
-    pub async fn shutdown(mut self) -> Result<(), EngineError> {
-        let send_result = self
-            .command_reply(|reply| EngineCommand::Shutdown { reply: Some(reply) })
-            .await;
-        if let Some(controller) = self.controller.take() {
-            let _ = controller.await;
-        }
-        send_result
-    }
-
-    async fn command_reply<T>(
-        &self,
-        make_command: impl FnOnce(CommandReply<T>) -> EngineCommand,
-    ) -> Result<T, EngineError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(make_command(reply_tx))
-            .await
-            .map_err(|_| EngineError::Closed)?;
-        reply_rx.await.map_err(|_| EngineError::Closed)?
-    }
-
-    async fn command_reply_collecting_events<T>(
-        &mut self,
-        make_command: impl FnOnce(CommandReply<T>) -> EngineCommand,
-    ) -> (Result<T, EngineError>, Vec<EngineEvent>) {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let command = make_command(reply_tx);
-
-        let mut events = Vec::new();
-        let mut events_open = true;
-
-        if let Err(error) = self
-            .send_command_while_draining_events(command, &mut events, &mut events_open)
-            .await
-        {
-            return (Err(error), events);
-        }
-
-        let result = self
-            .wait_for_reply_while_draining_events(reply_rx, &mut events, &mut events_open)
-            .await;
-        (result, events)
-    }
-
-    async fn send_command_while_draining_events(
-        &mut self,
-        command: EngineCommand,
-        events: &mut Vec<EngineEvent>,
-        events_open: &mut bool,
-    ) -> Result<(), EngineError> {
-        let cmd_tx = self.cmd_tx.clone();
-        let send = cmd_tx.send(command);
-        tokio::pin!(send);
-
-        loop {
-            tokio::select! {
-                result = &mut send => {
-                    return result.map_err(|_| EngineError::Closed);
-                }
-                event = self.event_rx.recv(), if *events_open => {
-                    remember_engine_event(event, events, events_open);
-                }
-            }
-        }
-    }
-
-    async fn wait_for_reply_while_draining_events<T>(
-        &mut self,
-        reply_rx: oneshot::Receiver<Result<T, EngineError>>,
-        events: &mut Vec<EngineEvent>,
-        events_open: &mut bool,
-    ) -> Result<T, EngineError> {
-        tokio::pin!(reply_rx);
-        loop {
-            tokio::select! {
-                reply = &mut reply_rx => {
-                    return reply
-                        .map_err(|_| EngineError::Closed)
-                        .and_then(|result| result);
-                }
-                event = self.event_rx.recv(), if *events_open => {
-                    remember_engine_event(event, events, events_open);
-                }
-            }
-        }
-    }
-}
-
-fn remember_engine_event(
-    event: Option<EngineEvent>,
-    events: &mut Vec<EngineEvent>,
-    events_open: &mut bool,
-) {
-    match event {
-        Some(event) => events.push(event),
-        None => *events_open = false,
-    }
-}
-
-impl Drop for DownloadEngine {
-    fn drop(&mut self) {
-        let _ = self
-            .cmd_tx
-            .try_send(EngineCommand::Shutdown { reply: None });
-    }
-}
-
-// --- controller ---------------------------------------------------------------
-
-/// Owns engine state and handles commands on the tokio runtime
-/// New engine-wide state goes here as fields
-/// New source kinds add new spec variants and spawn paths
-struct EngineController {
+pub(super) struct TransferRuntime {
     tasks: HashMap<TransferId, TaskEntry>,
     paused: HashMap<TransferId, PausedTask>,
     queue: VecDeque<QueuedTask>,
     max_concurrent: usize,
-    event_tx: mpsc::Sender<EngineEvent>,
+    next_id: u64,
     config: EngineConfig,
     /// Shared semaphores for source-wide limits
     /// HTTP uses this for per-host limits
@@ -409,15 +108,18 @@ struct EngineController {
     /// Global speed cap shared across active downloads
     global_throttle: Arc<TokenBucket>,
     runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_rx: mpsc::Receiver<TaskRuntimeUpdate>,
+    events: Vec<TransferRuntimeEvent>,
 }
 
-impl EngineController {
-    fn new(
-        event_tx: mpsc::Sender<EngineEvent>,
+impl TransferRuntime {
+    pub(super) fn new(
         config: EngineConfig,
         db_tx: std::sync::mpsc::Sender<DbEvent>,
-        runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+        initial_next_id: u64,
     ) -> Self {
+        let (runtime_update_tx, runtime_update_rx) =
+            mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
         let max_concurrent = config.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(config.global_speed_limit_bps));
         Self {
@@ -425,12 +127,14 @@ impl EngineController {
             paused: HashMap::new(),
             queue: VecDeque::new(),
             max_concurrent,
-            event_tx,
+            next_id: initial_next_id,
             config,
             shared_schedulers: HashMap::new(),
             db_tx,
             global_throttle,
             runtime_update_tx,
+            runtime_update_rx,
+            events: Vec::new(),
         }
     }
 
@@ -444,55 +148,89 @@ impl EngineController {
         )
     }
 
-    async fn run(
-        mut self,
-        mut cmd_rx: mpsc::Receiver<EngineCommand>,
-        mut runtime_update_rx: mpsc::Receiver<TaskRuntimeUpdate>,
-    ) {
-        loop {
-            tokio::select! {
-                biased;
-                cmd = cmd_rx.recv() => {
-                    let Some(cmd) = cmd else {
-                        self.handle_shutdown();
-                        break;
-                    };
-                    match cmd {
-                        EngineCommand::Add { id, spec, reply } => {
-                            let _ = reply.send(self.handle_add(id, spec).await);
-                        }
-                        EngineCommand::Pause { id, reply } => {
-                            let _ = reply.send(self.handle_pause(id).await);
-                        }
-                        EngineCommand::Resume { id, reply } => {
-                            let _ = reply.send(self.handle_resume(id).await);
-                        }
-                        EngineCommand::Cancel { id, reply } => {
-                            let _ = reply.send(self.handle_cancel(id).await);
-                        }
-                        EngineCommand::DeleteArtifact { id, reply } => {
-                            let _ = reply.send(self.handle_delete_artifact(id).await);
-                        }
-                        EngineCommand::Restore { download, reply } => {
-                            let _ = reply.send(self.handle_restore(download).await);
-                        }
-                        EngineCommand::UpdateConfig { config, reply } => {
-                            let _ = reply.send(self.handle_update_config(config).await);
-                        }
-                        EngineCommand::Shutdown { reply } => {
-                            self.handle_shutdown();
-                            if let Some(reply) = reply {
-                                let _ = reply.send(Ok(()));
-                            }
-                            break;
-                        }
-                    }
-                }
-                Some(update) = runtime_update_rx.recv() => {
-                    self.handle_runtime_update(update).await;
-                }
-            }
+    pub(super) async fn restore(
+        &mut self,
+        download: RestoredDownload,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_restore(download).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn add(
+        &mut self,
+        spec: DownloadSpec,
+    ) -> (Result<TransferId, EngineError>, Vec<TransferRuntimeEvent>) {
+        let id = TransferId(self.next_id);
+        self.next_id += 1;
+        let result = self.handle_add(id, spec).await;
+        if result.is_err() {
+            self.next_id -= 1;
         }
+        (result, self.take_events())
+    }
+
+    pub(super) async fn pause(
+        &mut self,
+        id: TransferId,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_pause(id).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn resume(
+        &mut self,
+        id: TransferId,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_resume(id).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn cancel(
+        &mut self,
+        id: TransferId,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_cancel(id).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn delete_artifact(
+        &mut self,
+        id: TransferId,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_delete_artifact(id).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn update_config(
+        &mut self,
+        config: EngineConfig,
+    ) -> (Result<(), EngineError>, Vec<TransferRuntimeEvent>) {
+        let result = self.handle_update_config(config).await;
+        (result, self.take_events())
+    }
+
+    pub(super) async fn next_update(&mut self) -> Option<Vec<TransferRuntimeEvent>> {
+        let update = self.runtime_update_rx.recv().await?;
+        self.handle_runtime_update(update).await;
+        Some(self.take_events())
+    }
+
+    pub(super) async fn drain_updates(&mut self, limit: usize) -> Vec<TransferRuntimeEvent> {
+        for _ in 0..limit {
+            let Ok(update) = self.runtime_update_rx.try_recv() else {
+                break;
+            };
+            self.handle_runtime_update(update).await;
+        }
+        self.take_events()
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        self.handle_shutdown();
+    }
+
+    fn take_events(&mut self) -> Vec<TransferRuntimeEvent> {
+        std::mem::take(&mut self.events)
     }
 
     async fn spawn_task(
@@ -531,7 +269,7 @@ impl EngineController {
                 spec,
             },
         );
-        self.emit(EngineEvent::ChunkMapChanged {
+        self.emit(TransferRuntimeEvent::ChunkMapChanged {
             id,
             state: chunk_map_state,
         })
@@ -560,7 +298,7 @@ impl EngineController {
         spec: DownloadSpec,
     ) -> Result<TransferId, EngineError> {
         let _ = self.db_tx.send(self.added_event(id, &spec));
-        self.emit(EngineEvent::TransferAdded {
+        self.emit(TransferRuntimeEvent::TransferAdded {
             snapshot: self.transfer_snapshot(
                 id,
                 &spec,
@@ -619,7 +357,7 @@ impl EngineController {
                 downloaded_bytes: 0,
                 resume_data: None,
             });
-            self.emit(EngineEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Unsupported,
             })
@@ -652,7 +390,7 @@ impl EngineController {
         }
 
         let (downloaded_bytes, total_bytes) = snapshot_totals(download.resume_data.as_ref());
-        self.emit(EngineEvent::TransferRestored {
+        self.emit(TransferRuntimeEvent::TransferRestored {
             snapshot: self.transfer_snapshot(
                 download.id,
                 &download.spec,
@@ -758,12 +496,12 @@ impl EngineController {
             let _ = self
                 .db_tx
                 .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-            self.emit(EngineEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Unsupported,
             })
             .await;
-            self.emit(EngineEvent::LiveTransferRemoved {
+            self.emit(TransferRuntimeEvent::TransferRemoved {
                 id,
                 action: LiveTransferRemovalAction::Cancelled,
                 artifact_state,
@@ -797,12 +535,12 @@ impl EngineController {
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-        self.emit(EngineEvent::ChunkMapChanged {
+        self.emit(TransferRuntimeEvent::ChunkMapChanged {
             id,
             state: TransferChunkMapState::Unsupported,
         })
         .await;
-        self.emit(EngineEvent::LiveTransferRemoved {
+        self.emit(TransferRuntimeEvent::TransferRemoved {
             id,
             action: LiveTransferRemovalAction::DeleteArtifact,
             artifact_state,
@@ -816,7 +554,7 @@ impl EngineController {
             active = self.tasks.len(),
             paused = self.paused.len(),
             queued = self.queue.len(),
-            "engine shutting down, aborting active tasks"
+            "transfer runtime shutting down, aborting active tasks"
         );
         for (_, entry) in self.tasks.drain() {
             entry.handle.abort();
@@ -845,7 +583,7 @@ impl EngineController {
 
         match status {
             TransferStatus::Finished => {
-                self.emit(EngineEvent::ChunkMapChanged {
+                self.emit(TransferRuntimeEvent::ChunkMapChanged {
                     id,
                     state: TransferChunkMapState::Unsupported,
                 })
@@ -857,7 +595,7 @@ impl EngineController {
                 self.try_start_next().await;
             }
             TransferStatus::Error => {
-                self.emit(EngineEvent::ChunkMapChanged {
+                self.emit(TransferRuntimeEvent::ChunkMapChanged {
                     id,
                     state: TransferChunkMapState::Unsupported,
                 })
@@ -902,7 +640,7 @@ impl EngineController {
                         TransferStatus::Finished | TransferStatus::Paused | TransferStatus::Error
                     )
                 {
-                    self.emit(EngineEvent::Progress(update)).await;
+                    self.emit(TransferRuntimeEvent::Progress(update)).await;
                 }
             }
             TaskRuntimeUpdate::Done {
@@ -918,7 +656,7 @@ impl EngineController {
                 if !self.tasks.contains_key(&id) {
                     return;
                 }
-                self.emit(EngineEvent::TransferBytesWritten { id, bytes })
+                self.emit(TransferRuntimeEvent::TransferBytesWritten { id, bytes })
                     .await;
             }
             TaskRuntimeUpdate::DestinationChanged { id, destination } => {
@@ -933,7 +671,7 @@ impl EngineController {
                     id,
                     destination: destination.clone(),
                 });
-                self.emit(EngineEvent::DestinationChanged { id, destination })
+                self.emit(TransferRuntimeEvent::DestinationChanged { id, destination })
                     .await;
             }
             TaskRuntimeUpdate::ControlSupportChanged { id, support } => {
@@ -944,14 +682,15 @@ impl EngineController {
                     return;
                 }
                 entry.control_support = support;
-                self.emit(EngineEvent::ControlSupportChanged { id, support })
+                self.emit(TransferRuntimeEvent::ControlSupportChanged { id, support })
                     .await;
             }
             TaskRuntimeUpdate::ChunkMapChanged { id, state } => {
                 if !self.tasks.contains_key(&id) {
                     return;
                 }
-                self.emit(EngineEvent::ChunkMapChanged { id, state }).await;
+                self.emit(TransferRuntimeEvent::ChunkMapChanged { id, state })
+                    .await;
             }
         }
     }
@@ -997,8 +736,8 @@ impl EngineController {
         status: TransferStatus,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
-    ) -> EngineEvent {
-        EngineEvent::Progress(ProgressUpdate {
+    ) -> TransferRuntimeEvent {
+        TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status,
             downloaded_bytes,
@@ -1032,10 +771,7 @@ impl EngineController {
 
     async fn finish_active_pause(&mut self, id: TransferId, entry: TaskEntry) {
         if !entry.pause_requested {
-            tracing::warn!(
-                id = id.0,
-                "download paused without a controller pause request"
-            );
+            tracing::warn!(id = id.0, "download paused without a service pause request");
         }
         let resume_data = provider::take_resume_data(entry.pause_sink);
         if let Some(resume_data) = resume_data {
@@ -1046,7 +782,7 @@ impl EngineController {
                 downloaded_bytes,
                 resume_data: Some(resume_data.clone()),
             });
-            self.emit(EngineEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Unsupported,
             })
@@ -1063,7 +799,7 @@ impl EngineController {
         } else {
             tracing::warn!(id = id.0, "download reported paused without resume data");
             let _ = self.db_tx.send(DbEvent::Error { id });
-            self.emit(EngineEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::ChunkMapChanged {
                 id,
                 state: TransferChunkMapState::Unsupported,
             })
@@ -1073,14 +809,13 @@ impl EngineController {
         }
     }
 
-    async fn notify_unsupported_control(&self, id: TransferId, action: TransferControlAction) {
-        self.emit(EngineEvent::ControlUnsupported { id, action })
+    async fn notify_unsupported_control(&mut self, id: TransferId, action: TransferControlAction) {
+        self.emit(TransferRuntimeEvent::ControlUnsupported { id, action })
             .await;
     }
 
-    async fn emit(&self, event: EngineEvent) {
-        // TODO: split lossless events from coalesced UI updates if this send wait shows up in benchmarks
-        let _ = self.event_tx.send(event).await;
+    async fn emit(&mut self, event: TransferRuntimeEvent) {
+        self.events.push(event);
     }
 
     fn pause_target(&self, id: TransferId) -> Option<(bool, &DownloadSpec)> {
@@ -1143,7 +878,7 @@ impl EngineController {
     }
 
     async fn sync_runtime_destination(
-        &self,
+        &mut self,
         id: TransferId,
         spec: &mut DownloadSpec,
         destination_sink: &TaskDestinationSink,
@@ -1159,7 +894,7 @@ impl EngineController {
             id,
             destination: destination.clone(),
         });
-        self.emit(EngineEvent::DestinationChanged { id, destination })
+        self.emit(TransferRuntimeEvent::DestinationChanged { id, destination })
             .await;
     }
 }
@@ -1221,64 +956,5 @@ pub(crate) fn delete_artifact_files(destination: &Path) -> ArtifactState {
         ArtifactState::Deleted
     } else {
         ArtifactState::Missing
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use tokio::time::timeout;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn command_reply_drains_events_while_waiting() {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
-        let (event_tx, event_rx) = mpsc::channel(1);
-        event_tx
-            .send(EngineEvent::TransferBytesWritten {
-                id: TransferId(1),
-                bytes: 10,
-            })
-            .await
-            .unwrap();
-
-        let controller = tokio::spawn(async move {
-            let command = cmd_rx.recv().await.expect("command should arrive");
-            event_tx
-                .send(EngineEvent::TransferBytesWritten {
-                    id: TransferId(1),
-                    bytes: 20,
-                })
-                .await
-                .unwrap();
-
-            match command {
-                EngineCommand::Pause { reply, .. } => {
-                    let _ = reply.send(Ok(()));
-                }
-                _ => panic!("unexpected command"),
-            }
-        });
-
-        let mut engine = DownloadEngine {
-            controller: Some(controller),
-            cmd_tx,
-            event_rx,
-            next_id: 1,
-        };
-
-        let (result, events) = timeout(
-            Duration::from_secs(1),
-            engine.pause_collecting_events(TransferId(1)),
-        )
-        .await
-        .expect("command should not deadlock");
-
-        assert!(result.is_ok());
-        let remaining_events = usize::from(engine.try_next_event().is_some());
-        assert_eq!(events.len() + remaining_events, 2);
-        let _ = engine.controller.take().unwrap().await;
     }
 }
