@@ -21,7 +21,7 @@ use gpui::{App, RenderOnce, SharedString, Window, div, prelude::*, px};
 use rust_i18n::t;
 
 use crate::app::{Downloads, TransferListRow};
-use crate::engine::{ChunkMapCellState, TransferChunkMapState, TransferId};
+use crate::engine::{ChunkMapCellState, DirectChunkMapState, TransferId};
 use crate::format::{DataQuantity, data};
 use crate::ui::prelude::*;
 
@@ -75,17 +75,17 @@ impl ChunkMapCardModel {
         let filename = Some(row.filename.clone());
 
         match state {
-            TransferChunkMapState::Unsupported => Self {
+            DirectChunkMapState::Unsupported => Self {
                 filename,
                 total_size_label: None,
                 state: ChunkMapCardState::Unsupported,
             },
-            TransferChunkMapState::Loading => Self {
+            DirectChunkMapState::Loading => Self {
                 filename,
                 total_size_label: None,
                 state: ChunkMapCardState::Loading,
             },
-            TransferChunkMapState::Http(snapshot) => Self {
+            DirectChunkMapState::Segments(snapshot) => Self {
                 filename,
                 total_size_label: Some(
                     data(DataQuantity::Bytes(snapshot.total_bytes))
@@ -101,8 +101,8 @@ impl ChunkMapCardModel {
 fn preferred_chunk_map_row(
     rows: &[TransferListRow],
     selected_id: Option<TransferId>,
-    mut state_for_id: impl FnMut(TransferId) -> TransferChunkMapState,
-) -> Option<(&TransferListRow, TransferChunkMapState)> {
+    mut state_for_id: impl FnMut(TransferId) -> DirectChunkMapState,
+) -> Option<(&TransferListRow, DirectChunkMapState)> {
     if let Some(selected_id) = selected_id
         && let Some(row) = rows.iter().find(|row| row.id == selected_id)
     {
@@ -112,7 +112,7 @@ fn preferred_chunk_map_row(
     rows.iter()
         .find_map(|row| {
             let state = state_for_id(row.id);
-            (!matches!(state, TransferChunkMapState::Unsupported)).then_some((row, state))
+            (!matches!(state, DirectChunkMapState::Unsupported)).then_some((row, state))
         })
         .or_else(|| rows.first().map(|row| (row, state_for_id(row.id))))
 }
@@ -304,15 +304,15 @@ mod tests {
         let rows = vec![test_row(TransferId(1)), test_row(TransferId(2))];
 
         let chosen = preferred_chunk_map_row(&rows, Some(TransferId(1)), |id| match id.0 {
-            1 => TransferChunkMapState::Unsupported,
-            2 => TransferChunkMapState::Loading,
-            _ => TransferChunkMapState::Unsupported,
+            1 => DirectChunkMapState::Unsupported,
+            2 => DirectChunkMapState::Loading,
+            _ => DirectChunkMapState::Unsupported,
         })
         .map(|(row, state)| (row.id, state));
 
         assert_eq!(
             chosen,
-            Some((TransferId(1), TransferChunkMapState::Unsupported))
+            Some((TransferId(1), DirectChunkMapState::Unsupported))
         );
     }
 
@@ -321,16 +321,13 @@ mod tests {
         let rows = vec![test_row(TransferId(1)), test_row(TransferId(2))];
 
         let chosen = preferred_chunk_map_row(&rows, None, |id| match id.0 {
-            1 => TransferChunkMapState::Unsupported,
-            2 => TransferChunkMapState::Loading,
-            _ => TransferChunkMapState::Unsupported,
+            1 => DirectChunkMapState::Unsupported,
+            2 => DirectChunkMapState::Loading,
+            _ => DirectChunkMapState::Unsupported,
         })
         .map(|(row, state)| (row.id, state));
 
-        assert_eq!(
-            chosen,
-            Some((TransferId(2), TransferChunkMapState::Loading))
-        );
+        assert_eq!(chosen, Some((TransferId(2), DirectChunkMapState::Loading)));
     }
 
     fn test_row(id: TransferId) -> TransferListRow {

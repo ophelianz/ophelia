@@ -33,7 +33,7 @@ use crate::disk::{
     DiskWriter,
 };
 use crate::engine::http::throttle::Throttle;
-use crate::engine::types::{ProgressUpdate, TaskRuntimeUpdate, TransferId, TransferStatus};
+use crate::engine::types::{ProgressUpdate, RunnerEvent, TransferId, TransferStatus};
 
 use super::task::TaskFinalState;
 
@@ -58,13 +58,13 @@ pub(super) struct SingleTransferRequest {
     pub(super) url: String,
     pub(super) disk: DiskLease,
     pub(super) stall_timeout_secs: u64,
-    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    pub(super) runtime_update_tx: mpsc::Sender<RunnerEvent>,
     pub(super) pause_token: CancellationToken,
     pub(super) throttle: Arc<Throttle>,
 }
 
 async fn send_progress(
-    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: &mpsc::Sender<RunnerEvent>,
     id: TransferId,
     status: TransferStatus,
     downloaded_bytes: u64,
@@ -72,7 +72,7 @@ async fn send_progress(
     speed_bytes_per_sec: u64,
 ) {
     let _ = runtime_update_tx
-        .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+        .send(RunnerEvent::Progress(ProgressUpdate {
             id,
             status,
             downloaded_bytes,
@@ -200,7 +200,7 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
             Ok(DiskWriteResult::Written { range, .. }) => {
                 disk.confirm_logical(range.len());
                 let _ = runtime_update_tx
-                    .send(TaskRuntimeUpdate::TransferBytesWritten {
+                    .send(RunnerEvent::TransferBytesWritten {
                         id,
                         bytes: range.len(),
                     })
@@ -317,7 +317,7 @@ pub async fn single_download(request: SingleTransferRequest) -> TaskFinalState {
 }
 
 async fn fail_after_writer(
-    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: &mpsc::Sender<RunnerEvent>,
     id: TransferId,
     downloaded: u64,
     disk: DiskSessionLease,

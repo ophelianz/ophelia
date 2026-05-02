@@ -1,13 +1,15 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ophelia::engine::destination::part_path_for;
 use ophelia::engine::{
-    ArtifactState, DbEvent, LiveTransferRemovalAction, PersistedDownloadSource, ProviderResumeData,
-    TransferChunkMapState, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
+    ArtifactState, DbEvent, DirectChunkMapState, LiveTransferRemovalAction,
+    PersistedDownloadSource, RunnerResumeData, TransferControlSupport, TransferId, TransferKind,
+    TransferStatus, TransferSummary,
 };
 use ophelia::service::{
-    OpheliaClient, OpheliaError, OpheliaEvent, OpheliaService, OpheliaSubscription,
+    OpheliaClient, OpheliaError, OpheliaService, OpheliaSubscription, OpheliaUpdateBatch,
     TransferDestination, TransferRequest, TransferRequestSource,
 };
 use ophelia::{ProfilePaths, ServiceSettings};
@@ -84,7 +86,7 @@ fn seed_paused_http_download(
     id: TransferId,
     url: String,
     destination: PathBuf,
-    resume_data: Option<ProviderResumeData>,
+    resume_data: Option<RunnerResumeData>,
 ) {
     let bootstrap = ophelia::engine::state::bootstrap(paths).unwrap();
     bootstrap
@@ -101,7 +103,7 @@ fn seed_paused_http_download(
             id,
             downloaded_bytes: resume_data
                 .as_ref()
-                .map(ProviderResumeData::downloaded_bytes)
+                .map(RunnerResumeData::downloaded_bytes)
                 .unwrap_or(0),
             resume_data,
         })
@@ -110,10 +112,10 @@ fn seed_paused_http_download(
     drop(bootstrap.worker);
 }
 
-async fn wait_for_matching_event(
+async fn wait_for_matching_update(
     subscription: &mut OpheliaSubscription,
-    mut predicate: impl FnMut(&OpheliaEvent) -> bool,
-) -> OpheliaEvent {
+    mut predicate: impl FnMut(&OpheliaUpdateBatch) -> bool,
+) -> OpheliaUpdateBatch {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     let mut seen = Vec::new();
 
@@ -121,27 +123,27 @@ async fn wait_for_matching_event(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             panic!(
-                "timed out waiting for matching service event\nseen events:\n{}",
+                "timed out waiting for matching service update\nseen updates:\n{}",
                 seen.join("\n")
             );
         }
 
-        let event = tokio::time::timeout(remaining, subscription.next_event())
+        let update = tokio::time::timeout(remaining, subscription.next_update())
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "timed out waiting for matching service event: {error:?}\nseen events:\n{}",
+                    "timed out waiting for matching service update: {error:?}\nseen updates:\n{}",
                     seen.join("\n")
                 )
             })
-            .expect("service event channel closed");
-        let event_debug = format!("{event:?}");
+            .expect("service update channel closed");
+        let update_debug = format!("{update:?}");
 
-        if predicate(&event) {
-            return event;
+        if predicate(&update) {
+            return update;
         }
 
-        seen.push(event_debug);
+        seen.push(update_debug);
     }
 }
 
@@ -149,14 +151,114 @@ async fn wait_for_matching_transfer(
     subscription: &mut OpheliaSubscription,
     mut predicate: impl FnMut(&TransferSummary) -> bool,
 ) -> TransferSummary {
-    match wait_for_matching_event(
-        subscription,
-        |event| matches!(event, OpheliaEvent::TransferChanged { snapshot } if predicate(snapshot)),
-    )
-    .await
-    {
-        OpheliaEvent::TransferChanged { snapshot } => snapshot,
-        other => panic!("expected transfer update, got {other:?}"),
+    let mut cache: HashMap<TransferId, TransferSummary> = subscription
+        .snapshot
+        .transfers
+        .summaries()
+        .into_iter()
+        .map(|snapshot| (snapshot.id, snapshot))
+        .collect();
+
+    loop {
+        let update = wait_for_matching_update(subscription, |_| true).await;
+        for snapshot in apply_update_to_transfer_cache(&mut cache, &update) {
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+        }
+    }
+}
+
+async fn wait_for_direct_detail(
+    subscription: &mut OpheliaSubscription,
+    id: TransferId,
+    mut predicate: impl FnMut(&DirectChunkMapState) -> bool,
+) -> DirectChunkMapState {
+    let update = wait_for_matching_update(subscription, |update| {
+        direct_details_contains(&update.direct_details, id)
+            && predicate(&update.direct_details.state_for(id))
+    })
+    .await;
+    update.direct_details.state_for(id)
+}
+
+fn direct_details_contains(table: &ophelia::service::DirectDetailsTable, id: TransferId) -> bool {
+    table.unsupported_ids.contains(&id)
+        || table.loading_ids.contains(&id)
+        || table.segment_ids.contains(&id)
+}
+
+fn apply_update_to_transfer_cache(
+    cache: &mut HashMap<TransferId, TransferSummary>,
+    update: &OpheliaUpdateBatch,
+) -> Vec<TransferSummary> {
+    let mut changed = Vec::new();
+
+    for snapshot in update.lifecycle.transfers.summaries() {
+        cache.insert(snapshot.id, snapshot.clone());
+        changed.push(snapshot);
+    }
+
+    for row in 0..update.progress_known_total.ids.len() {
+        let id = update.progress_known_total.ids[row];
+        let snapshot = cache.entry(id).or_insert_with(|| placeholder_summary(id));
+        snapshot.status = TransferStatus::Downloading;
+        snapshot.downloaded_bytes = update.progress_known_total.downloaded_bytes[row];
+        snapshot.total_bytes = Some(update.progress_known_total.total_bytes[row]);
+        snapshot.speed_bytes_per_sec = update.progress_known_total.speed_bytes_per_sec[row];
+        changed.push(snapshot.clone());
+    }
+
+    for row in 0..update.progress_unknown_total.ids.len() {
+        let id = update.progress_unknown_total.ids[row];
+        let snapshot = cache.entry(id).or_insert_with(|| placeholder_summary(id));
+        snapshot.status = TransferStatus::Downloading;
+        snapshot.downloaded_bytes = update.progress_unknown_total.downloaded_bytes[row];
+        snapshot.total_bytes = None;
+        snapshot.speed_bytes_per_sec = update.progress_unknown_total.speed_bytes_per_sec[row];
+        changed.push(snapshot.clone());
+    }
+
+    for row in 0..update.destination.ids.len() {
+        let id = update.destination.ids[row];
+        let snapshot = cache.entry(id).or_insert_with(|| placeholder_summary(id));
+        snapshot.destination = update.destination.destinations[row].clone();
+        changed.push(snapshot.clone());
+    }
+
+    for row in 0..update.control_support.ids.len() {
+        let id = update.control_support.ids[row];
+        let snapshot = cache.entry(id).or_insert_with(|| placeholder_summary(id));
+        if let Some(support) = update.control_support.support(row) {
+            snapshot.control_support = support;
+        }
+        changed.push(snapshot.clone());
+    }
+
+    for id in &update.removal.ids {
+        cache.remove(id);
+    }
+
+    changed
+}
+
+fn placeholder_summary(id: TransferId) -> TransferSummary {
+    TransferSummary {
+        id,
+        kind: TransferKind::Direct,
+        provider_kind: "http".into(),
+        source_label: String::new(),
+        destination: PathBuf::new(),
+        status: TransferStatus::Pending,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        speed_bytes_per_sec: 0,
+        control_support: TransferControlSupport {
+            can_pause: false,
+            can_resume: false,
+            can_cancel: false,
+            can_restore: false,
+        },
     }
 }
 
@@ -291,25 +393,24 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_events() {
     assert_eq!(pending.total_bytes, None);
 
     harness.client.cancel(id).await.unwrap();
-    match wait_for_matching_event(&mut harness.subscription, |event| {
-        matches!(
-            event,
-            OpheliaEvent::TransferRemoved { id: removed, .. } if *removed == id
-        )
+    let update = wait_for_matching_update(&mut harness.subscription, |update| {
+        update.removal.ids.contains(&id)
     })
-    .await
-    {
-        OpheliaEvent::TransferRemoved {
-            id: removed,
-            action,
-            artifact_state,
-        } => {
-            assert_eq!(removed, id);
-            assert_eq!(action, LiveTransferRemovalAction::Cancelled);
-            assert_eq!(artifact_state, ArtifactState::Missing);
-        }
-        other => panic!("expected cancelled removal event, got {other:?}"),
-    }
+    .await;
+    let row = update
+        .removal
+        .ids
+        .iter()
+        .position(|removed| *removed == id)
+        .unwrap();
+    assert_eq!(
+        update.removal.action(row),
+        Some(LiveTransferRemovalAction::Cancelled)
+    );
+    assert_eq!(
+        update.removal.artifact_state(row),
+        Some(ArtifactState::Missing)
+    );
 
     let id = harness
         .client
@@ -318,26 +419,25 @@ async fn queued_pause_resume_cancel_and_delete_emit_distinct_events() {
         .unwrap();
     std::fs::write(&destination, b"partial").unwrap();
     harness.client.delete_artifact(id).await.unwrap();
-    match wait_for_matching_event(&mut harness.subscription, |event| {
-        matches!(
-            event,
-            OpheliaEvent::TransferRemoved { id: removed, .. } if *removed == id
-        )
+    let update = wait_for_matching_update(&mut harness.subscription, |update| {
+        update.removal.ids.contains(&id)
     })
-    .await
-    {
-        OpheliaEvent::TransferRemoved {
-            id: removed,
-            action,
-            artifact_state,
-        } => {
-            assert_eq!(removed, id);
-            assert_eq!(action, LiveTransferRemovalAction::DeleteArtifact);
-            assert_eq!(artifact_state, ArtifactState::Deleted);
-            assert!(!destination.exists());
-        }
-        other => panic!("expected removed event, got {other:?}"),
-    }
+    .await;
+    let row = update
+        .removal
+        .ids
+        .iter()
+        .position(|removed| *removed == id)
+        .unwrap();
+    assert_eq!(
+        update.removal.action(row),
+        Some(LiveTransferRemovalAction::DeleteArtifact)
+    );
+    assert_eq!(
+        update.removal.artifact_state(row),
+        Some(ArtifactState::Deleted)
+    );
+    assert!(!destination.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -360,7 +460,10 @@ async fn add_emits_transfer_snapshot_for_frontends() {
     assert_eq!(snapshot.status, TransferStatus::Pending);
     assert_eq!(snapshot.downloaded_bytes, 0);
     assert_eq!(snapshot.total_bytes, None);
-    assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Unsupported);
+    assert_eq!(
+        harness.subscription.snapshot.direct_details.state_for(id),
+        DirectChunkMapState::Unsupported
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -383,7 +486,8 @@ async fn restore_returns_transfer_snapshot_for_frontends() {
         .subscription
         .snapshot
         .transfers
-        .iter()
+        .summaries()
+        .into_iter()
         .find(|snapshot| snapshot.id == id)
         .expect("restored transfer was not in the initial snapshot");
 
@@ -458,17 +562,22 @@ async fn single_stream_http_emits_download_bytes_written_event() {
         .await
         .unwrap();
 
-    match wait_for_matching_event(&mut harness.subscription, |event| {
-        matches!(event, OpheliaEvent::TransferBytesWritten { id: changed, bytes } if *changed == id && *bytes > 0)
+    let update = wait_for_matching_update(&mut harness.subscription, |update| {
+        update
+            .physical_write
+            .ids
+            .iter()
+            .zip(update.physical_write.bytes.iter())
+            .any(|(changed, bytes)| *changed == id && *bytes > 0)
     })
-    .await
-    {
-        OpheliaEvent::TransferBytesWritten { id: changed, bytes } => {
-            assert_eq!(changed, id);
-            assert!(bytes > 0);
-        }
-        other => panic!("expected write stats event, got {other:?}"),
-    }
+    .await;
+    let row = update
+        .physical_write
+        .ids
+        .iter()
+        .position(|changed| *changed == id)
+        .unwrap();
+    assert!(update.physical_write.bytes[row] > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -506,19 +615,27 @@ async fn destination_change_event_arrives_before_finished_progress() {
         .unwrap();
 
     let mut saw_destination_change = false;
-    let _ = wait_for_matching_event(&mut harness.subscription, |event| {
-        let OpheliaEvent::TransferChanged { snapshot } = event else {
-            return false;
-        };
-        if snapshot.id != id {
-            return false;
+    let _ = wait_for_matching_update(&mut harness.subscription, |update| {
+        for (changed, destination) in update
+            .destination
+            .ids
+            .iter()
+            .zip(update.destination.destinations.iter())
+        {
+            if *changed == id && *destination == server_destination {
+                saw_destination_change = true;
+            }
         }
-        if snapshot.destination == server_destination {
-            saw_destination_change = true;
+
+        for snapshot in update.lifecycle.transfers.summaries() {
+            if snapshot.id == id && snapshot.destination == server_destination {
+                saw_destination_change = true;
+            }
+            if snapshot.id == id && snapshot.status == TransferStatus::Finished {
+                return saw_destination_change;
+            }
         }
-        if snapshot.status == TransferStatus::Finished {
-            return saw_destination_change;
-        }
+
         false
     })
     .await;
@@ -564,26 +681,26 @@ async fn chunked_http_emits_loading_snapshot_and_terminal_unsupported() {
         .await
         .unwrap();
 
-    let loading = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Loading
+    let loading = wait_for_direct_detail(&mut harness.subscription, id, |state| {
+        *state == DirectChunkMapState::Loading
     })
     .await;
-    assert_eq!(loading.id, id);
+    assert_eq!(loading, DirectChunkMapState::Loading);
 
-    let http = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_)) && snapshot.id == id
+    let http = wait_for_direct_detail(&mut harness.subscription, id, |state| {
+        matches!(state, DirectChunkMapState::Segments(_))
     })
     .await;
-    match http.chunk_map_state {
-        TransferChunkMapState::Http(snapshot) => assert_eq!(snapshot.cells.len(), 128),
+    match http {
+        DirectChunkMapState::Segments(snapshot) => assert_eq!(snapshot.cells.len(), 128),
         other => panic!("expected http chunk-map snapshot, got {other:?}"),
     }
 
-    let terminal = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Unsupported
+    let terminal = wait_for_direct_detail(&mut harness.subscription, id, |state| {
+        *state == DirectChunkMapState::Unsupported
     })
     .await;
-    assert_eq!(terminal.id, id);
+    assert_eq!(terminal, DirectChunkMapState::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -601,17 +718,17 @@ async fn pausing_active_http_clears_chunk_map_to_unsupported() {
         .await
         .unwrap();
 
-    let _ = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_)) && snapshot.id == id
+    let _ = wait_for_direct_detail(&mut harness.subscription, id, |state| {
+        matches!(state, DirectChunkMapState::Segments(_))
     })
     .await;
 
     harness.client.pause(id).await.unwrap();
-    let snapshot = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        snapshot.id == id && snapshot.chunk_map_state == TransferChunkMapState::Unsupported
+    let state = wait_for_direct_detail(&mut harness.subscription, id, |state| {
+        *state == DirectChunkMapState::Unsupported
     })
     .await;
-    assert_eq!(snapshot.id, id);
+    assert_eq!(state, DirectChunkMapState::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -643,9 +760,8 @@ async fn pausing_active_http_starts_next_queued_download() {
         .await
         .unwrap();
 
-    let _ = wait_for_matching_transfer(&mut harness.subscription, |snapshot| {
-        matches!(snapshot.chunk_map_state, TransferChunkMapState::Http(_))
-            && snapshot.id == first_id
+    let _ = wait_for_direct_detail(&mut harness.subscription, first_id, |state| {
+        matches!(state, DirectChunkMapState::Segments(_))
     })
     .await;
 

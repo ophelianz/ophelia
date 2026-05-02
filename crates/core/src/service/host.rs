@@ -1,5 +1,5 @@
 use super::lock::{ServiceLock, service_lock_path};
-use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
+use super::read_model::{OpheliaReadModel, OpheliaUpdateBuilder};
 use super::transfer_runtime::{TransferRuntime, TransferRuntimeEvent};
 use super::*;
 use crate::disk::DiskHandle;
@@ -70,7 +70,7 @@ impl OpheliaService {
         })?;
         let service_info = OpheliaServiceInfo::current(&paths);
         let (tx, rx) = mpsc::channel(SERVICE_COMMAND_CAPACITY);
-        let (event_tx, _) = broadcast::channel(SERVICE_EVENT_CAPACITY);
+        let (update_tx, _) = broadcast::channel(SERVICE_EVENT_CAPACITY);
         let client = OpheliaClient::in_process(tx);
         let db_tx = bootstrap.db_tx.clone();
         let disk = DiskHandle::new();
@@ -93,8 +93,8 @@ impl OpheliaService {
                 _db_worker: bootstrap.worker,
                 _lock: lock,
                 read_model: OpheliaReadModel::default(),
-                coalescer: OpheliaEventCoalescer::default(),
-                event_tx,
+                update_builder: OpheliaUpdateBuilder::default(),
+                update_tx,
                 idle_timeout,
             }
             .run(rx),
@@ -162,8 +162,8 @@ struct OpheliaServiceRuntime {
     _db_worker: state::DbWorkerHandle,
     _lock: ServiceLock,
     read_model: OpheliaReadModel,
-    coalescer: OpheliaEventCoalescer,
-    event_tx: broadcast::Sender<OpheliaEvent>,
+    update_builder: OpheliaUpdateBuilder,
+    update_tx: broadcast::Sender<OpheliaUpdateBatch>,
     idle_timeout: Duration,
 }
 
@@ -251,7 +251,7 @@ impl OpheliaServiceRuntime {
                 false
             }
             OpheliaRequest::Subscribe { reply } => {
-                let receiver = self.event_tx.subscribe();
+                let receiver = self.update_tx.subscribe();
                 let snapshot = self.read_model.snapshot(&self.settings);
                 let _ = reply.send(Ok(OpheliaSubscription::in_process(snapshot, receiver)));
                 false
@@ -314,9 +314,8 @@ impl OpheliaServiceRuntime {
                 result?;
                 self.config = config;
                 self.settings = settings.clone();
-                let _ = self
-                    .event_tx
-                    .send(OpheliaEvent::SettingsChanged { settings });
+                self.update_builder.record_settings_changed(settings);
+                self.flush_coalesced_events();
                 Ok(OpheliaResponse::Ack)
             }
             OpheliaCommand::LoadHistory { filter, query } => {
@@ -324,13 +323,13 @@ impl OpheliaServiceRuntime {
                 Ok(OpheliaResponse::History { rows })
             }
             OpheliaCommand::ServiceInfo => Ok(OpheliaResponse::ServiceInfo {
-                info: self.service_info.clone(),
+                info: Box::new(self.service_info.clone()),
             }),
             OpheliaCommand::Snapshot => Ok(OpheliaResponse::Snapshot {
-                snapshot: self.read_model.snapshot(&self.settings),
+                snapshot: Box::new(self.read_model.snapshot(&self.settings)),
             }),
             OpheliaCommand::Subscribe => Ok(OpheliaResponse::Snapshot {
-                snapshot: self.read_model.snapshot(&self.settings),
+                snapshot: Box::new(self.read_model.snapshot(&self.settings)),
             }),
         }
     }
@@ -350,23 +349,26 @@ impl OpheliaServiceRuntime {
         if should_flush_before_immediate(&event) {
             self.flush_coalesced_events();
         }
-        if let Some(event) = self
-            .read_model
-            .apply_transfer_event(event, &mut self.coalescer)
-        {
-            let _ = self.event_tx.send(event);
+        let flush_after = should_flush_after_immediate(&event);
+        self.read_model
+            .apply_transfer_event(event, &mut self.update_builder);
+        if flush_after {
+            self.flush_coalesced_events();
         }
     }
 
     fn flush_coalesced_events(&mut self) {
-        for event in self.coalescer.drain_events() {
-            let _ = self.event_tx.send(event);
+        if let Some(batch) = self.update_builder.drain_batch() {
+            let _ = self.update_tx.send(batch);
         }
     }
 
     fn log_coalescer_stats(&self) {
-        let stats = self.coalescer.stats();
-        if stats.raw_transfer_updates == 0 && stats.raw_write_updates == 0 {
+        let stats = self.update_builder.stats();
+        if stats.raw_transfer_updates == 0
+            && stats.raw_write_updates == 0
+            && stats.raw_detail_updates == 0
+        {
             return;
         }
         tracing::debug!(
@@ -376,12 +378,15 @@ impl OpheliaServiceRuntime {
             raw_write_updates = stats.raw_write_updates,
             emitted_write_updates = stats.emitted_write_updates,
             coalesced_write_updates = stats.coalesced_write_updates(),
+            raw_detail_updates = stats.raw_detail_updates,
+            emitted_detail_updates = stats.emitted_detail_updates,
+            coalesced_detail_updates = stats.coalesced_detail_updates(),
             "service event coalescing summary"
         );
     }
 
     fn should_idle_exit(&self) -> bool {
-        self.event_tx.receiver_count() == 0 && !self.read_model.has_running_transfers()
+        self.update_tx.receiver_count() == 0 && !self.read_model.has_running_transfers()
     }
 
     async fn delete_artifact_from_service_state(
@@ -402,11 +407,12 @@ impl OpheliaServiceRuntime {
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
         self.read_model.remove(id);
-        let _ = self.event_tx.send(OpheliaEvent::TransferRemoved {
+        self.update_builder.record_removal(
             id,
-            action: LiveTransferRemovalAction::DeleteArtifact,
+            LiveTransferRemovalAction::DeleteArtifact,
             artifact_state,
-        });
+        );
+        self.flush_coalesced_events();
         Ok(())
     }
 }
@@ -452,6 +458,22 @@ pub(super) fn should_flush_before_immediate(event: &TransferRuntimeEvent) -> boo
     match event {
         TransferRuntimeEvent::Progress(update) => update.status != TransferStatus::Downloading,
         TransferRuntimeEvent::TransferRemoved { .. } => true,
+        TransferRuntimeEvent::TransferAdded { .. }
+        | TransferRuntimeEvent::TransferRestored { .. } => true,
+        TransferRuntimeEvent::ControlUnsupported { .. } => true,
         _ => false,
     }
+}
+
+pub(super) fn should_flush_after_immediate(event: &TransferRuntimeEvent) -> bool {
+    matches!(
+        event,
+        TransferRuntimeEvent::Progress(update) if update.status != TransferStatus::Downloading
+    ) || matches!(
+        event,
+        TransferRuntimeEvent::TransferAdded { .. }
+            | TransferRuntimeEvent::TransferRestored { .. }
+            | TransferRuntimeEvent::TransferRemoved { .. }
+            | TransferRuntimeEvent::ControlUnsupported { .. }
+    )
 }

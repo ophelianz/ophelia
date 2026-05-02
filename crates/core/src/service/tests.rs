@@ -1,12 +1,14 @@
-use super::host::should_flush_before_immediate;
-use super::read_model::{OpheliaEventCoalescer, OpheliaReadModel};
-use super::transfer_runtime::TransferRuntimeEvent;
-use super::wire::{
-    OpheliaWireCommand, OpheliaWireFrame, command_from_payload, command_to_payload,
-    frame_from_payload, frame_to_payload,
+use super::codec::{
+    OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_from_body, command_to_body,
+    frame_from_body, frame_to_body,
 };
+use super::host::should_flush_before_immediate;
+use super::read_model::{OpheliaReadModel, OpheliaUpdateBuilder};
+use super::transfer_runtime::TransferRuntimeEvent;
 use super::*;
-use crate::engine::{TransferChunkMapState, TransferControlSupport, TransferStatus};
+use crate::engine::{
+    DirectChunkMapState, TransferControlSupport, TransferDetails, TransferKind, TransferStatus,
+};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,6 +59,7 @@ fn file_mode(path: &Path) -> u32 {
 fn test_snapshot(id: TransferId, status: TransferStatus) -> TransferSummary {
     TransferSummary {
         id,
+        kind: TransferKind::Direct,
         provider_kind: "http".into(),
         source_label: "https://example.com/file.bin".into(),
         destination: PathBuf::from("file.bin"),
@@ -65,103 +68,71 @@ fn test_snapshot(id: TransferId, status: TransferStatus) -> TransferSummary {
         total_bytes: Some(100),
         speed_bytes_per_sec: 0,
         control_support: TransferControlSupport::all(),
-        chunk_map_state: TransferChunkMapState::Unsupported,
     }
 }
 
 #[test]
-fn session_read_model_coalesces_hot_transfer_updates() {
+fn service_update_builder_coalesces_hot_batches_by_family() {
     let id = TransferId(1);
     let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
+    let mut builder = OpheliaUpdateBuilder::default();
 
-    let added = read_model
-        .apply_transfer_event(
-            TransferRuntimeEvent::TransferAdded {
-                snapshot: test_snapshot(id, TransferStatus::Pending),
-            },
-            &mut coalescer,
-        )
-        .unwrap();
-    assert!(matches!(added, OpheliaEvent::TransferChanged { .. }));
-
-    assert!(
-        read_model
-            .apply_transfer_event(
-                TransferRuntimeEvent::Progress(ProgressUpdate {
-                    id,
-                    status: TransferStatus::Downloading,
-                    downloaded_bytes: 40,
-                    total_bytes: Some(100),
-                    speed_bytes_per_sec: 10,
-                }),
-                &mut coalescer,
-            )
-            .is_none()
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferAdded {
+            snapshot: test_snapshot(id, TransferStatus::Pending),
+        },
+        &mut builder,
     );
-    assert!(
-        read_model
-            .apply_transfer_event(
-                TransferRuntimeEvent::ChunkMapChanged {
-                    id,
-                    state: TransferChunkMapState::Loading,
-                },
-                &mut coalescer,
-            )
-            .is_none()
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::Progress(ProgressUpdate {
+            id,
+            status: TransferStatus::Downloading,
+            downloaded_bytes: 40,
+            total_bytes: Some(100),
+            speed_bytes_per_sec: 10,
+        }),
+        &mut builder,
     );
-    assert!(
-        read_model
-            .apply_transfer_event(
-                TransferRuntimeEvent::TransferBytesWritten { id, bytes: 10 },
-                &mut coalescer,
-            )
-            .is_none()
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::DetailsChanged {
+            id,
+            details: TransferDetails::direct(DirectChunkMapState::Loading),
+        },
+        &mut builder,
     );
-    assert!(
-        read_model
-            .apply_transfer_event(
-                TransferRuntimeEvent::TransferBytesWritten { id, bytes: 15 },
-                &mut coalescer,
-            )
-            .is_none()
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferBytesWritten { id, bytes: 10 },
+        &mut builder,
+    );
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::TransferBytesWritten { id, bytes: 15 },
+        &mut builder,
     );
 
-    let events = coalescer.drain_events();
-    assert_eq!(events.len(), 2);
-    match &events[0] {
-        OpheliaEvent::TransferChanged { snapshot } => {
-            assert_eq!(snapshot.downloaded_bytes, 40);
-            assert_eq!(snapshot.chunk_map_state, TransferChunkMapState::Loading);
-        }
-        event => panic!("expected transfer update, got {event:?}"),
-    }
-    match &events[1] {
-        OpheliaEvent::TransferBytesWritten {
-            id: event_id,
-            bytes,
-        } => {
-            assert_eq!(*event_id, id);
-            assert_eq!(*bytes, 25);
-        }
-        event => panic!("expected write update, got {event:?}"),
-    }
+    let batch = builder.drain_batch().unwrap();
+    assert_eq!(batch.lifecycle.lifecycle_codes.len(), 1);
+    assert_eq!(batch.progress_known_total.ids, vec![id]);
+    assert_eq!(batch.progress_known_total.downloaded_bytes, vec![40]);
+    assert_eq!(batch.progress_known_total.total_bytes, vec![100]);
+    assert_eq!(batch.physical_write.bytes, vec![25]);
+    assert_eq!(batch.direct_details.loading_ids, vec![id]);
 }
 
 #[test]
 fn coalescer_stats_count_raw_and_emitted_hot_events() {
     let id = TransferId(2);
     let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_transfer_event(
+    let mut builder = OpheliaUpdateBuilder::default();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
-        &mut coalescer,
+        &mut builder,
     );
+    let _ = builder.drain_batch();
 
     for downloaded_bytes in [10, 20, 30] {
-        let _ = read_model.apply_transfer_event(
+        read_model.apply_transfer_event(
             TransferRuntimeEvent::Progress(ProgressUpdate {
                 id,
                 status: TransferStatus::Downloading,
@@ -169,25 +140,26 @@ fn coalescer_stats_count_raw_and_emitted_hot_events() {
                 total_bytes: Some(100),
                 speed_bytes_per_sec: downloaded_bytes,
             }),
-            &mut coalescer,
+            &mut builder,
         );
     }
-    let _ = read_model.apply_transfer_event(
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferBytesWritten { id, bytes: 10 },
-        &mut coalescer,
+        &mut builder,
     );
-    let _ = read_model.apply_transfer_event(
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferBytesWritten { id, bytes: 20 },
-        &mut coalescer,
+        &mut builder,
     );
 
-    let events = coalescer.drain_events();
-    let stats = coalescer.stats();
+    let batch = builder.drain_batch().unwrap();
+    let stats = builder.stats();
 
-    assert_eq!(events.len(), 2);
-    assert_eq!(stats.raw_transfer_updates, 3);
+    assert_eq!(batch.progress_known_total.ids.len(), 1);
+    assert_eq!(batch.physical_write.ids.len(), 1);
+    assert_eq!(stats.raw_transfer_updates, 4);
     assert_eq!(stats.raw_write_updates, 2);
-    assert_eq!(stats.emitted_transfer_updates, 1);
+    assert_eq!(stats.emitted_transfer_updates, 2);
     assert_eq!(stats.emitted_write_updates, 1);
     assert_eq!(stats.coalesced_transfer_updates(), 2);
     assert_eq!(stats.coalesced_write_updates(), 1);
@@ -197,14 +169,15 @@ fn coalescer_stats_count_raw_and_emitted_hot_events() {
 fn terminal_progress_clears_stale_coalesced_updates() {
     let id = TransferId(3);
     let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_transfer_event(
+    let mut builder = OpheliaUpdateBuilder::default();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
-        &mut coalescer,
+        &mut builder,
     );
-    let _ = read_model.apply_transfer_event(
+    let _ = builder.drain_batch();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Downloading,
@@ -212,44 +185,44 @@ fn terminal_progress_clears_stale_coalesced_updates() {
             total_bytes: Some(100),
             speed_bytes_per_sec: 10,
         }),
-        &mut coalescer,
+        &mut builder,
     );
 
-    let finished = read_model
-        .apply_transfer_event(
-            TransferRuntimeEvent::Progress(ProgressUpdate {
-                id,
-                status: TransferStatus::Finished,
-                downloaded_bytes: 100,
-                total_bytes: Some(100),
-                speed_bytes_per_sec: 0,
-            }),
-            &mut coalescer,
-        )
-        .unwrap();
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::Progress(ProgressUpdate {
+            id,
+            status: TransferStatus::Finished,
+            downloaded_bytes: 100,
+            total_bytes: Some(100),
+            speed_bytes_per_sec: 0,
+        }),
+        &mut builder,
+    );
 
-    match finished {
-        OpheliaEvent::TransferChanged { snapshot } => {
-            assert_eq!(snapshot.status, TransferStatus::Finished);
-            assert_eq!(snapshot.downloaded_bytes, 100);
-        }
-        event => panic!("expected finished transfer update, got {event:?}"),
-    }
-    assert!(coalescer.drain_events().is_empty());
+    let batch = builder.drain_batch().unwrap();
+    assert!(batch.progress_known_total.is_empty());
+    assert_eq!(
+        batch.lifecycle.transfers.summaries()[0].status,
+        TransferStatus::Finished
+    );
+    assert_eq!(
+        batch.lifecycle.transfers.summaries()[0].downloaded_bytes,
+        100
+    );
 }
 
 #[test]
 fn snapshot_reflects_pending_hot_updates_before_flush() {
     let id = TransferId(4);
     let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_transfer_event(
+    let mut builder = OpheliaUpdateBuilder::default();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
-        &mut coalescer,
+        &mut builder,
     );
-    let _ = read_model.apply_transfer_event(
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Downloading,
@@ -257,23 +230,23 @@ fn snapshot_reflects_pending_hot_updates_before_flush() {
             total_bytes: Some(100),
             speed_bytes_per_sec: 12,
         }),
-        &mut coalescer,
+        &mut builder,
     );
-    let _ = read_model.apply_transfer_event(
-        TransferRuntimeEvent::ChunkMapChanged {
+    read_model.apply_transfer_event(
+        TransferRuntimeEvent::DetailsChanged {
             id,
-            state: TransferChunkMapState::Loading,
+            details: TransferDetails::direct(DirectChunkMapState::Loading),
         },
-        &mut coalescer,
+        &mut builder,
     );
 
     let snapshot = read_model.snapshot(&ServiceSettings::default());
 
     assert_eq!(snapshot.transfers.len(), 1);
-    assert_eq!(snapshot.transfers[0].downloaded_bytes, 80);
+    assert_eq!(snapshot.transfers.summaries()[0].downloaded_bytes, 80);
     assert_eq!(
-        snapshot.transfers[0].chunk_map_state,
-        TransferChunkMapState::Loading
+        snapshot.direct_details.state_for(id),
+        DirectChunkMapState::Loading
     );
 }
 
@@ -316,19 +289,20 @@ fn terminal_events_flush_hot_updates_first() {
 fn terminal_progress_keeps_pending_write_bytes() {
     let id = TransferId(6);
     let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_transfer_event(
+    let mut builder = OpheliaUpdateBuilder::default();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferAdded {
             snapshot: test_snapshot(id, TransferStatus::Pending),
         },
-        &mut coalescer,
+        &mut builder,
     );
-    let _ = read_model.apply_transfer_event(
+    let _ = builder.drain_batch();
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::TransferBytesWritten { id, bytes: 32 },
-        &mut coalescer,
+        &mut builder,
     );
 
-    let finished = read_model.apply_transfer_event(
+    read_model.apply_transfer_event(
         TransferRuntimeEvent::Progress(ProgressUpdate {
             id,
             status: TransferStatus::Finished,
@@ -336,18 +310,16 @@ fn terminal_progress_keeps_pending_write_bytes() {
             total_bytes: Some(100),
             speed_bytes_per_sec: 0,
         }),
-        &mut coalescer,
+        &mut builder,
     );
 
-    assert!(matches!(
-        finished,
-        Some(OpheliaEvent::TransferChanged { .. })
-    ));
-    assert!(matches!(
-        coalescer.drain_events().as_slice(),
-        [OpheliaEvent::TransferBytesWritten { id: event_id, bytes }]
-            if *event_id == id && *bytes == 32
-    ));
+    let batch = builder.drain_batch().unwrap();
+    assert_eq!(batch.physical_write.ids, vec![id]);
+    assert_eq!(batch.physical_write.bytes, vec![32]);
+    assert_eq!(
+        batch.lifecycle.transfers.summaries()[0].status,
+        TransferStatus::Finished
+    );
 }
 
 #[test]
@@ -539,10 +511,13 @@ async fn delete_artifact_after_finished_transfer_uses_session_state() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let OpheliaEvent::TransferChanged { snapshot } =
-                subscription.next_event().await.unwrap()
-                && snapshot.id == id
-                && snapshot.status == TransferStatus::Finished
+            let update = subscription.next_update().await.unwrap();
+            if update
+                .lifecycle
+                .transfers
+                .summaries()
+                .iter()
+                .any(|snapshot| snapshot.id == id && snapshot.status == TransferStatus::Finished)
             {
                 break;
             }
@@ -556,14 +531,17 @@ async fn delete_artifact_after_finished_transfer_uses_session_state() {
 
     let removed = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let OpheliaEvent::TransferRemoved {
-                id: removed_id,
-                action,
-                artifact_state,
-            } = subscription.next_event().await.unwrap()
-                && removed_id == id
+            let update = subscription.next_update().await.unwrap();
+            if let Some(row) = update
+                .removal
+                .ids
+                .iter()
+                .position(|removed_id| *removed_id == id)
             {
-                return (action, artifact_state);
+                return (
+                    update.removal.action(row).unwrap(),
+                    update.removal.artifact_state(row).unwrap(),
+                );
             }
         }
     })
@@ -628,78 +606,114 @@ async fn service_lock_and_data_dir_are_owner_only() {
 }
 
 #[test]
-fn wire_command_payload_roundtrips_snapshot() {
-    let command = OpheliaWireCommand {
+fn xpc_command_body_roundtrips_snapshot() {
+    let command = OpheliaCommandEnvelope {
         id: 7,
         command: OpheliaCommand::Snapshot,
     };
 
-    let payload = command_to_payload(&command).unwrap();
-    let decoded = command_from_payload(&payload).unwrap();
+    let body = command_to_body(&command).unwrap();
+    let decoded = command_from_body(&body).unwrap();
 
     assert!(matches!(decoded.command, OpheliaCommand::Snapshot));
     assert_eq!(decoded.id, 7);
 }
 
 #[test]
-fn wire_frame_payload_roundtrips_response() {
-    let frame = OpheliaWireFrame::Response {
+fn xpc_frame_body_roundtrips_response() {
+    let frame = OpheliaFrameEnvelope::Response {
         id: 8,
-        response: OpheliaResponse::Snapshot {
-            snapshot: OpheliaSnapshot::default(),
-        },
+        response: Box::new(OpheliaResponse::Snapshot {
+            snapshot: Box::new(OpheliaSnapshot::default()),
+        }),
     };
 
-    let payload = frame_to_payload(&frame).unwrap();
-    let decoded = frame_from_payload(&payload).unwrap();
+    let body = frame_to_body(&frame).unwrap();
+    let decoded = frame_from_body(&body).unwrap();
 
     assert!(matches!(
         decoded,
-        OpheliaWireFrame::Response {
+        OpheliaFrameEnvelope::Response {
             id: 8,
-            response: OpheliaResponse::Snapshot { .. }
-        }
+            response
+        } if matches!(*response, OpheliaResponse::Snapshot { .. })
     ));
 }
 
 #[test]
-fn wire_frame_payload_roundtrips_service_info() {
+fn xpc_frame_body_roundtrips_service_info() {
     let dir = tempfile::tempdir().unwrap();
     let paths = test_paths(&dir);
-    let frame = OpheliaWireFrame::Response {
+    let frame = OpheliaFrameEnvelope::Response {
         id: 9,
-        response: OpheliaResponse::ServiceInfo {
-            info: OpheliaServiceInfo::current(&paths),
-        },
+        response: Box::new(OpheliaResponse::ServiceInfo {
+            info: Box::new(OpheliaServiceInfo::current(&paths)),
+        }),
     };
 
-    let payload = frame_to_payload(&frame).unwrap();
-    let decoded = frame_from_payload(&payload).unwrap();
+    let body = frame_to_body(&frame).unwrap();
+    let decoded = frame_from_body(&body).unwrap();
 
     assert!(matches!(
         decoded,
-        OpheliaWireFrame::Response {
+        OpheliaFrameEnvelope::Response {
             id: 9,
-            response: OpheliaResponse::ServiceInfo { .. }
-        }
+            response
+        } if matches!(*response, OpheliaResponse::ServiceInfo { .. })
     ));
 }
 
 #[test]
-fn wire_frame_payload_roundtrips_approval_required_error() {
-    let frame = OpheliaWireFrame::Error {
+fn xpc_frame_body_roundtrips_update_batch() {
+    let id = TransferId(11);
+    let mut transfers = TransferSummaryTable::default();
+    transfers.push_summary(test_snapshot(id, TransferStatus::Downloading));
+
+    let mut direct_details = DirectDetailsTable::default();
+    direct_details.push_state(id, DirectChunkMapState::Loading);
+
+    let batch = OpheliaUpdateBatch {
+        lifecycle: TransferLifecycleBatch {
+            transfers,
+            lifecycle_codes: vec![TransferLifecycleCode::Added as u8],
+        },
+        progress_known_total: ProgressKnownTotalBatch {
+            ids: vec![id],
+            downloaded_bytes: vec![10],
+            total_bytes: vec![100],
+            speed_bytes_per_sec: vec![5],
+        },
+        direct_details,
+        ..OpheliaUpdateBatch::default()
+    };
+    let frame = OpheliaFrameEnvelope::Update {
+        update: Box::new(batch.clone()),
+    };
+
+    let body = frame_to_body(&frame).unwrap();
+    let decoded = frame_from_body(&body).unwrap();
+
+    assert!(matches!(
+        decoded,
+        OpheliaFrameEnvelope::Update { update } if *update == batch
+    ));
+}
+
+#[test]
+fn xpc_frame_body_roundtrips_approval_required_error() {
+    let frame = OpheliaFrameEnvelope::Error {
         id: 10,
         error: OpheliaError::ServiceApprovalRequired {
             service_name: OPHELIA_MACH_SERVICE_NAME.to_string(),
         },
     };
 
-    let payload = frame_to_payload(&frame).unwrap();
-    let decoded = frame_from_payload(&payload).unwrap();
+    let body = frame_to_body(&frame).unwrap();
+    let decoded = frame_from_body(&body).unwrap();
 
     assert!(matches!(
         decoded,
-        OpheliaWireFrame::Error {
+        OpheliaFrameEnvelope::Error {
             id: 10,
             error: OpheliaError::ServiceApprovalRequired { service_name },
         } if service_name == OPHELIA_MACH_SERVICE_NAME
@@ -707,8 +721,8 @@ fn wire_frame_payload_roundtrips_approval_required_error() {
 }
 
 #[test]
-fn malformed_wire_command_is_bad_request() {
-    let error = command_from_payload(b"not json").unwrap_err();
+fn malformed_xpc_command_is_bad_request() {
+    let error = command_from_body(b"not an ophelia binary body").unwrap_err();
 
     assert!(matches!(error, OpheliaError::BadRequest { .. }));
 }

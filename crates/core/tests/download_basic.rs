@@ -32,12 +32,12 @@ use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 use ophelia::engine::http::HttpDownloadConfig;
 use ophelia::engine::types::{
-    ChunkMapCellState, TaskRuntimeUpdate, TransferChunkMapState, TransferControlSupport,
+    ChunkMapCellState, DirectChunkMapState, RunnerEvent, TransferControlSupport, TransferDetails,
     TransferId, TransferStatus,
 };
 
 fn snapshot_has_prefix_shaped_coverage(
-    snapshot: &ophelia::engine::types::HttpChunkMapSnapshot,
+    snapshot: &ophelia::engine::types::DirectChunkMapSnapshot,
 ) -> bool {
     let mut saw_empty = false;
     for cell in &snapshot.cells {
@@ -48,6 +48,16 @@ fn snapshot_has_prefix_shaped_coverage(
         }
     }
     true
+}
+
+fn direct_chunk_map_state(update: &RunnerEvent) -> Option<&DirectChunkMapState> {
+    match update {
+        RunnerEvent::DetailsChanged {
+            details: TransferDetails::Direct(details),
+            ..
+        } => Some(&details.chunk_map_state),
+        _ => None,
+    }
 }
 
 struct RangeDispositionResponder {
@@ -184,21 +194,15 @@ async fn chunked_http_emits_chunk_map_snapshot() {
     )
     .await;
 
-    match wait_for_runtime_update(&mut runtime_rx, |update| {
+    let update = wait_for_runtime_update(&mut runtime_rx, |update| {
         matches!(
-            update,
-            TaskRuntimeUpdate::ChunkMapChanged {
-                state: TransferChunkMapState::Http(_),
-                ..
-            }
+            direct_chunk_map_state(update),
+            Some(DirectChunkMapState::Segments(_))
         )
     })
-    .await
-    {
-        TaskRuntimeUpdate::ChunkMapChanged {
-            state: TransferChunkMapState::Http(snapshot),
-            ..
-        } => {
+    .await;
+    match direct_chunk_map_state(&update) {
+        Some(DirectChunkMapState::Segments(snapshot)) => {
             assert_eq!(snapshot.cells.len(), 128);
             assert!(snapshot.cells.iter().all(|&cell| {
                 matches!(
@@ -209,7 +213,7 @@ async fn chunked_http_emits_chunk_map_snapshot() {
                 )
             }));
         }
-        other => panic!("expected http chunk-map snapshot, got {other:?}"),
+        _ => panic!("expected http chunk-map snapshot, got {update:?}"),
     }
 }
 
@@ -251,7 +255,7 @@ async fn chunked_http_batches_write_stat_updates() {
     let mut write_updates = 0;
     let mut written = 0_u64;
     while let Ok(update) = runtime_rx.try_recv() {
-        if let TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } = update {
+        if let RunnerEvent::TransferBytesWritten { bytes, .. } = update {
             write_updates += 1;
             written = written.saturating_add(bytes);
         }
@@ -304,11 +308,15 @@ async fn single_stream_fallback_no_range_support() {
     let mut written = 0_u64;
     for update in runtime_updates {
         match update {
-            TaskRuntimeUpdate::ChunkMapChanged {
-                state: TransferChunkMapState::Unsupported,
-                ..
-            } => saw_unsupported_chunk_map = true,
-            TaskRuntimeUpdate::ControlSupportChanged { support, .. } => {
+            update
+                if matches!(
+                    direct_chunk_map_state(&update),
+                    Some(DirectChunkMapState::Unsupported)
+                ) =>
+            {
+                saw_unsupported_chunk_map = true;
+            }
+            RunnerEvent::ControlSupportChanged { support, .. } => {
                 assert_eq!(
                     support,
                     TransferControlSupport {
@@ -320,7 +328,7 @@ async fn single_stream_fallback_no_range_support() {
                 );
                 saw_single_stream_controls = true;
             }
-            TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } => {
+            RunnerEvent::TransferBytesWritten { bytes, .. } => {
                 written = written.saturating_add(bytes);
             }
             _ => {}
@@ -657,25 +665,19 @@ async fn sequential_http_emits_prefix_shaped_chunk_map_snapshots() {
     )
     .await;
 
-    match wait_for_runtime_update(&mut runtime_rx, |update| {
+    let update = wait_for_runtime_update(&mut runtime_rx, |update| {
         matches!(
-            update,
-            TaskRuntimeUpdate::ChunkMapChanged {
-                state: TransferChunkMapState::Http(_),
-                ..
-            }
+            direct_chunk_map_state(update),
+            Some(DirectChunkMapState::Segments(_))
         )
     })
-    .await
-    {
-        TaskRuntimeUpdate::ChunkMapChanged {
-            state: TransferChunkMapState::Http(snapshot),
-            ..
-        } => {
+    .await;
+    match direct_chunk_map_state(&update) {
+        Some(DirectChunkMapState::Segments(snapshot)) => {
             assert_eq!(snapshot.cells.len(), 128);
-            assert!(snapshot_has_prefix_shaped_coverage(&snapshot));
+            assert!(snapshot_has_prefix_shaped_coverage(snapshot));
         }
-        other => panic!("expected http chunk-map snapshot, got {other:?}"),
+        _ => panic!("expected http chunk-map snapshot, got {update:?}"),
     }
 
     let updates = drain_progress(&mut runtime_rx).await;

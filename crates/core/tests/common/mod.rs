@@ -31,7 +31,7 @@ use ophelia::engine::DestinationPolicyConfig;
 use ophelia::engine::destination::DestinationPolicy;
 use ophelia::engine::http::{DownloadTaskRequest, HttpDownloadConfig, TokenBucket};
 use ophelia::engine::types::{
-    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferId, TransferStatus,
+    ChunkSnapshot, ProgressUpdate, RunnerEvent, TransferId, TransferStatus,
 };
 
 pub fn unlimited_semaphore() -> Arc<Semaphore> {
@@ -59,7 +59,7 @@ pub async fn download_task(
     resume_from: Option<Vec<ChunkSnapshot>>,
     server_semaphore: Arc<Semaphore>,
     global_throttle: Arc<TokenBucket>,
-    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: mpsc::Sender<RunnerEvent>,
 ) -> ophelia::engine::http::TaskFinalState {
     ophelia::engine::http::download_task(DownloadTaskRequest::new(
         id,
@@ -78,10 +78,7 @@ pub async fn download_task(
     .await
 }
 
-pub fn runtime_updates_channel() -> (
-    mpsc::Sender<TaskRuntimeUpdate>,
-    mpsc::Receiver<TaskRuntimeUpdate>,
-) {
+pub fn runtime_updates_channel() -> (mpsc::Sender<RunnerEvent>, mpsc::Receiver<RunnerEvent>) {
     mpsc::channel(256)
 }
 
@@ -95,20 +92,18 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn drain_progress(rx: &mut mpsc::Receiver<TaskRuntimeUpdate>) -> Vec<ProgressUpdate> {
+pub async fn drain_progress(rx: &mut mpsc::Receiver<RunnerEvent>) -> Vec<ProgressUpdate> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut updates = vec![];
     while let Ok(update) = rx.try_recv() {
-        if let TaskRuntimeUpdate::Progress(update) = update {
+        if let RunnerEvent::Progress(update) = update {
             updates.push(update);
         }
     }
     updates
 }
 
-pub async fn drain_runtime_updates(
-    rx: &mut mpsc::Receiver<TaskRuntimeUpdate>,
-) -> Vec<TaskRuntimeUpdate> {
+pub async fn drain_runtime_updates(rx: &mut mpsc::Receiver<RunnerEvent>) -> Vec<RunnerEvent> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mut updates = vec![];
     while let Ok(update) = rx.try_recv() {
@@ -117,19 +112,19 @@ pub async fn drain_runtime_updates(
     updates
 }
 
-pub fn progress_updates(updates: &[TaskRuntimeUpdate]) -> Vec<ProgressUpdate> {
+pub fn progress_updates(updates: &[RunnerEvent]) -> Vec<ProgressUpdate> {
     updates
         .iter()
         .filter_map(|update| match update {
-            TaskRuntimeUpdate::Progress(progress) => Some(progress.clone()),
+            RunnerEvent::Progress(progress) => Some(progress.clone()),
             _ => None,
         })
         .collect()
 }
 
-pub fn download_write_bytes_from(updates: &[TaskRuntimeUpdate]) -> u64 {
+pub fn download_write_bytes_from(updates: &[RunnerEvent]) -> u64 {
     updates.iter().fold(0_u64, |total, update| match update {
-        TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } => total.saturating_add(*bytes),
+        RunnerEvent::TransferBytesWritten { bytes, .. } => total.saturating_add(*bytes),
         _ => total,
     })
 }
@@ -139,9 +134,9 @@ pub fn last_status(updates: &[ProgressUpdate]) -> Option<TransferStatus> {
 }
 
 pub async fn wait_for_runtime_update(
-    rx: &mut mpsc::Receiver<TaskRuntimeUpdate>,
-    mut predicate: impl FnMut(&TaskRuntimeUpdate) -> bool,
-) -> TaskRuntimeUpdate {
+    rx: &mut mpsc::Receiver<RunnerEvent>,
+    mut predicate: impl FnMut(&RunnerEvent) -> bool,
+) -> RunnerEvent {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         if let Ok(update) = rx.try_recv()
@@ -157,10 +152,10 @@ pub async fn wait_for_runtime_update(
     }
 }
 
-pub fn drain_download_write_bytes(rx: &mut mpsc::Receiver<TaskRuntimeUpdate>) -> u64 {
+pub fn drain_download_write_bytes(rx: &mut mpsc::Receiver<RunnerEvent>) -> u64 {
     let mut total = 0_u64;
     while let Ok(update) = rx.try_recv() {
-        if let TaskRuntimeUpdate::TransferBytesWritten { bytes, .. } = update {
+        if let RunnerEvent::TransferBytesWritten { bytes, .. } = update {
             total = total.saturating_add(bytes);
         }
     }

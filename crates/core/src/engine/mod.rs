@@ -21,7 +21,7 @@ pub mod alloc;
 pub mod chunk;
 pub mod destination;
 pub mod http;
-pub(crate) mod provider;
+pub(crate) mod runner;
 pub mod spec;
 pub mod state;
 pub mod types;

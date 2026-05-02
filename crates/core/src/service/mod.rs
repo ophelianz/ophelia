@@ -19,22 +19,24 @@ use crate::engine::state::{self, HistoryReader};
 use crate::engine::{
     AddTransferRequest, ArtifactState, DbEvent, DownloadSpec, EngineError, HistoryFilter,
     HistoryRow, LiveTransferRemovalAction, ProgressUpdate, RestoredDownload, TransferControlAction,
-    TransferId, TransferStatus, TransferSummary,
+    TransferControlSupport, TransferDetails, TransferId, TransferKind, TransferStatus,
+    TransferSummary,
 };
 
 const SERVICE_COMMAND_CAPACITY: usize = 64;
 const SERVICE_EVENT_CAPACITY: usize = 512;
 const HOT_SERVICE_EVENT_FLUSH_MS: u64 = 100;
 pub const OPHELIA_MACH_SERVICE_NAME: &str = "nz.ophelia.service";
+pub const OPHELIA_RUN_SERVICE_ENV: &str = "OPHELIA_RUN_SERVICE";
 
 mod client;
+mod codec;
 mod host;
 mod lock;
 #[cfg(target_os = "macos")]
 mod macos_startup;
 mod read_model;
 mod transfer_runtime;
-mod wire;
 #[cfg(target_os = "macos")]
 mod xpc;
 
@@ -281,38 +283,551 @@ pub(crate) enum OpheliaResponse {
     Ack,
     TransferAdded { id: TransferId },
     History { rows: Vec<HistoryRow> },
-    ServiceInfo { info: OpheliaServiceInfo },
-    Snapshot { snapshot: OpheliaSnapshot },
+    ServiceInfo { info: Box<OpheliaServiceInfo> },
+    Snapshot { snapshot: Box<OpheliaSnapshot> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum OpheliaEvent {
-    TransferChanged {
-        snapshot: TransferSummary,
-    },
-    TransferBytesWritten {
-        id: TransferId,
-        bytes: u64,
-    },
-    TransferRemoved {
-        id: TransferId,
-        action: LiveTransferRemovalAction,
-        artifact_state: ArtifactState,
-    },
-    ControlUnsupported {
-        id: TransferId,
-        action: TransferControlAction,
-    },
-    SettingsChanged {
-        settings: ServiceSettings,
-    },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpheliaSnapshot {
-    pub transfers: Vec<TransferSummary>,
+    pub transfers: TransferSummaryTable,
+    pub direct_details: DirectDetailsTable,
     pub settings: ServiceSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpheliaUpdateBatch {
+    pub lifecycle: TransferLifecycleBatch,
+    pub progress_known_total: ProgressKnownTotalBatch,
+    pub progress_unknown_total: ProgressUnknownTotalBatch,
+    pub physical_write: PhysicalWriteBatch,
+    pub destination: DestinationBatch,
+    pub control_support: ControlSupportBatch,
+    pub direct_details: DirectDetailsTable,
+    pub removal: TransferRemovalBatch,
+    pub unsupported_control: UnsupportedControlBatch,
+    pub settings_changed: Option<ServiceSettings>,
+}
+
+impl OpheliaUpdateBatch {
+    pub fn is_empty(&self) -> bool {
+        self.lifecycle.is_empty()
+            && self.progress_known_total.is_empty()
+            && self.progress_unknown_total.is_empty()
+            && self.physical_write.is_empty()
+            && self.destination.is_empty()
+            && self.control_support.is_empty()
+            && self.direct_details.is_empty()
+            && self.removal.is_empty()
+            && self.unsupported_control.is_empty()
+            && self.settings_changed.is_none()
+    }
+
+    pub fn settings_changed(settings: ServiceSettings) -> Self {
+        Self {
+            settings_changed: Some(settings),
+            ..Self::default()
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferLifecycleCode {
+    Added = 1,
+    Restored = 2,
+    Terminal = 3,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferSourceKindCode {
+    Unknown = 0,
+    DirectHttp = 1,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirectDetailStateCode {
+    Unsupported = 0,
+    Loading = 1,
+    Segments = 2,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferSummaryTable {
+    // Hot transfer columns first; cold labels and paths stay at the end.
+    pub ids: Vec<TransferId>,
+    pub downloaded_bytes: Vec<u64>,
+    pub speed_bytes_per_sec: Vec<u64>,
+    pub known_total_bytes: Vec<u64>,
+    pub known_total_rows: Vec<u32>,
+    pub kind_codes: Vec<u8>,
+    pub source_kind_codes: Vec<u8>,
+    pub status_codes: Vec<u8>,
+    pub control_flags: Vec<u8>,
+    pub source_labels: Vec<String>,
+    pub destinations: Vec<PathBuf>,
+}
+
+impl TransferSummaryTable {
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn push_summary(&mut self, summary: TransferSummary) {
+        let row = self.ids.len();
+        self.ids.push(summary.id);
+        self.kind_codes.push(transfer_kind_code(summary.kind));
+        self.source_kind_codes
+            .push(source_kind_code(&summary.provider_kind));
+        self.status_codes.push(transfer_status_code(summary.status));
+        self.downloaded_bytes.push(summary.downloaded_bytes);
+        self.speed_bytes_per_sec.push(summary.speed_bytes_per_sec);
+        self.control_flags
+            .push(control_support_flags(summary.control_support));
+        self.source_labels.push(summary.source_label);
+        self.destinations.push(summary.destination);
+        if let Some(total) = summary.total_bytes {
+            self.known_total_rows.push(row as u32);
+            self.known_total_bytes.push(total);
+        }
+    }
+
+    pub fn replace_summary(&mut self, row: usize, summary: TransferSummary) {
+        if row >= self.len() {
+            return;
+        }
+        self.ids[row] = summary.id;
+        self.kind_codes[row] = transfer_kind_code(summary.kind);
+        self.source_kind_codes[row] = source_kind_code(&summary.provider_kind);
+        self.status_codes[row] = transfer_status_code(summary.status);
+        self.downloaded_bytes[row] = summary.downloaded_bytes;
+        self.speed_bytes_per_sec[row] = summary.speed_bytes_per_sec;
+        self.control_flags[row] = control_support_flags(summary.control_support);
+        self.source_labels[row] = summary.source_label;
+        self.destinations[row] = summary.destination;
+        self.set_total(row, summary.total_bytes);
+    }
+
+    pub fn remove_row(&mut self, row: usize) {
+        self.ids.remove(row);
+        self.kind_codes.remove(row);
+        self.source_kind_codes.remove(row);
+        self.status_codes.remove(row);
+        self.downloaded_bytes.remove(row);
+        self.speed_bytes_per_sec.remove(row);
+        self.control_flags.remove(row);
+        self.source_labels.remove(row);
+        self.destinations.remove(row);
+        let mut next_rows = Vec::with_capacity(self.known_total_rows.len());
+        let mut next_totals = Vec::with_capacity(self.known_total_bytes.len());
+        for (&known_row, &total) in self
+            .known_total_rows
+            .iter()
+            .zip(self.known_total_bytes.iter())
+        {
+            let known_row = known_row as usize;
+            if known_row == row {
+                continue;
+            }
+            let adjusted = if known_row > row {
+                known_row - 1
+            } else {
+                known_row
+            };
+            next_rows.push(adjusted as u32);
+            next_totals.push(total);
+        }
+        self.known_total_rows = next_rows;
+        self.known_total_bytes = next_totals;
+    }
+
+    pub fn summary(&self, row: usize) -> Option<TransferSummary> {
+        Some(TransferSummary {
+            id: *self.ids.get(row)?,
+            kind: transfer_kind_from_code(*self.kind_codes.get(row)?),
+            provider_kind: source_kind_label(*self.source_kind_codes.get(row)?).to_string(),
+            source_label: self.source_labels.get(row)?.clone(),
+            destination: self.destinations.get(row)?.clone(),
+            status: transfer_status_from_code(*self.status_codes.get(row)?),
+            downloaded_bytes: *self.downloaded_bytes.get(row)?,
+            total_bytes: self.total_bytes(row),
+            speed_bytes_per_sec: *self.speed_bytes_per_sec.get(row)?,
+            control_support: control_support_from_flags(*self.control_flags.get(row)?),
+        })
+    }
+
+    pub fn summaries(&self) -> Vec<TransferSummary> {
+        (0..self.len())
+            .filter_map(|row| self.summary(row))
+            .collect()
+    }
+
+    pub fn total_bytes(&self, row: usize) -> Option<u64> {
+        self.known_total_rows
+            .iter()
+            .position(|known_row| *known_row as usize == row)
+            .map(|index| self.known_total_bytes[index])
+    }
+
+    pub fn set_total(&mut self, row: usize, total: Option<u64>) {
+        match (
+            self.known_total_rows
+                .iter()
+                .position(|known_row| *known_row as usize == row),
+            total,
+        ) {
+            (Some(index), Some(total)) => {
+                self.known_total_bytes[index] = total;
+            }
+            (Some(index), None) => {
+                self.known_total_rows.remove(index);
+                self.known_total_bytes.remove(index);
+            }
+            (None, Some(total)) => {
+                self.known_total_rows.push(row as u32);
+                self.known_total_bytes.push(total);
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectDetailsTable {
+    // Segment metadata is separate from packed cell codes; state sets stay explicit.
+    pub segment_ids: Vec<TransferId>,
+    pub segment_total_bytes: Vec<u64>,
+    pub segment_cell_offsets: Vec<u32>,
+    pub segment_cell_lengths: Vec<u32>,
+    pub segment_cells: Vec<u8>,
+    pub unsupported_ids: Vec<TransferId>,
+    pub loading_ids: Vec<TransferId>,
+}
+
+impl DirectDetailsTable {
+    pub fn is_empty(&self) -> bool {
+        self.unsupported_ids.is_empty()
+            && self.loading_ids.is_empty()
+            && self.segment_ids.is_empty()
+    }
+
+    pub fn push_state(&mut self, id: TransferId, state: crate::engine::DirectChunkMapState) {
+        self.remove(id);
+        match state {
+            crate::engine::DirectChunkMapState::Unsupported => self.unsupported_ids.push(id),
+            crate::engine::DirectChunkMapState::Loading => self.loading_ids.push(id),
+            crate::engine::DirectChunkMapState::Segments(snapshot) => {
+                self.segment_ids.push(id);
+                self.segment_total_bytes.push(snapshot.total_bytes);
+                self.segment_cell_offsets
+                    .push(self.segment_cells.len() as u32);
+                self.segment_cell_lengths.push(snapshot.cells.len() as u32);
+                self.segment_cells
+                    .extend(snapshot.cells.into_iter().map(chunk_map_cell_code));
+            }
+        }
+    }
+
+    pub fn push_details(&mut self, id: TransferId, details: TransferDetails) {
+        match details {
+            TransferDetails::Direct(details) => self.push_state(id, details.chunk_map_state),
+        }
+    }
+
+    pub fn state_for(&self, id: TransferId) -> crate::engine::DirectChunkMapState {
+        if self.unsupported_ids.contains(&id) {
+            return crate::engine::DirectChunkMapState::Unsupported;
+        }
+        if self.loading_ids.contains(&id) {
+            return crate::engine::DirectChunkMapState::Loading;
+        }
+        if let Some(index) = self.segment_ids.iter().position(|current| *current == id) {
+            let offset = self.segment_cell_offsets[index] as usize;
+            let len = self.segment_cell_lengths[index] as usize;
+            let cells = self.segment_cells[offset..offset + len]
+                .iter()
+                .map(|code| chunk_map_cell_from_code(*code))
+                .collect();
+            return crate::engine::DirectChunkMapState::Segments(
+                crate::engine::DirectChunkMapSnapshot {
+                    total_bytes: self.segment_total_bytes[index],
+                    cells,
+                },
+            );
+        }
+        crate::engine::DirectChunkMapState::Unsupported
+    }
+
+    pub fn remove(&mut self, id: TransferId) {
+        self.unsupported_ids.retain(|current| *current != id);
+        self.loading_ids.retain(|current| *current != id);
+        if let Some(index) = self.segment_ids.iter().position(|current| *current == id) {
+            self.segment_ids.remove(index);
+            self.segment_total_bytes.remove(index);
+            self.segment_cell_offsets.remove(index);
+            self.segment_cell_lengths.remove(index);
+            self.rebuild_segment_cells();
+        }
+    }
+
+    fn rebuild_segment_cells(&mut self) {
+        let states: Vec<_> = self
+            .segment_ids
+            .iter()
+            .map(|id| self.state_for(*id))
+            .collect();
+        let ids = self.segment_ids.clone();
+        self.segment_ids.clear();
+        self.segment_total_bytes.clear();
+        self.segment_cell_offsets.clear();
+        self.segment_cell_lengths.clear();
+        self.segment_cells.clear();
+        for (id, state) in ids.into_iter().zip(states) {
+            self.push_state(id, state);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferLifecycleBatch {
+    pub transfers: TransferSummaryTable,
+    pub lifecycle_codes: Vec<u8>,
+}
+
+impl TransferLifecycleBatch {
+    pub fn is_empty(&self) -> bool {
+        self.lifecycle_codes.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressKnownTotalBatch {
+    pub ids: Vec<TransferId>,
+    pub downloaded_bytes: Vec<u64>,
+    pub total_bytes: Vec<u64>,
+    pub speed_bytes_per_sec: Vec<u64>,
+}
+
+impl ProgressKnownTotalBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressUnknownTotalBatch {
+    pub ids: Vec<TransferId>,
+    pub downloaded_bytes: Vec<u64>,
+    pub speed_bytes_per_sec: Vec<u64>,
+}
+
+impl ProgressUnknownTotalBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalWriteBatch {
+    pub ids: Vec<TransferId>,
+    pub bytes: Vec<u64>,
+}
+
+impl PhysicalWriteBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestinationBatch {
+    pub ids: Vec<TransferId>,
+    pub destinations: Vec<PathBuf>,
+}
+
+impl DestinationBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlSupportBatch {
+    pub ids: Vec<TransferId>,
+    pub control_flags: Vec<u8>,
+}
+
+impl ControlSupportBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn support(&self, row: usize) -> Option<TransferControlSupport> {
+        self.control_flags
+            .get(row)
+            .copied()
+            .map(control_support_from_flags)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferRemovalBatch {
+    pub ids: Vec<TransferId>,
+    pub action_codes: Vec<u8>,
+    pub artifact_state_codes: Vec<u8>,
+}
+
+impl TransferRemovalBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn action(&self, row: usize) -> Option<LiveTransferRemovalAction> {
+        self.action_codes
+            .get(row)
+            .copied()
+            .map(removal_action_from_code)
+    }
+
+    pub fn artifact_state(&self, row: usize) -> Option<ArtifactState> {
+        self.artifact_state_codes
+            .get(row)
+            .copied()
+            .map(artifact_state_from_code)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsupportedControlBatch {
+    pub ids: Vec<TransferId>,
+    pub action_codes: Vec<u8>,
+}
+
+impl UnsupportedControlBatch {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn action(&self, row: usize) -> Option<TransferControlAction> {
+        self.action_codes
+            .get(row)
+            .copied()
+            .map(control_action_from_code)
+    }
+}
+
+pub(crate) fn transfer_kind_code(kind: TransferKind) -> u8 {
+    kind as u8
+}
+
+pub(crate) fn transfer_kind_from_code(code: u8) -> TransferKind {
+    match code {
+        0 => TransferKind::Direct,
+        _ => TransferKind::Direct,
+    }
+}
+
+pub(crate) fn source_kind_code(kind: &str) -> u8 {
+    match kind {
+        "http" => TransferSourceKindCode::DirectHttp as u8,
+        _ => TransferSourceKindCode::Unknown as u8,
+    }
+}
+
+pub(crate) fn source_kind_label(code: u8) -> &'static str {
+    match code {
+        code if code == TransferSourceKindCode::DirectHttp as u8 => "http",
+        _ => "unknown",
+    }
+}
+
+pub(crate) fn transfer_status_code(status: TransferStatus) -> u8 {
+    status as u8
+}
+
+pub(crate) fn transfer_status_from_code(code: u8) -> TransferStatus {
+    match code {
+        0 => TransferStatus::Pending,
+        1 => TransferStatus::Downloading,
+        2 => TransferStatus::Paused,
+        3 => TransferStatus::Finished,
+        4 => TransferStatus::Error,
+        5 => TransferStatus::Cancelled,
+        _ => TransferStatus::Error,
+    }
+}
+
+pub(crate) fn control_support_flags(support: TransferControlSupport) -> u8 {
+    u8::from(support.can_pause)
+        | (u8::from(support.can_resume) << 1)
+        | (u8::from(support.can_cancel) << 2)
+        | (u8::from(support.can_restore) << 3)
+}
+
+pub(crate) fn control_support_from_flags(flags: u8) -> TransferControlSupport {
+    TransferControlSupport {
+        can_pause: flags & 1 != 0,
+        can_resume: flags & (1 << 1) != 0,
+        can_cancel: flags & (1 << 2) != 0,
+        can_restore: flags & (1 << 3) != 0,
+    }
+}
+
+pub(crate) fn chunk_map_cell_code(state: crate::engine::ChunkMapCellState) -> u8 {
+    state as u8
+}
+
+pub(crate) fn chunk_map_cell_from_code(code: u8) -> crate::engine::ChunkMapCellState {
+    match code {
+        0 => crate::engine::ChunkMapCellState::Empty,
+        1 => crate::engine::ChunkMapCellState::Partial,
+        2 => crate::engine::ChunkMapCellState::Complete,
+        _ => crate::engine::ChunkMapCellState::Empty,
+    }
+}
+
+pub(crate) fn control_action_code(action: TransferControlAction) -> u8 {
+    action as u8
+}
+
+pub(crate) fn control_action_from_code(code: u8) -> TransferControlAction {
+    match code {
+        0 => TransferControlAction::Pause,
+        1 => TransferControlAction::Resume,
+        2 => TransferControlAction::Cancel,
+        3 => TransferControlAction::Restore,
+        _ => TransferControlAction::Cancel,
+    }
+}
+
+pub(crate) fn artifact_state_code(state: ArtifactState) -> u8 {
+    state as u8
+}
+
+pub(crate) fn artifact_state_from_code(code: u8) -> ArtifactState {
+    match code {
+        0 => ArtifactState::Present,
+        1 => ArtifactState::Deleted,
+        2 => ArtifactState::Missing,
+        _ => ArtifactState::Missing,
+    }
+}
+
+pub(crate) fn removal_action_code(action: LiveTransferRemovalAction) -> u8 {
+    action as u8
+}
+
+pub(crate) fn removal_action_from_code(code: u8) -> LiveTransferRemovalAction {
+    match code {
+        0 => LiveTransferRemovalAction::Cancelled,
+        1 => LiveTransferRemovalAction::DeleteArtifact,
+        _ => LiveTransferRemovalAction::Cancelled,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

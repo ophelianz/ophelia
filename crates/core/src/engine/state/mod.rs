@@ -114,7 +114,7 @@ fn spawn_worker(db: Db, rx: std::sync::mpsc::Receiver<DbEvent>) -> DbWorkerHandl
 mod tests {
     use super::*;
     use crate::engine::types::{
-        ChunkSnapshot, HttpResumeData, PersistedDownloadSource, ProviderResumeData, TransferId,
+        ChunkSnapshot, HttpResumeData, PersistedDownloadSource, RunnerResumeData, TransferId,
         TransferStatus,
     };
     use std::path::PathBuf;
@@ -144,7 +144,7 @@ mod tests {
         tx.send(DbEvent::Paused {
             id: TransferId(10),
             downloaded_bytes: 64,
-            resume_data: Some(ProviderResumeData::Http(HttpResumeData::new(vec![
+            resume_data: Some(RunnerResumeData::Http(HttpResumeData::new(vec![
                 ChunkSnapshot {
                     start: 0,
                     end: 100,

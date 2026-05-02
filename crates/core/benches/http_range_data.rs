@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 mod engine {
-    pub use ophelia::engine::{ChunkMapCellState, HttpChunkMapSnapshot};
+    pub use ophelia::engine::{ChunkMapCellState, DirectChunkMapSnapshot};
 
     pub(crate) mod http {
         pub(crate) use crate::events;

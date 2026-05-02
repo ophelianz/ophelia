@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransferId(pub u64);
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferStatus {
     Pending,
@@ -39,6 +40,7 @@ pub enum TransferStatus {
 }
 
 /// Controls the engine can ask a download to perform
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferControlAction {
     Pause,
@@ -77,6 +79,7 @@ impl TransferControlSupport {
 }
 
 /// File state for history rows
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArtifactState {
     Present,
@@ -84,6 +87,7 @@ pub enum ArtifactState {
     Missing,
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChunkMapCellState {
     Empty,
@@ -92,16 +96,44 @@ pub enum ChunkMapCellState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpChunkMapSnapshot {
+pub struct DirectChunkMapSnapshot {
     pub total_bytes: u64,
     pub cells: Vec<ChunkMapCellState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransferChunkMapState {
+pub enum DirectChunkMapState {
     Unsupported,
     Loading,
-    Http(HttpChunkMapSnapshot),
+    Segments(DirectChunkMapSnapshot),
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferKind {
+    Direct,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectTransferDetails {
+    pub chunk_map_state: DirectChunkMapState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferDetails {
+    Direct(DirectTransferDetails),
+}
+
+impl TransferDetails {
+    pub fn direct(chunk_map_state: DirectChunkMapState) -> Self {
+        Self::Direct(DirectTransferDetails { chunk_map_state })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferDetailsSnapshot {
+    pub id: TransferId,
+    pub details: TransferDetails,
 }
 
 /// Events sent to the SQLite worker
@@ -125,7 +157,7 @@ pub enum DbEvent {
     Paused {
         id: TransferId,
         downloaded_bytes: u64,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     },
     Resumed {
         id: TransferId,
@@ -147,6 +179,7 @@ pub enum DbEvent {
 }
 
 /// Filter for the history view
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryFilter {
     All,
@@ -195,7 +228,7 @@ pub struct SavedDownload {
     pub destination: PathBuf,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
-    pub resume_data: Option<ProviderResumeData>,
+    pub resume_data: Option<RunnerResumeData>,
 }
 
 /// Source saved with a transfer record
@@ -267,11 +300,11 @@ impl HttpResumeData {
 
 /// Resume data grouped by source kind
 #[derive(Debug, Clone)]
-pub enum ProviderResumeData {
+pub enum RunnerResumeData {
     Http(HttpResumeData),
 }
 
-impl ProviderResumeData {
+impl RunnerResumeData {
     pub fn as_http(&self) -> Option<&HttpResumeData> {
         match self {
             Self::Http(data) => Some(data),
@@ -303,6 +336,7 @@ pub struct ProgressUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferSummary {
     pub id: TransferId,
+    pub kind: TransferKind,
     pub provider_kind: String,
     pub source_label: String,
     pub destination: PathBuf,
@@ -311,9 +345,9 @@ pub struct TransferSummary {
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_sec: u64,
     pub control_support: TransferControlSupport,
-    pub chunk_map_state: TransferChunkMapState,
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineError {
     Closed,
@@ -341,6 +375,7 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 /// Why a live transfer row left the Transfers view
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveTransferRemovalAction {
     Cancelled,
@@ -351,7 +386,7 @@ pub enum LiveTransferRemovalAction {
 /// Public only because direct HTTP task tests call `download_task`
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-pub enum TaskRuntimeUpdate {
+pub enum RunnerEvent {
     Progress(ProgressUpdate),
     Done {
         id: TransferId,
@@ -371,8 +406,8 @@ pub enum TaskRuntimeUpdate {
         id: TransferId,
         support: TransferControlSupport,
     },
-    ChunkMapChanged {
+    DetailsChanged {
         id: TransferId,
-        state: TransferChunkMapState,
+        details: TransferDetails,
     },
 }

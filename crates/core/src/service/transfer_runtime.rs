@@ -15,13 +15,14 @@ use tokio_util::sync::CancellationToken;
 use crate::config::EngineConfig;
 use crate::disk::DiskHandle;
 use crate::engine::http::TokenBucket;
-use crate::engine::provider::{
-    self, ProviderRuntimeContext, SchedulerKey, SpawnedTask, TaskDestinationSink, TaskPauseSink,
+use crate::engine::runner::{
+    self, RunnerRuntimeContext, SchedulerKey, SpawnedRunnerTask, TaskDestinationSink, TaskPauseSink,
 };
 use crate::engine::{
-    ArtifactState, DbEvent, DownloadSpec, EngineError, LiveTransferRemovalAction, ProgressUpdate,
-    ProviderResumeData, RestoredDownload, TaskRuntimeUpdate, TransferChunkMapState,
-    TransferControlAction, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
+    ArtifactState, DbEvent, DirectChunkMapState, DownloadSpec, EngineError,
+    LiveTransferRemovalAction, ProgressUpdate, RestoredDownload, RunnerEvent, RunnerResumeData,
+    TransferControlAction, TransferControlSupport, TransferDetails, TransferId, TransferKind,
+    TransferStatus, TransferSummary,
 };
 
 const TASK_RUNTIME_UPDATE_CAPACITY: usize = 256;
@@ -38,7 +39,7 @@ struct TaskEntry {
 struct TransferStart {
     id: TransferId,
     spec: DownloadSpec,
-    resume_data: Option<ProviderResumeData>,
+    resume_data: Option<RunnerResumeData>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,7 +61,7 @@ struct TransferTable {
     states: Vec<TransferRuntimeState>,
     specs: Vec<Option<DownloadSpec>>,
     active_entries: Vec<Option<TaskEntry>>,
-    resume_data: Vec<Option<ProviderResumeData>>,
+    resume_data: Vec<Option<RunnerResumeData>>,
     flags: TransferFlags,
     active_rows: Vec<TransferRow>,
     paused_rows: Vec<TransferRow>,
@@ -95,9 +96,9 @@ pub(super) enum TransferRuntimeEvent {
         id: TransferId,
         support: TransferControlSupport,
     },
-    ChunkMapChanged {
+    DetailsChanged {
         id: TransferId,
-        state: TransferChunkMapState,
+        details: TransferDetails,
     },
     TransferRemoved {
         id: TransferId,
@@ -171,7 +172,7 @@ impl TransferTable {
         &mut self,
         id: TransferId,
         spec: DownloadSpec,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) {
         let row = self.prepare_queued(id, spec, resume_data);
         self.queued_rows.push_back(row);
@@ -181,7 +182,7 @@ impl TransferTable {
         &mut self,
         id: TransferId,
         spec: DownloadSpec,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) {
         let row = self.prepare_queued(id, spec, resume_data);
         self.queued_rows.push_front(row);
@@ -191,7 +192,7 @@ impl TransferTable {
         &mut self,
         id: TransferId,
         spec: DownloadSpec,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) {
         let row = self.ensure_row(id);
         self.leave_current_list(row);
@@ -310,7 +311,7 @@ impl TransferTable {
         &mut self,
         id: TransferId,
         spec: DownloadSpec,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) -> TransferRow {
         let row = self.ensure_row(id);
         self.leave_current_list(row);
@@ -414,8 +415,8 @@ pub(super) struct TransferRuntime {
     db_tx: std::sync::mpsc::Sender<DbEvent>,
     /// Global speed cap shared across active downloads
     global_throttle: Arc<TokenBucket>,
-    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
-    runtime_update_rx: mpsc::Receiver<TaskRuntimeUpdate>,
+    runtime_update_tx: mpsc::Sender<RunnerEvent>,
+    runtime_update_rx: mpsc::Receiver<RunnerEvent>,
     events: Vec<TransferRuntimeEvent>,
 }
 
@@ -427,7 +428,7 @@ impl TransferRuntime {
         disk: DiskHandle,
     ) -> Self {
         let (runtime_update_tx, runtime_update_rx) =
-            mpsc::channel::<TaskRuntimeUpdate>(TASK_RUNTIME_UPDATE_CAPACITY);
+            mpsc::channel::<RunnerEvent>(TASK_RUNTIME_UPDATE_CAPACITY);
         let max_concurrent = config.max_concurrent_downloads;
         let global_throttle = Arc::new(TokenBucket::new(config.global_speed_limit_bps));
         Self {
@@ -446,7 +447,7 @@ impl TransferRuntime {
     }
 
     fn shared_scheduler_semaphore(&mut self, spec: &DownloadSpec) -> Option<Arc<Semaphore>> {
-        let requirement = provider::capabilities(spec, &self.config).shared_scheduler?;
+        let requirement = runner::capabilities(spec, &self.config).shared_scheduler?;
         Some(
             self.shared_schedulers
                 .entry(requirement.key)
@@ -544,19 +545,19 @@ impl TransferRuntime {
         &mut self,
         id: TransferId,
         spec: DownloadSpec,
-        resume_data: Option<ProviderResumeData>,
+        resume_data: Option<RunnerResumeData>,
     ) {
         let pause_token = CancellationToken::new();
-        let SpawnedTask {
+        let SpawnedRunnerTask {
             handle,
             pause_sink,
             destination_sink,
-        } = provider::spawn_task(
+        } = runner::spawn_task(
             id,
             &spec,
             pause_token.clone(),
             resume_data,
-            ProviderRuntimeContext {
+            RunnerRuntimeContext {
                 shared_scheduler_semaphore: self.shared_scheduler_semaphore(&spec),
                 global_throttle: Arc::clone(&self.global_throttle),
                 disk: self.disk.clone(),
@@ -564,7 +565,7 @@ impl TransferRuntime {
             },
         );
 
-        let chunk_map_state = spec.active_chunk_map_state();
+        let details = spec.active_details();
         let control_support = spec.control_support();
         self.transfers.set_active(
             id,
@@ -577,11 +578,8 @@ impl TransferRuntime {
                 control_support,
             },
         );
-        self.emit(TransferRuntimeEvent::ChunkMapChanged {
-            id,
-            state: chunk_map_state,
-        })
-        .await;
+        self.emit(TransferRuntimeEvent::DetailsChanged { id, details })
+            .await;
     }
 
     /// Start queued downloads until capacity is full
@@ -607,14 +605,7 @@ impl TransferRuntime {
     ) -> Result<TransferId, EngineError> {
         let _ = self.db_tx.send(self.added_event(id, &spec));
         self.emit(TransferRuntimeEvent::TransferAdded {
-            snapshot: self.transfer_snapshot(
-                id,
-                &spec,
-                TransferStatus::Pending,
-                0,
-                None,
-                TransferChunkMapState::Unsupported,
-            ),
+            snapshot: self.transfer_snapshot(id, &spec, TransferStatus::Pending, 0, None),
         })
         .await;
         if self.transfers.active_len() < self.max_concurrent {
@@ -633,7 +624,7 @@ impl TransferRuntime {
         Ok(id)
     }
 
-    /// Soft pause: fire the CancellationToken, then wait for TaskRuntimeUpdate::Done
+    /// Soft pause: fire the CancellationToken, then wait for RunnerEvent::Done
     /// If the download is still queued, move it to paused directly
     async fn handle_pause(&mut self, id: TransferId) -> Result<(), EngineError> {
         let Some((supports_pause, _)) = self.pause_target(id) else {
@@ -659,9 +650,9 @@ impl TransferRuntime {
                 downloaded_bytes: 0,
                 resume_data: None,
             });
-            self.emit(TransferRuntimeEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::DetailsChanged {
                 id,
-                state: TransferChunkMapState::Unsupported,
+                details: unsupported_direct_details(),
             })
             .await;
             self.emit(self.status_event(id, TransferStatus::Paused, 0, None))
@@ -672,12 +663,12 @@ impl TransferRuntime {
     }
 
     async fn handle_restore(&mut self, download: RestoredDownload) -> Result<(), EngineError> {
-        if !provider::supports_control_action(&download.spec, TransferControlAction::Restore) {
+        if !runner::supports_control_action(&download.spec, TransferControlAction::Restore) {
             self.notify_unsupported_control(download.id, TransferControlAction::Restore)
                 .await;
             tracing::warn!(
                 id = download.id.0,
-                "provider does not support restart restore for this download"
+                "runner does not support restart restore for this download"
             );
             return Err(EngineError::Unsupported {
                 id: download.id,
@@ -693,7 +684,6 @@ impl TransferRuntime {
                 TransferStatus::Paused,
                 downloaded_bytes,
                 total_bytes,
-                TransferChunkMapState::Unsupported,
             ),
         })
         .await;
@@ -710,7 +700,7 @@ impl TransferRuntime {
         let Some(spec) = self.resume_target_spec(id) else {
             return Err(EngineError::NotFound { id });
         };
-        if !provider::supports_control_action(spec, TransferControlAction::Resume) {
+        if !runner::supports_control_action(spec, TransferControlAction::Resume) {
             self.notify_unsupported_control(id, TransferControlAction::Resume)
                 .await;
             return Err(EngineError::Unsupported {
@@ -780,9 +770,9 @@ impl TransferRuntime {
             let _ = self
                 .db_tx
                 .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-            self.emit(TransferRuntimeEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::DetailsChanged {
                 id,
-                state: TransferChunkMapState::Unsupported,
+                details: unsupported_direct_details(),
             })
             .await;
             self.emit(TransferRuntimeEvent::TransferRemoved {
@@ -817,9 +807,9 @@ impl TransferRuntime {
         let _ = self
             .db_tx
             .send(DbEvent::ArtifactStateChanged { id, artifact_state });
-        self.emit(TransferRuntimeEvent::ChunkMapChanged {
+        self.emit(TransferRuntimeEvent::DetailsChanged {
             id,
-            state: TransferChunkMapState::Unsupported,
+            details: unsupported_direct_details(),
         })
         .await;
         self.emit(TransferRuntimeEvent::TransferRemoved {
@@ -865,9 +855,9 @@ impl TransferRuntime {
 
         match status {
             TransferStatus::Finished => {
-                self.emit(TransferRuntimeEvent::ChunkMapChanged {
+                self.emit(TransferRuntimeEvent::DetailsChanged {
                     id,
-                    state: TransferChunkMapState::Unsupported,
+                    details: unsupported_direct_details(),
                 })
                 .await;
                 let _ = self.db_tx.send(DbEvent::Finished {
@@ -877,9 +867,9 @@ impl TransferRuntime {
                 self.try_start_next().await;
             }
             TransferStatus::Error => {
-                self.emit(TransferRuntimeEvent::ChunkMapChanged {
+                self.emit(TransferRuntimeEvent::DetailsChanged {
                     id,
-                    state: TransferChunkMapState::Unsupported,
+                    details: unsupported_direct_details(),
                 })
                 .await;
                 let _ = self.db_tx.send(DbEvent::Error { id });
@@ -913,9 +903,9 @@ impl TransferRuntime {
         Ok(())
     }
 
-    async fn handle_runtime_update(&mut self, update: TaskRuntimeUpdate) {
+    async fn handle_runtime_update(&mut self, update: RunnerEvent) {
         match update {
-            TaskRuntimeUpdate::Progress(update) => {
+            RunnerEvent::Progress(update) => {
                 if self.transfers.contains_active(update.id)
                     || matches!(
                         update.status,
@@ -925,7 +915,7 @@ impl TransferRuntime {
                     self.emit(TransferRuntimeEvent::Progress(update)).await;
                 }
             }
-            TaskRuntimeUpdate::Done {
+            RunnerEvent::Done {
                 id,
                 status,
                 downloaded_bytes,
@@ -934,14 +924,14 @@ impl TransferRuntime {
                 self.handle_task_done(id, status, downloaded_bytes, total_bytes)
                     .await;
             }
-            TaskRuntimeUpdate::TransferBytesWritten { id, bytes } => {
+            RunnerEvent::TransferBytesWritten { id, bytes } => {
                 if !self.transfers.contains_active(id) {
                     return;
                 }
                 self.emit(TransferRuntimeEvent::TransferBytesWritten { id, bytes })
                     .await;
             }
-            TaskRuntimeUpdate::DestinationChanged { id, destination } => {
+            RunnerEvent::DestinationChanged { id, destination } => {
                 if !self.transfers.contains_active(id) {
                     return;
                 }
@@ -959,7 +949,7 @@ impl TransferRuntime {
                 self.emit(TransferRuntimeEvent::DestinationChanged { id, destination })
                     .await;
             }
-            TaskRuntimeUpdate::ControlSupportChanged { id, support } => {
+            RunnerEvent::ControlSupportChanged { id, support } => {
                 let Some(entry) = self.transfers.active_entry_mut(id) else {
                     return;
                 };
@@ -970,11 +960,11 @@ impl TransferRuntime {
                 self.emit(TransferRuntimeEvent::ControlSupportChanged { id, support })
                     .await;
             }
-            TaskRuntimeUpdate::ChunkMapChanged { id, state } => {
+            RunnerEvent::DetailsChanged { id, details } => {
                 if !self.transfers.contains_active(id) {
                     return;
                 }
-                self.emit(TransferRuntimeEvent::ChunkMapChanged { id, state })
+                self.emit(TransferRuntimeEvent::DetailsChanged { id, details })
                     .await;
             }
         }
@@ -986,10 +976,10 @@ impl TransferRuntime {
         new_config: &EngineConfig,
     ) {
         for (key, semaphore) in &self.shared_schedulers {
-            let Some(old_limit) = provider::shared_scheduler_limit(key, old_config) else {
+            let Some(old_limit) = runner::shared_scheduler_limit(key, old_config) else {
                 continue;
             };
-            let Some(new_limit) = provider::shared_scheduler_limit(key, new_config) else {
+            let Some(new_limit) = runner::shared_scheduler_limit(key, new_config) else {
                 continue;
             };
             if old_limit == new_limit {
@@ -1010,7 +1000,7 @@ impl TransferRuntime {
     fn added_event(&self, id: TransferId, spec: &DownloadSpec) -> DbEvent {
         DbEvent::Added {
             id,
-            source: provider::persisted_source(spec),
+            source: runner::persisted_source(spec),
             destination: spec.destination().to_path_buf(),
         }
     }
@@ -1038,10 +1028,10 @@ impl TransferRuntime {
         status: TransferStatus,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
-        chunk_map_state: TransferChunkMapState,
     ) -> TransferSummary {
         TransferSummary {
             id,
+            kind: TransferKind::Direct,
             provider_kind: spec.provider_kind().to_string(),
             source_label: spec.source_label().to_string(),
             destination: spec.destination().to_path_buf(),
@@ -1050,7 +1040,6 @@ impl TransferRuntime {
             total_bytes,
             speed_bytes_per_sec: 0,
             control_support: spec.control_support(),
-            chunk_map_state,
         }
     }
 
@@ -1058,7 +1047,7 @@ impl TransferRuntime {
         if !self.transfers.pause_requested(id) {
             tracing::warn!(id = id.0, "download paused without a service pause request");
         }
-        let resume_data = provider::take_resume_data(entry.pause_sink);
+        let resume_data = runner::take_resume_data(entry.pause_sink);
         if let Some(resume_data) = resume_data {
             let downloaded_bytes = resume_data.downloaded_bytes();
             let total_bytes = resume_data.total_bytes();
@@ -1067,9 +1056,9 @@ impl TransferRuntime {
                 downloaded_bytes,
                 resume_data: Some(resume_data.clone()),
             });
-            self.emit(TransferRuntimeEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::DetailsChanged {
                 id,
-                state: TransferChunkMapState::Unsupported,
+                details: unsupported_direct_details(),
             })
             .await;
             self.emit(self.status_event(id, TransferStatus::Paused, downloaded_bytes, total_bytes))
@@ -1078,9 +1067,9 @@ impl TransferRuntime {
         } else {
             tracing::warn!(id = id.0, "download reported paused without resume data");
             let _ = self.db_tx.send(DbEvent::Error { id });
-            self.emit(TransferRuntimeEvent::ChunkMapChanged {
+            self.emit(TransferRuntimeEvent::DetailsChanged {
                 id,
-                state: TransferChunkMapState::Unsupported,
+                details: unsupported_direct_details(),
             })
             .await;
             self.emit(self.status_event(id, TransferStatus::Error, 0, None))
@@ -1103,7 +1092,7 @@ impl TransferRuntime {
         }
         let spec = self.transfers.spec(id)?;
         Some((
-            provider::supports_control_action(spec, TransferControlAction::Pause),
+            runner::supports_control_action(spec, TransferControlAction::Pause),
             spec,
         ))
     }
@@ -1125,7 +1114,7 @@ impl TransferRuntime {
         }
         let spec = self.transfers.spec(id)?;
         Some((
-            provider::supports_control_action(spec, TransferControlAction::Cancel),
+            runner::supports_control_action(spec, TransferControlAction::Cancel),
             spec.destination().to_path_buf(),
         ))
     }
@@ -1142,7 +1131,7 @@ impl TransferRuntime {
 }
 
 fn runtime_destination(spec: &DownloadSpec, entry: &TaskEntry) -> PathBuf {
-    provider::current_destination(&entry.destination_sink)
+    runner::current_destination(&entry.destination_sink)
         .unwrap_or_else(|| spec.destination().to_path_buf())
 }
 
@@ -1153,7 +1142,7 @@ fn sync_runtime_destination(
     spec: &mut DownloadSpec,
     destination_sink: &TaskDestinationSink,
 ) {
-    let Some(destination) = provider::current_destination(destination_sink) else {
+    let Some(destination) = runner::current_destination(destination_sink) else {
         return;
     };
     if destination == spec.destination() {
@@ -1167,9 +1156,13 @@ fn sync_runtime_destination(
     events.push(TransferRuntimeEvent::DestinationChanged { id, destination });
 }
 
-fn snapshot_totals(resume_data: Option<&ProviderResumeData>) -> (u64, Option<u64>) {
+fn snapshot_totals(resume_data: Option<&RunnerResumeData>) -> (u64, Option<u64>) {
     match resume_data {
         Some(data) => (data.downloaded_bytes(), data.total_bytes()),
         None => (0, None),
     }
+}
+
+fn unsupported_direct_details() -> TransferDetails {
+    TransferDetails::direct(DirectChunkMapState::Unsupported)
 }

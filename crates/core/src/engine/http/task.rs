@@ -37,8 +37,7 @@ use crate::engine::destination::{DestinationPolicy, ResolvedDestination, part_pa
 use crate::engine::http::throttle::{Throttle, TokenBucket};
 use crate::engine::http::{HttpDownloadConfig, HttpRangeStrategyConfig};
 use crate::engine::types::{
-    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferControlSupport, TransferId,
-    TransferStatus,
+    ChunkSnapshot, ProgressUpdate, RunnerEvent, TransferControlSupport, TransferId, TransferStatus,
 };
 
 use super::config::RangeOrdering;
@@ -70,7 +69,7 @@ pub struct DownloadTaskRequest {
     pub server_semaphore: Arc<Semaphore>,
     pub global_throttle: Arc<TokenBucket>,
     pub(crate) disk: DiskHandle,
-    pub runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    pub runtime_update_tx: mpsc::Sender<RunnerEvent>,
 }
 
 impl DownloadTaskRequest {
@@ -87,7 +86,7 @@ impl DownloadTaskRequest {
         resume_from: Option<Vec<ChunkSnapshot>>,
         server_semaphore: Arc<Semaphore>,
         global_throttle: Arc<TokenBucket>,
-        runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+        runtime_update_tx: mpsc::Sender<RunnerEvent>,
     ) -> Self {
         Self {
             id,
@@ -150,14 +149,14 @@ struct ResolveChunksRequest<'a> {
     config: &'a HttpDownloadConfig,
     id: TransferId,
     disk: DiskHandle,
-    runtime_update_tx: &'a mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: &'a mpsc::Sender<RunnerEvent>,
     destination_sink: &'a Arc<Mutex<Option<PathBuf>>>,
     pause_token: &'a CancellationToken,
     throttle: Arc<Throttle>,
 }
 
 async fn send_progress_update(
-    runtime_update_tx: &mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: &mpsc::Sender<RunnerEvent>,
     id: TransferId,
     status: TransferStatus,
     downloaded_bytes: u64,
@@ -165,7 +164,7 @@ async fn send_progress_update(
     speed_bytes_per_sec: u64,
 ) {
     let _ = runtime_update_tx
-        .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+        .send(RunnerEvent::Progress(ProgressUpdate {
             id,
             status,
             downloaded_bytes,
@@ -325,7 +324,7 @@ async fn resolve_chunks(
             *destination_sink.lock().unwrap() = Some(destination.clone());
             if destination != initial_destination {
                 let _ = runtime_update_tx
-                    .send(TaskRuntimeUpdate::DestinationChanged {
+                    .send(RunnerEvent::DestinationChanged {
                         id,
                         destination: destination.clone(),
                     })
@@ -340,15 +339,17 @@ async fn resolve_chunks(
                     "falling back to single stream"
                 );
                 let _ = runtime_update_tx
-                    .send(TaskRuntimeUpdate::ControlSupportChanged {
+                    .send(RunnerEvent::ControlSupportChanged {
                         id,
                         support: single_stream_control_support(),
                     })
                     .await;
                 let _ = runtime_update_tx
-                    .send(TaskRuntimeUpdate::ChunkMapChanged {
+                    .send(RunnerEvent::DetailsChanged {
                         id,
-                        state: crate::engine::TransferChunkMapState::Unsupported,
+                        details: crate::engine::TransferDetails::direct(
+                            crate::engine::DirectChunkMapState::Unsupported,
+                        ),
                     })
                     .await;
                 return Err(single_download(SingleTransferRequest {

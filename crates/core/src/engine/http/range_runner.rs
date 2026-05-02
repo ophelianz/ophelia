@@ -40,7 +40,7 @@ use crate::engine::chunk;
 use crate::engine::http::config::HttpRangeStrategyConfig;
 use crate::engine::http::throttle::Throttle;
 use crate::engine::types::{
-    ChunkSnapshot, ProgressUpdate, TaskRuntimeUpdate, TransferChunkMapState, TransferId,
+    ChunkSnapshot, DirectChunkMapState, ProgressUpdate, RunnerEvent, TransferDetails, TransferId,
     TransferStatus,
 };
 
@@ -81,7 +81,7 @@ pub(super) struct RangeDownloadConfig {
     pub(super) pause_sink: Arc<std::sync::Mutex<Option<Vec<ChunkSnapshot>>>>,
     pub(super) server_semaphore: Arc<Semaphore>,
     pub(super) throttle: Arc<Throttle>,
-    pub(super) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    pub(super) runtime_update_tx: mpsc::Sender<RunnerEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +164,7 @@ struct RangeDownload {
     pause_sink: Arc<std::sync::Mutex<Option<Vec<ChunkSnapshot>>>>,
     server_semaphore: Arc<Semaphore>,
     throttle: Arc<Throttle>,
-    runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    runtime_update_tx: mpsc::Sender<RunnerEvent>,
     events_tx: mpsc::Sender<WorkerEvent>,
     events_rx: mpsc::Receiver<WorkerEvent>,
     workers: JoinSet<()>,
@@ -919,7 +919,7 @@ impl RangeDownload {
         let speed = self.speed.sample(status, downloaded);
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::Progress(ProgressUpdate {
+            .send(RunnerEvent::Progress(ProgressUpdate {
                 id: self.id,
                 status,
                 downloaded_bytes: downloaded,
@@ -951,7 +951,7 @@ impl RangeDownload {
         self.pending_written_bytes = 0;
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::TransferBytesWritten { id: self.id, bytes })
+            .send(RunnerEvent::TransferBytesWritten { id: self.id, bytes })
             .await;
     }
 
@@ -978,9 +978,9 @@ impl RangeDownload {
         );
         let _ = self
             .runtime_update_tx
-            .send(TaskRuntimeUpdate::ChunkMapChanged {
+            .send(RunnerEvent::DetailsChanged {
                 id: self.id,
-                state: TransferChunkMapState::Http(snapshot),
+                details: TransferDetails::direct(DirectChunkMapState::Segments(snapshot)),
             })
             .await;
     }

@@ -2,180 +2,98 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ophelia::ServiceSettings;
 use ophelia::engine::{
-    ArtifactState, LiveTransferRemovalAction, ProgressUpdate, TransferChunkMapState,
-    TransferControlAction, TransferControlSupport, TransferId, TransferStatus, TransferSummary,
+    TransferControlSupport, TransferId, TransferKind, TransferStatus, TransferSummary,
 };
-use ophelia::service::{OpheliaEvent, OpheliaSnapshot};
+use ophelia::service::{OpheliaUpdateBatch, TransferSummaryTable};
 
-#[path = "../src/service/read_model.rs"]
-mod read_model;
-
-use read_model::{OpheliaEventCoalescer, OpheliaReadModel};
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-enum TransferRuntimeEvent {
-    TransferAdded {
-        snapshot: TransferSummary,
-    },
-    TransferRestored {
-        snapshot: TransferSummary,
-    },
-    Progress(ProgressUpdate),
-    TransferBytesWritten {
-        id: TransferId,
-        bytes: u64,
-    },
-    DestinationChanged {
-        id: TransferId,
-        destination: PathBuf,
-    },
-    ControlSupportChanged {
-        id: TransferId,
-        support: TransferControlSupport,
-    },
-    ChunkMapChanged {
-        id: TransferId,
-        state: TransferChunkMapState,
-    },
-    TransferRemoved {
-        id: TransferId,
-        action: LiveTransferRemovalAction,
-        artifact_state: ArtifactState,
-    },
-    ControlUnsupported {
-        id: TransferId,
-        action: TransferControlAction,
-    },
-}
-
-fn snapshot(id: TransferId) -> TransferSummary {
+fn summary(id: TransferId, downloaded_bytes: u64) -> TransferSummary {
     TransferSummary {
         id,
+        kind: TransferKind::Direct,
         provider_kind: "http".into(),
         source_label: "https://example.com/file.bin".into(),
         destination: PathBuf::from("file.bin"),
         status: TransferStatus::Downloading,
-        downloaded_bytes: 0,
+        downloaded_bytes,
         total_bytes: Some(100_000),
-        speed_bytes_per_sec: 0,
+        speed_bytes_per_sec: 64 * 1024,
         control_support: TransferControlSupport::all(),
-        chunk_map_state: TransferChunkMapState::Unsupported,
     }
 }
 
-fn apply_hot_events(count: u64) -> (usize, u64, u64, u64) {
-    let id = TransferId(1);
-    let mut read_model = OpheliaReadModel::default();
-    let mut coalescer = OpheliaEventCoalescer::default();
-    let _ = read_model.apply_transfer_event(
-        TransferRuntimeEvent::TransferAdded {
-            snapshot: snapshot(id),
-        },
-        &mut coalescer,
-    );
+fn build_transfer_table(count: u64) -> TransferSummaryTable {
+    let mut table = TransferSummaryTable::default();
+    for index in 0..count {
+        table.push_summary(summary(TransferId(index), index * 64 * 1024));
+    }
+    table
+}
 
-    for step in 0..count {
-        let downloaded_bytes = step.saturating_mul(64 * 1024);
-        let _ = read_model.apply_transfer_event(
-            TransferRuntimeEvent::Progress(ProgressUpdate {
-                id,
-                status: TransferStatus::Downloading,
-                downloaded_bytes,
-                total_bytes: Some(count.saturating_mul(64 * 1024)),
-                speed_bytes_per_sec: 64 * 1024,
-            }),
-            &mut coalescer,
-        );
-        let _ = read_model.apply_transfer_event(
-            TransferRuntimeEvent::TransferBytesWritten {
-                id,
-                bytes: 64 * 1024,
-            },
-            &mut coalescer,
-        );
+fn build_hot_update_batch(count: u64) -> OpheliaUpdateBatch {
+    let mut batch = OpheliaUpdateBatch::default();
+    for index in 0..count {
+        let id = TransferId(index);
+        batch.progress_known_total.ids.push(id);
+        batch
+            .progress_known_total
+            .downloaded_bytes
+            .push(index * 64 * 1024);
+        batch
+            .progress_known_total
+            .total_bytes
+            .push(count * 64 * 1024);
+        batch
+            .progress_known_total
+            .speed_bytes_per_sec
+            .push(64 * 1024);
+        batch.physical_write.ids.push(id);
+        batch.physical_write.bytes.push(64 * 1024);
+    }
+    batch
+}
+
+fn apply_hot_update_batch(mut table: TransferSummaryTable, batch: &OpheliaUpdateBatch) -> u64 {
+    for row in 0..batch.progress_known_total.ids.len() {
+        if let Some(index) = table
+            .ids
+            .iter()
+            .position(|id| *id == batch.progress_known_total.ids[row])
+        {
+            table.downloaded_bytes[index] = batch.progress_known_total.downloaded_bytes[row];
+            table.speed_bytes_per_sec[index] = batch.progress_known_total.speed_bytes_per_sec[row];
+            table.set_total(index, Some(batch.progress_known_total.total_bytes[row]));
+        }
     }
 
-    let settings = ServiceSettings::default();
-    let snapshot_len = read_model.snapshot(&settings).transfers.len();
-    let has_destination = u64::from(read_model.destination(id).is_some());
-    let has_running = u64::from(read_model.has_running_transfers());
-    read_model.remove(TransferId(999_999));
-    let emitted = coalescer.drain_events().len();
-    let stats = coalescer.stats();
-    (
-        emitted,
-        stats.coalesced_transfer_updates(),
-        stats.coalesced_write_updates(),
-        snapshot_len as u64 + has_destination + has_running,
-    )
+    table.downloaded_bytes.iter().copied().sum()
 }
 
-fn bench_session_event_coalescing(c: &mut Criterion) {
-    c.bench_function("session_event_coalescing_1000_hot_updates", |bench| {
-        bench.iter(|| black_box(apply_hot_events(1_000)));
+fn bench_transfer_table_build(c: &mut Criterion) {
+    c.bench_function("transfer_summary_table_build_1000", |bench| {
+        bench.iter(|| black_box(build_transfer_table(1_000)));
     });
 }
 
-fn bench_session_event_coalescing_large(c: &mut Criterion) {
-    c.bench_function("session_event_coalescing_10000_hot_updates", |bench| {
-        bench.iter(|| black_box(apply_hot_events(10_000)));
+fn bench_update_batch_build(c: &mut Criterion) {
+    c.bench_function("ophelia_update_batch_build_10000_hot_rows", |bench| {
+        bench.iter(|| black_box(build_hot_update_batch(10_000)));
     });
 }
 
-fn bench_session_event_json_transfer_changed(c: &mut Criterion) {
-    let event = OpheliaEvent::TransferChanged {
-        snapshot: snapshot(TransferId(1)),
-    };
+fn bench_update_batch_apply(c: &mut Criterion) {
+    let table = build_transfer_table(10_000);
+    let batch = build_hot_update_batch(10_000);
 
-    c.bench_function("session_event_json_transfer_changed", |bench| {
-        bench.iter(|| serde_json::to_vec(black_box(&event)).unwrap());
-    });
-}
-
-fn bench_session_event_json_write_bytes(c: &mut Criterion) {
-    let event = OpheliaEvent::TransferBytesWritten {
-        id: TransferId(1),
-        bytes: 64 * 1024,
-    };
-
-    c.bench_function("session_event_json_write_bytes", |bench| {
-        bench.iter(|| serde_json::to_vec(black_box(&event)).unwrap());
-    });
-}
-
-fn bench_session_event_json_removed(c: &mut Criterion) {
-    let event = OpheliaEvent::TransferRemoved {
-        id: TransferId(1),
-        action: LiveTransferRemovalAction::DeleteArtifact,
-        artifact_state: ArtifactState::Deleted,
-    };
-
-    c.bench_function("session_event_json_removed", |bench| {
-        bench.iter(|| serde_json::to_vec(black_box(&event)).unwrap());
-    });
-}
-
-fn bench_session_event_json_control_unsupported(c: &mut Criterion) {
-    let event = OpheliaEvent::ControlUnsupported {
-        id: TransferId(1),
-        action: TransferControlAction::Pause,
-    };
-
-    c.bench_function("session_event_json_control_unsupported", |bench| {
-        bench.iter(|| serde_json::to_vec(black_box(&event)).unwrap());
+    c.bench_function("ophelia_update_batch_apply_10000_hot_rows", |bench| {
+        bench.iter(|| black_box(apply_hot_update_batch(table.clone(), black_box(&batch))));
     });
 }
 
 criterion_group!(
     benches,
-    bench_session_event_coalescing,
-    bench_session_event_coalescing_large,
-    bench_session_event_json_transfer_changed,
-    bench_session_event_json_write_bytes,
-    bench_session_event_json_removed,
-    bench_session_event_json_control_unsupported
+    bench_transfer_table_build,
+    bench_update_batch_build,
+    bench_update_batch_apply
 );
 criterion_main!(benches);

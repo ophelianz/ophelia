@@ -1,10 +1,9 @@
 use super::ffi::{
-    XpcConnection, XpcObjectRaw, frame_from_xpc_event, message_from_payload,
-    xpc_connection_activate, xpc_connection_send_message_with_reply,
-    xpc_connection_set_event_handler,
+    XpcConnection, XpcObjectRaw, frame_from_xpc_event, message_from_body, xpc_connection_activate,
+    xpc_connection_send_message_with_reply, xpc_connection_set_event_handler,
 };
-use crate::service::wire::{
-    OpheliaWireCommand, OpheliaWireFrame, command_to_payload, unexpected_wire_frame,
+use crate::service::codec::{
+    OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_to_body, unexpected_xpc_frame,
 };
 use crate::service::{OpheliaCommand, OpheliaError, OpheliaResponse};
 use block2::RcBlock;
@@ -35,8 +34,8 @@ fn dispatch_mach_blocking(
         xpc_connection_activate(connection.raw());
     }
 
-    let command = OpheliaWireCommand { id, command };
-    let message = message_from_payload(&command_to_payload(&command)?)?;
+    let command = OpheliaCommandEnvelope { id, command };
+    let message = message_from_body(&command_to_body(&command)?)?;
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let reply_handler = RcBlock::new(move |reply: XpcObjectRaw| {
         let _ = reply_tx.send(frame_from_xpc_event(reply));
@@ -54,15 +53,15 @@ fn dispatch_mach_blocking(
         .map_err(|_| OpheliaError::Closed)??;
 
     match frame {
-        OpheliaWireFrame::Response {
+        OpheliaFrameEnvelope::Response {
             id: frame_id,
             response,
-        } if frame_id == id => Ok(response),
-        OpheliaWireFrame::Error {
+        } if frame_id == id => Ok(*response),
+        OpheliaFrameEnvelope::Error {
             id: frame_id,
             error,
         } if frame_id == id => Err(error),
-        frame => Err(unexpected_wire_frame("response", frame)),
+        frame => Err(unexpected_xpc_frame("response", frame)),
     }
 }
 

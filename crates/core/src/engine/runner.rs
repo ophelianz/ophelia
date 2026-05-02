@@ -33,11 +33,10 @@ use crate::disk::DiskHandle;
 use crate::engine::http::{DownloadTaskRequest, TaskFinalState, TokenBucket, download_task};
 use crate::engine::{
     ChunkSnapshot, DownloadSource, DownloadSpec, HttpResumeData, PersistedDownloadSource,
-    ProviderResumeData, TaskRuntimeUpdate, TransferControlAction, TransferControlSupport,
-    TransferId,
+    RunnerEvent, RunnerResumeData, TransferControlAction, TransferControlSupport, TransferId,
 };
 
-pub(crate) struct SpawnedTask {
+pub(crate) struct SpawnedRunnerTask {
     pub(crate) handle: JoinHandle<TaskFinalState>,
     pub(crate) pause_sink: TaskPauseSink,
     pub(crate) destination_sink: TaskDestinationSink,
@@ -53,15 +52,15 @@ pub(crate) struct SharedSchedulerRequirement {
     pub(crate) limit: usize,
 }
 
-pub(crate) struct ProviderCapabilities {
+pub(crate) struct RunnerCapabilities {
     pub(crate) shared_scheduler: Option<SharedSchedulerRequirement>,
 }
 
-pub(crate) struct ProviderRuntimeContext {
+pub(crate) struct RunnerRuntimeContext {
     pub(crate) shared_scheduler_semaphore: Option<Arc<Semaphore>>,
     pub(crate) global_throttle: Arc<TokenBucket>,
     pub(crate) disk: DiskHandle,
-    pub(crate) runtime_update_tx: mpsc::Sender<TaskRuntimeUpdate>,
+    pub(crate) runtime_update_tx: mpsc::Sender<RunnerEvent>,
 }
 
 pub(crate) enum TaskPauseSink {
@@ -72,9 +71,9 @@ pub(crate) enum TaskDestinationSink {
     Http(Arc<Mutex<Option<PathBuf>>>),
 }
 
-pub(crate) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> ProviderCapabilities {
+pub(crate) fn capabilities(spec: &DownloadSpec, config: &EngineConfig) -> RunnerCapabilities {
     match &spec.source {
-        DownloadSource::Http { url, .. } => ProviderCapabilities {
+        DownloadSource::Http { url, .. } => RunnerCapabilities {
             shared_scheduler: Some(SharedSchedulerRequirement {
                 key: SchedulerKey::Hostname(host_from_url(url)),
                 limit: config.http.max_connections_per_server,
@@ -103,10 +102,10 @@ pub(crate) fn spawn_task(
     id: TransferId,
     spec: &DownloadSpec,
     pause_token: CancellationToken,
-    resume_data: Option<ProviderResumeData>,
-    runtime: ProviderRuntimeContext,
-) -> SpawnedTask {
-    let ProviderRuntimeContext {
+    resume_data: Option<RunnerResumeData>,
+    runtime: RunnerRuntimeContext,
+) -> SpawnedRunnerTask {
+    let RunnerRuntimeContext {
         shared_scheduler_semaphore,
         global_throttle,
         disk,
@@ -118,7 +117,7 @@ pub(crate) fn spawn_task(
             let destination_sink: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
             let resume_from = resume_data
                 .as_ref()
-                .and_then(ProviderResumeData::as_http)
+                .and_then(RunnerResumeData::as_http)
                 .map(|data| data.chunks.clone());
             let shared_scheduler_semaphore = shared_scheduler_semaphore
                 .expect("http downloads require a shared scheduler semaphore");
@@ -151,7 +150,7 @@ pub(crate) fn spawn_task(
                     .await;
                     // Keep final state behind the task's own runtime updates
                     let _ = ru_
-                        .send(TaskRuntimeUpdate::Done {
+                        .send(RunnerEvent::Done {
                             id,
                             status: final_state.status,
                             downloaded_bytes: final_state.downloaded_bytes,
@@ -161,7 +160,7 @@ pub(crate) fn spawn_task(
                     final_state
                 }
             });
-            SpawnedTask {
+            SpawnedRunnerTask {
                 handle,
                 pause_sink: TaskPauseSink::Http(pause_sink),
                 destination_sink: TaskDestinationSink::Http(destination_sink),
@@ -170,14 +169,14 @@ pub(crate) fn spawn_task(
     }
 }
 
-pub(crate) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<ProviderResumeData> {
+pub(crate) fn take_resume_data(pause_sink: TaskPauseSink) -> Option<RunnerResumeData> {
     match pause_sink {
         TaskPauseSink::Http(sink) => sink
             .lock()
             .unwrap()
             .take()
             .map(HttpResumeData::new)
-            .map(ProviderResumeData::Http),
+            .map(RunnerResumeData::Http),
     }
 }
 

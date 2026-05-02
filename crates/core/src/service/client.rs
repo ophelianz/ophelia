@@ -49,7 +49,7 @@ pub struct OpheliaSubscription {
 
 enum OpheliaSubscriptionInner {
     InProcess {
-        events: broadcast::Receiver<OpheliaEvent>,
+        updates: broadcast::Receiver<OpheliaUpdateBatch>,
     },
     #[cfg(target_os = "macos")]
     Mach { events: super::xpc::MachEventStream },
@@ -58,11 +58,11 @@ enum OpheliaSubscriptionInner {
 impl OpheliaSubscription {
     pub(super) fn in_process(
         snapshot: OpheliaSnapshot,
-        events: broadcast::Receiver<OpheliaEvent>,
+        updates: broadcast::Receiver<OpheliaUpdateBatch>,
     ) -> Self {
         Self {
             snapshot,
-            inner: OpheliaSubscriptionInner::InProcess { events },
+            inner: OpheliaSubscriptionInner::InProcess { updates },
         }
     }
 
@@ -74,10 +74,10 @@ impl OpheliaSubscription {
         }
     }
 
-    pub async fn next_event(&mut self) -> Result<OpheliaEvent, OpheliaError> {
+    pub async fn next_update(&mut self) -> Result<OpheliaUpdateBatch, OpheliaError> {
         match &mut self.inner {
-            OpheliaSubscriptionInner::InProcess { events } => {
-                events.recv().await.map_err(|error| match error {
+            OpheliaSubscriptionInner::InProcess { updates } => {
+                updates.recv().await.map_err(|error| match error {
                     broadcast::error::RecvError::Closed => OpheliaError::Closed,
                     broadcast::error::RecvError::Lagged(skipped) => {
                         OpheliaError::Lagged { skipped }
@@ -85,7 +85,7 @@ impl OpheliaSubscription {
                 })
             }
             #[cfg(target_os = "macos")]
-            OpheliaSubscriptionInner::Mach { events } => events.next_event().await,
+            OpheliaSubscriptionInner::Mach { events } => events.next_update().await,
         }
     }
 }
@@ -191,14 +191,14 @@ impl OpheliaClient {
 
     pub async fn service_info(&self) -> Result<OpheliaServiceInfo, OpheliaError> {
         match self.dispatch(OpheliaCommand::ServiceInfo).await? {
-            OpheliaResponse::ServiceInfo { info } => Ok(info),
+            OpheliaResponse::ServiceInfo { info } => Ok(*info),
             _ => Err(unexpected_response("service_info")),
         }
     }
 
     pub async fn snapshot(&self) -> Result<OpheliaSnapshot, OpheliaError> {
         match self.dispatch(OpheliaCommand::Snapshot).await? {
-            OpheliaResponse::Snapshot { snapshot } => Ok(snapshot),
+            OpheliaResponse::Snapshot { snapshot } => Ok(*snapshot),
             _ => Err(unexpected_response("snapshot")),
         }
     }
