@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use super::lock::{ServiceLock, service_lock_path};
 use super::read_model::{OpheliaReadModel, OpheliaUpdateBuilder};
 use super::transfer_runtime::{TransferRuntime, TransferRuntimeEvent};
@@ -359,6 +378,21 @@ impl OpheliaServiceRuntime {
 
     fn flush_coalesced_events(&mut self) {
         if let Some(batch) = self.update_builder.drain_batch() {
+            tracing::trace!(
+                lifecycle = batch.lifecycle.lifecycle_codes.len(),
+                progress_known = batch.progress_known_total.ids.len(),
+                progress_unknown = batch.progress_unknown_total.ids.len(),
+                physical_writes = batch.physical_write.ids.len(),
+                destinations = batch.destination.ids.len(),
+                control_support = batch.control_support.ids.len(),
+                direct_details = batch.direct_details.unsupported_ids.len()
+                    + batch.direct_details.loading_ids.len()
+                    + batch.direct_details.segment_ids.len(),
+                removals = batch.removal.ids.len(),
+                unsupported_controls = batch.unsupported_control.ids.len(),
+                settings_changed = batch.settings_changed.is_some(),
+                "flushing service update batch"
+            );
             let _ = self.update_tx.send(batch);
         }
     }

@@ -4317,6 +4317,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ophelia-perf"
+version = "0.1.0"
+dependencies = [
+ "anstyle",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ophelia-profiling"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "ophelia-service"
 version = "0.1.0"
 dependencies = [

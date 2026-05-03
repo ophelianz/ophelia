@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -359,8 +378,8 @@ pub struct TransferSummaryTable {
     pub ids: Vec<TransferId>,
     pub downloaded_bytes: Vec<u64>,
     pub speed_bytes_per_sec: Vec<u64>,
-    pub known_total_bytes: Vec<u64>,
-    pub known_total_rows: Vec<u32>,
+    pub total_bytes: Vec<u64>,
+    pub known_total_words: Vec<u64>,
     pub kind_codes: Vec<u8>,
     pub source_kind_codes: Vec<u8>,
     pub status_codes: Vec<u8>,
@@ -387,14 +406,12 @@ impl TransferSummaryTable {
         self.status_codes.push(transfer_status_code(summary.status));
         self.downloaded_bytes.push(summary.downloaded_bytes);
         self.speed_bytes_per_sec.push(summary.speed_bytes_per_sec);
+        self.total_bytes.push(summary.total_bytes.unwrap_or(0));
         self.control_flags
             .push(control_support_flags(summary.control_support));
         self.source_labels.push(summary.source_label);
         self.destinations.push(summary.destination);
-        if let Some(total) = summary.total_bytes {
-            self.known_total_rows.push(row as u32);
-            self.known_total_bytes.push(total);
-        }
+        self.set_total_known(row, summary.total_bytes.is_some());
     }
 
     pub fn replace_summary(&mut self, row: usize, summary: TransferSummary) {
@@ -414,36 +431,30 @@ impl TransferSummaryTable {
     }
 
     pub fn remove_row(&mut self, row: usize) {
+        let old_len = self.len();
+        let mut known_total_words = Vec::with_capacity(total_word_len(old_len.saturating_sub(1)));
+        let mut next_row = 0;
+        for old_row in 0..old_len {
+            if old_row == row {
+                continue;
+            }
+            if self.has_total(old_row) {
+                set_total_bit(&mut known_total_words, next_row, true);
+            }
+            next_row += 1;
+        }
+
         self.ids.remove(row);
         self.kind_codes.remove(row);
         self.source_kind_codes.remove(row);
         self.status_codes.remove(row);
         self.downloaded_bytes.remove(row);
         self.speed_bytes_per_sec.remove(row);
+        self.total_bytes.remove(row);
         self.control_flags.remove(row);
         self.source_labels.remove(row);
         self.destinations.remove(row);
-        let mut next_rows = Vec::with_capacity(self.known_total_rows.len());
-        let mut next_totals = Vec::with_capacity(self.known_total_bytes.len());
-        for (&known_row, &total) in self
-            .known_total_rows
-            .iter()
-            .zip(self.known_total_bytes.iter())
-        {
-            let known_row = known_row as usize;
-            if known_row == row {
-                continue;
-            }
-            let adjusted = if known_row > row {
-                known_row - 1
-            } else {
-                known_row
-            };
-            next_rows.push(adjusted as u32);
-            next_totals.push(total);
-        }
-        self.known_total_rows = next_rows;
-        self.known_total_bytes = next_totals;
+        self.known_total_words = known_total_words;
     }
 
     pub fn summary(&self, row: usize) -> Option<TransferSummary> {
@@ -468,32 +479,55 @@ impl TransferSummaryTable {
     }
 
     pub fn total_bytes(&self, row: usize) -> Option<u64> {
-        self.known_total_rows
-            .iter()
-            .position(|known_row| *known_row as usize == row)
-            .map(|index| self.known_total_bytes[index])
+        self.has_total(row).then(|| self.total_bytes[row])
     }
 
     pub fn set_total(&mut self, row: usize, total: Option<u64>) {
-        match (
-            self.known_total_rows
-                .iter()
-                .position(|known_row| *known_row as usize == row),
-            total,
-        ) {
-            (Some(index), Some(total)) => {
-                self.known_total_bytes[index] = total;
-            }
-            (Some(index), None) => {
-                self.known_total_rows.remove(index);
-                self.known_total_bytes.remove(index);
-            }
-            (None, Some(total)) => {
-                self.known_total_rows.push(row as u32);
-                self.known_total_bytes.push(total);
-            }
-            (None, None) => {}
+        if row >= self.len() {
+            return;
         }
+        match total {
+            Some(total) => {
+                self.total_bytes[row] = total;
+                self.set_total_known(row, true);
+            }
+            None => {
+                self.total_bytes[row] = 0;
+                self.set_total_known(row, false);
+            }
+        }
+    }
+
+    fn has_total(&self, row: usize) -> bool {
+        if row >= self.len() {
+            return false;
+        }
+        let word = row / u64::BITS as usize;
+        let bit = row % u64::BITS as usize;
+        self.known_total_words
+            .get(word)
+            .is_some_and(|word| word & (1u64 << bit) != 0)
+    }
+
+    fn set_total_known(&mut self, row: usize, known: bool) {
+        set_total_bit(&mut self.known_total_words, row, known);
+    }
+}
+
+fn total_word_len(rows: usize) -> usize {
+    rows.div_ceil(u64::BITS as usize)
+}
+
+fn set_total_bit(words: &mut Vec<u64>, row: usize, known: bool) {
+    let word = row / u64::BITS as usize;
+    let bit = row % u64::BITS as usize;
+    if words.len() <= word {
+        words.resize(word + 1, 0);
+    }
+    if known {
+        words[word] |= 1u64 << bit;
+    } else {
+        words[word] &= !(1u64 << bit);
     }
 }
 

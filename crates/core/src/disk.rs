@@ -2,6 +2,19 @@
 ** This file is part of Ophelia.
 ** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
 ** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
 **************************************************/
 
 //! Service-owned disk sessions, writes, finalize, and artifact cleanup
@@ -601,17 +614,31 @@ where
     match write_all_at(file, &job.bytes, job.offset) {
         Ok(()) => {
             lease.record_physical(range.len());
+            tracing::trace!(
+                session = ?job.session,
+                bytes = range.len(),
+                offset = job.offset,
+                "disk write confirmed"
+            );
             DiskWriteResult::Written {
                 session: job.session,
                 owner: job.owner,
                 range,
             }
         }
-        Err(error) => DiskWriteResult::Failed {
-            session: job.session,
-            owner: job.owner,
-            failure: failure_from_io(error),
-        },
+        Err(error) => {
+            tracing::trace!(
+                session = ?job.session,
+                offset = job.offset,
+                error = %error,
+                "disk write failed"
+            );
+            DiskWriteResult::Failed {
+                session: job.session,
+                owner: job.owner,
+                failure: failure_from_io(error),
+            }
+        }
     }
 }
 

@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use std::path::PathBuf;
 
 use crate::config::{CollisionPolicy, HttpOrderingMode, ServiceDestinationRule, ServiceSettings};
@@ -35,7 +54,9 @@ pub(super) fn command_to_body(command: &OpheliaCommandEnvelope) -> Result<Vec<u8
     writer.u16(CODEC_VERSION);
     writer.u64(command.id);
     writer.command(&command.command)?;
-    Ok(writer.finish())
+    let bytes = writer.finish();
+    tracing::trace!(bytes = bytes.len(), "encoded service command body");
+    Ok(bytes)
 }
 
 pub(super) fn frame_to_body(frame: &OpheliaFrameEnvelope) -> Result<Vec<u8>, OpheliaError> {
@@ -57,7 +78,9 @@ pub(super) fn frame_to_body(frame: &OpheliaFrameEnvelope) -> Result<Vec<u8>, Oph
             writer.update_batch(update)?;
         }
     }
-    Ok(writer.finish())
+    let bytes = writer.finish();
+    tracing::trace!(bytes = bytes.len(), "encoded service frame body");
+    Ok(bytes)
 }
 
 pub(super) fn command_from_body(body: &[u8]) -> Result<OpheliaCommandEnvelope, OpheliaError> {
@@ -66,6 +89,7 @@ pub(super) fn command_from_body(body: &[u8]) -> Result<OpheliaCommandEnvelope, O
     let id = reader.u64()?;
     let command = reader.command()?;
     reader.finish()?;
+    tracing::trace!(bytes = body.len(), "decoded service command body");
     Ok(OpheliaCommandEnvelope { id, command })
 }
 
@@ -99,6 +123,7 @@ pub(super) fn frame_from_body(body: &[u8]) -> Result<OpheliaFrameEnvelope, Ophel
         }
     };
     reader.finish()?;
+    tracing::trace!(bytes = body.len(), "decoded service frame body");
     Ok(frame)
 }
 
@@ -452,8 +477,8 @@ impl CodecWriter {
         self.transfer_ids(&table.ids)?;
         self.u64s(&table.downloaded_bytes)?;
         self.u64s(&table.speed_bytes_per_sec)?;
-        self.u64s(&table.known_total_bytes)?;
-        self.u32s(&table.known_total_rows)?;
+        self.u64s(&table.total_bytes)?;
+        self.u64s(&table.known_total_words)?;
         self.bytes(&table.kind_codes)?;
         self.bytes(&table.source_kind_codes)?;
         self.bytes(&table.status_codes)?;
@@ -946,8 +971,8 @@ impl<'a> CodecReader<'a> {
             ids: self.transfer_ids()?,
             downloaded_bytes: self.u64s()?,
             speed_bytes_per_sec: self.u64s()?,
-            known_total_bytes: self.u64s()?,
-            known_total_rows: self.u32s()?,
+            total_bytes: self.u64s()?,
+            known_total_words: self.u64s()?,
             kind_codes: self.bytes()?,
             source_kind_codes: self.bytes()?,
             status_codes: self.bytes()?,

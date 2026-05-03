@@ -1,4 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cli", "crates/gui", "crates/service"]
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/gui",
+    "crates/service",
+    "tooling/perf",
+    "tooling/profiling",
+]
 default-members = ["crates/gui"]
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
