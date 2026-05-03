@@ -685,6 +685,24 @@ mod tests {
     }
 
     #[test]
+    fn startup_context_uses_dev_launchctl_for_oph_alias_binary() {
+        let context = StartupContext::resolve_from(
+            None,
+            None,
+            Some(PathBuf::from("/repo/target/debug/oph")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context,
+            StartupContext::DevLaunchctl {
+                service_binary: PathBuf::from("/repo/target/debug/oph"),
+            }
+        );
+    }
+
+    #[test]
     fn startup_context_allows_dev_launchctl_only_with_explicit_mode() {
         let context = StartupContext::resolve_from(
             None,

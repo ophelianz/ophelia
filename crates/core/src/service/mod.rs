@@ -73,6 +73,16 @@ pub use lock::service_lock_path;
 #[cfg(target_os = "macos")]
 pub use xpc::{MachServiceListener, run_mach_service};
 
+#[cfg(target_os = "macos")]
+pub fn run_default_profile_mach_service(runtime: &Handle) -> Result<(), OpheliaError> {
+    let paths = ProfilePaths::default_profile();
+    let service = OpheliaService::start(runtime, paths)?;
+    let _listener = run_mach_service(runtime, service.client())?;
+    tracing::info!(service = OPHELIA_MACH_SERVICE_NAME, "Ophelia service ready");
+    runtime.block_on(service.wait());
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRequest {
     pub source: TransferRequestSource,

@@ -30,6 +30,58 @@ use ophelia::service::{
     TransferRequestSource,
 };
 
+#[cfg(target_os = "macos")]
+pub fn run_development_service_if_requested() -> Option<ExitCode> {
+    std::env::var_os(ophelia::service::OPHELIA_RUN_SERVICE_ENV)?;
+    Some(run_development_service())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_development_service_if_requested() -> Option<ExitCode> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn run_development_service() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start Tokio runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match ophelia::service::run_default_profile_mach_service(runtime.handle()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("failed to run Ophelia service: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub fn main_entry_blocking() -> ExitCode {
+    if let Some(code) = run_development_service_if_requested() {
+        return code;
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start Tokio runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    runtime.block_on(main_entry())
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "ophelia")]
 #[command(version, about = "Talk to a running Ophelia service")]
