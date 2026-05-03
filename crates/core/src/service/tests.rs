@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use super::codec::{
     OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_from_body, command_to_body,
     frame_from_body, frame_to_body,
@@ -69,6 +88,53 @@ fn test_snapshot(id: TransferId, status: TransferStatus) -> TransferSummary {
         speed_bytes_per_sec: 0,
         control_support: TransferControlSupport::all(),
     }
+}
+
+#[test]
+fn transfer_summary_table_stores_known_totals_as_dense_bits() {
+    let mut table = TransferSummaryTable::default();
+    let mut unknown = test_snapshot(TransferId(2), TransferStatus::Downloading);
+    unknown.total_bytes = None;
+
+    table.push_summary(test_snapshot(TransferId(1), TransferStatus::Downloading));
+    table.push_summary(unknown);
+    table.push_summary(test_snapshot(TransferId(3), TransferStatus::Downloading));
+
+    assert_eq!(table.total_bytes(0), Some(100));
+    assert_eq!(table.total_bytes(1), None);
+    assert_eq!(table.total_bytes(2), Some(100));
+    assert_eq!(table.total_bytes, vec![100, 0, 100]);
+    assert_eq!(table.known_total_words[0] & 0b111, 0b101);
+
+    table.set_total(1, Some(200));
+    assert_eq!(table.total_bytes(1), Some(200));
+    assert_eq!(table.known_total_words[0] & 0b111, 0b111);
+
+    table.set_total(0, None);
+    assert_eq!(table.total_bytes(0), None);
+    assert_eq!(table.total_bytes[0], 0);
+    assert_eq!(table.known_total_words[0] & 0b111, 0b110);
+}
+
+#[test]
+fn transfer_summary_table_remove_row_preserves_total_membership() {
+    let mut table = TransferSummaryTable::default();
+    for id in 0..4 {
+        let mut snapshot = test_snapshot(TransferId(id), TransferStatus::Downloading);
+        if id == 1 {
+            snapshot.total_bytes = None;
+        } else {
+            snapshot.total_bytes = Some(100 + id);
+        }
+        table.push_summary(snapshot);
+    }
+
+    table.remove_row(1);
+
+    assert_eq!(table.total_bytes(0), Some(100));
+    assert_eq!(table.total_bytes(1), Some(102));
+    assert_eq!(table.total_bytes(2), Some(103));
+    assert_eq!(table.known_total_words[0] & 0b111, 0b111);
 }
 
 #[test]

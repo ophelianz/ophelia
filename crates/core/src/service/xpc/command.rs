@@ -1,6 +1,25 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use super::ffi::{
-    XpcConnection, XpcObjectRaw, frame_from_xpc_event, message_from_body, xpc_connection_activate,
-    xpc_connection_send_message_with_reply, xpc_connection_set_event_handler,
+    ManagedXpcConnection, XpcObjectRaw, activate_connection, frame_from_xpc_event,
+    install_event_handler, message_from_body, xpc_connection_send_message_with_reply,
 };
 use crate::service::codec::{
     OpheliaCommandEnvelope, OpheliaFrameEnvelope, command_to_body, unexpected_xpc_frame,
@@ -27,12 +46,11 @@ fn dispatch_mach_blocking(
     id: u64,
     command: OpheliaCommand,
 ) -> Result<OpheliaResponse, OpheliaError> {
-    let connection = XpcConnection::connect_client()?;
+    tracing::trace!(id, command = ?command, "dispatching Mach command");
+    let connection = ManagedXpcConnection::connect_client()?;
     let noop = RcBlock::new(|_event: XpcObjectRaw| {});
-    unsafe {
-        xpc_connection_set_event_handler(connection.raw(), &noop);
-        xpc_connection_activate(connection.raw());
-    }
+    let _installed = install_event_handler(connection.handle(), &noop);
+    activate_connection(connection.handle());
 
     let command = OpheliaCommandEnvelope { id, command };
     let message = message_from_body(&command_to_body(&command)?)?;
@@ -42,7 +60,7 @@ fn dispatch_mach_blocking(
     });
     unsafe {
         xpc_connection_send_message_with_reply(
-            connection.raw(),
+            connection.handle().raw(),
             message.raw(),
             ptr::null_mut(),
             &reply_handler,
@@ -52,7 +70,7 @@ fn dispatch_mach_blocking(
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| OpheliaError::Closed)??;
 
-    match frame {
+    let response = match frame {
         OpheliaFrameEnvelope::Response {
             id: frame_id,
             response,
@@ -62,7 +80,13 @@ fn dispatch_mach_blocking(
             error,
         } if frame_id == id => Err(error),
         frame => Err(unexpected_xpc_frame("response", frame)),
-    }
+    };
+    tracing::trace!(
+        id,
+        success = response.is_ok(),
+        "received Mach command response"
+    );
+    response
 }
 
 struct BlockingCommandPool {

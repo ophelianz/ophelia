@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use super::*;
 use objc2_foundation::{NSError, NSString};
 use objc2_service_management::{
@@ -661,6 +680,24 @@ mod tests {
             context,
             StartupContext::DevLaunchctl {
                 service_binary: PathBuf::from("/repo/target/debug/ophelia"),
+            }
+        );
+    }
+
+    #[test]
+    fn startup_context_uses_dev_launchctl_for_oph_alias_binary() {
+        let context = StartupContext::resolve_from(
+            None,
+            None,
+            Some(PathBuf::from("/repo/target/debug/oph")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context,
+            StartupContext::DevLaunchctl {
+                service_binary: PathBuf::from("/repo/target/debug/oph"),
             }
         );
     }

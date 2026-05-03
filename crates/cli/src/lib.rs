@@ -1,3 +1,22 @@
+/***************************************************
+** This file is part of Ophelia.
+** Copyright © 2026 Viktor Luna <viktor@hystericca.dev>
+** Released under the GPL License, version 3 or later.
+**
+** If you found a weird little bug in here, tell the cat:
+** viktor@hystericca.dev
+**
+**   ⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜⏜
+** ( bugs behave plz, we're all trying our best )
+**   ⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝
+**   ○
+**     ○
+**       ／l、
+**     （ﾟ､ ｡ ７
+**       l  ~ヽ
+**       じしf_,)ノ
+**************************************************/
+
 use std::fmt;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -10,6 +29,58 @@ use ophelia::service::{
     OpheliaInstallKind, OpheliaServiceInfo, TransferDestination, TransferRequest,
     TransferRequestSource,
 };
+
+#[cfg(target_os = "macos")]
+pub fn run_development_service_if_requested() -> Option<ExitCode> {
+    std::env::var_os(ophelia::service::OPHELIA_RUN_SERVICE_ENV)?;
+    Some(run_development_service())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_development_service_if_requested() -> Option<ExitCode> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn run_development_service() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start Tokio runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match ophelia::service::run_default_profile_mach_service(runtime.handle()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("failed to run Ophelia service: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub fn main_entry_blocking() -> ExitCode {
+    if let Some(code) = run_development_service_if_requested() {
+        return code;
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start Tokio runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    runtime.block_on(main_entry())
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "ophelia")]

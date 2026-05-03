@@ -16,3 +16,4 @@ package/inno/Output/*.exe
 .ropeproject
 *.html
 docs/
+.perf-runs/
