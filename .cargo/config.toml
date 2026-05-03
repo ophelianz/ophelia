@@ -1,0 +1,13 @@
+[alias]
+bench-core = "bench -p ophelia --profile profiling"
+bench-http = "bench -p ophelia --profile profiling --bench http_range_data"
+bench-session = "bench -p ophelia --profile profiling --bench session_events"
+bench-disk = "bench -p ophelia --profile profiling --bench disk_data"
+bench-codec = "bench -p ophelia --profile profiling --bench service_codec_data"
+bench-no-run = "bench -p ophelia --profile profiling --no-run"
+perf-service-updates = ["test", "-p", "ophelia", "--profile", "profiling", "--test", "service_updates_perf", "--config", "target.'cfg(true)'.runner='cargo run -p ophelia-perf --release --'"]
+perf-compare = ["run", "-p", "ophelia-perf", "--release", "--", "compare"]
+perf-criterion-baseline = ["run", "-p", "ophelia-perf", "--release", "--", "criterion", "baseline"]
+perf-criterion-compare = ["run", "-p", "ophelia-perf", "--release", "--", "criterion", "compare"]
+profile-bench = ["run", "-p", "ophelia-profiling", "--release", "--", "bench"]
+profile-service = ["run", "-p", "ophelia-profiling", "--release", "--", "service-smoke"]
